@@ -1,1 +1,13 @@
-target/
+# Rust build artifacts
+/target/
+
+# Test / run outputs
+test_out.txt
+run_out.txt
+build_out.txt
+build_err.txt
+sim_out.csv
+
+# Editor / OS
+.vscode/
+.DS_Store
