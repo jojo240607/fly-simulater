@@ -2,9 +2,12 @@
 //!
 //! 当前实现 SIL 模式：物理引擎在 PC，控制律经 `FlyController`(`HilContext`) 在 PC。
 //! HIL 模式（接真实飞控 USB）见 DESIGN.md §9，后续在 `hil_link.rs` 扩展。
+//!
+//! 日志机制：核心只产出 `LogRow`（纯数据），通过 `on_step` 回调交给 runner 决定
+//! 如何存储（CSV / 内存 / 可视化）。核心不碰任何文件系统 I/O。
 
 use flyctrl_core::invariants;
-use flyctrl_core::vehicle::VehicleState;
+use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
 
 use crate::controller::{hover_setpoint, FlyController};
 use crate::physics::RigidBodyWorld;
@@ -12,15 +15,18 @@ use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
 use crate::sensor::SensorConfig;
 use crate::controller::ControllerKind;
-use crate::log::{CsvLogger, LogRow};
+use crate::log::LogRow;
 
 pub struct SimLoop<W> {
     ctrl: FlyController<W>,
     cfg: VehicleConfig,
     dt: f64,
     steps: u64,
-    /// 阶段 6：可选 CSV 记录器（None=不写）。
-    logger: Option<CsvLogger>,
+    /// 阶段 6：可选每帧回调（runner 注入，用于 CSV/可视化）。None=不记录。
+    on_step: Option<Box<dyn FnMut(&LogRow)>>,
+    /// 阶段 7：可选逐物理步回调（runner 注入，用于实时可视化采样）。
+    /// 传世界真值（NED）与最近控制指令，由渲染器做坐标映射。
+    on_frame: Option<Box<dyn FnMut(&VehicleState, ActuatorCmd)>>,
     /// 阶段 6：机械能监测（无风无推力时机械能应单调衰减）。
     energy_prev: Option<f64>,
     energy_monotonic: bool,
@@ -43,18 +49,22 @@ where
             cfg: cfg.clone(),
             dt,
             steps: 0,
-            logger: None,
+            on_step: None,
+            on_frame: None,
             energy_prev: None,
             energy_monotonic: true,
         }
     }
 
-    /// 阶段 6：开启 CSV 日志（每帧追加一行）。
-    pub fn enable_log(&mut self, path: &str) {
-        match CsvLogger::new(path) {
-            Ok(l) => self.logger = Some(l),
-            Err(e) => eprintln!("[sim] 无法创建日志 {}: {}", path, e),
-        }
+    /// 阶段 6：设置每帧回调（runner 侧注入 CSV 写出 / 可视化等）。
+    pub fn set_on_step(&mut self, cb: Box<dyn FnMut(&LogRow)>) {
+        self.on_step = Some(cb);
+    }
+
+    /// 阶段 7：设置逐物理步回调（runner 侧注入实时可视化采样）。
+    /// 每个物理步触发一次，传入世界真值（NED）与最近控制指令。
+    pub fn set_on_frame(&mut self, cb: Box<dyn FnMut(&VehicleState, ActuatorCmd)>) {
+        self.on_frame = Some(cb);
     }
 
     /// 阶段 6：被控对象真实机械能（动能 + 重力势能，NED）。
@@ -80,8 +90,13 @@ where
             let st = self.ctrl.step(&sp);
             self.steps += 1;
 
-            // 阶段 6：CSV 日志（真值 + 估计 + 指令 + IMU）。
-            if let Some(ref mut lg) = self.logger {
+            // 阶段 7：逐物理步回调（实时可视化采样）。
+            if let Some(ref mut cb) = self.on_frame {
+                cb(&self.ctrl.world_state(), self.ctrl.last_cmd());
+            }
+
+            // 阶段 6：每帧回调（runner 决定如何存储/展示）。
+            if let Some(ref mut cb) = self.on_step {
                 let w = self.ctrl.world_state();
                 let row = LogRow {
                     step: self.steps,
@@ -91,7 +106,7 @@ where
                     cmd: self.ctrl.last_cmd(),
                     imu: self.ctrl.last_imu(),
                 };
-                let _ = lg.write(&row);
+                cb(&row);
             }
 
             // 阶段 6：能量守恒校验（无风场景，机械能应单调衰减）。
@@ -135,10 +150,6 @@ where
             }
         }
 
-        // 阶段 6：日志刷盘 + 能量报告。
-        if let Some(ref mut lg) = self.logger {
-            let _ = lg.flush();
-        }
         // 悬停场景下螺旋桨持续做正功，机械能非单调是物理正确的（并非守恒系统），
         // 因此仅作信息性报告，不当作失败。真正能量守恒校验适用于"无推力自由衰减"场景。
         if !self.energy_monotonic {
@@ -186,6 +197,11 @@ where
         for _ in 0..total {
             let st = self.ctrl.step(&sp);
             self.steps += 1;
+
+            // 阶段 7：逐物理步回调（实时可视化采样）。
+            if let Some(ref mut cb) = self.on_frame {
+                cb(&self.ctrl.world_state(), self.ctrl.last_cmd());
+            }
 
             let end = self.ctrl.world_state();
             let dz = (end.pos[2].0 - (-5.0)).abs() as f64;

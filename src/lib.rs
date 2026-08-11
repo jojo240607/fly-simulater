@@ -1,15 +1,15 @@
-//! 四旋翼 SIL/HIL 仿真库。
+//! `fly-simulater`：仿真 runner（薄壳）。
 //!
-//! 把仿真层作为库暴露，使集成测试（`tests/`）能直接 `use fly_simulater::...` 验证
-//! 公共接口（含物理引擎抽象 `physics` 与可替换的 `ToyWorld` 替身）。二进制入口
-//! `main.rs` 复用本库。
+//! 只装 runner 特有内容：机架加载（`airframe`）、CSV 日志写出（`log`）、CLI（`main`）。
+//! 仿真内核全部来自 `fly-sim-core` 库 crate。
 
-pub mod phy_ffi;
-pub mod physics;
-pub mod plant;
-pub mod controller;
-pub mod sim;
 pub mod airframe;
-pub mod wind;
-pub mod sensor;
 pub mod log;
+pub mod view;
+
+// 再导出仿真内核常用类型，方便 runner 与测试直接引用。
+pub use fly_sim_core::{
+    ControllerKind, LogRow, PhySdkWorld, RigidBodyWorld, RigidTransform, SensorConfig, SimLoop,
+    ToyWorld, WindConfig, WindField, WindVec,
+};
+pub use fly_sim_core::{RealFlyController, QuadrotorPlant, FlyController};

@@ -1,64 +1,79 @@
-//! 阶段 6：CSV 日志与回放。
+//! 阶段 6：CSV 日志写出（runner 侧 I/O，依赖 `fly-sim-core` 的 `LogRow` 纯数据）。
 //!
-//! 把每帧真值(NED)/估计(NED)/指令(CMD)/IMU 写入 CSV，供复现、回归与控制器量化对比。
-//! 格式：逗号分隔，首行表头。所有量单位明确（m / m/s / rad / s / 归一化油门）。
+//! 序列化逻辑放在 runner（bin）侧，核心只产出 `LogRow`。这样核心保持纯计算，
+//! 不被任何文件/格式绑定。
 
+use fly_sim_core::LogRow;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, VehicleState};
+/// CSV 表头（28 列，与 `LogRow` 字段一一对应）。
+pub const LOG_HEADER: &str =
+    "step,t,\
+     true_n,true_e,true_d,true_vn,true_ve,true_vd,true_qw,true_qx,true_qy,true_qz,true_wx,true_wy,true_wz,\
+     est_n,est_e,est_d,est_vn,est_ve,est_vd,est_qw,est_qx,est_qy,est_qz,est_wx,est_wy,est_wz,\
+     m0,m1,m2,m3,\
+     imu_ax,imu_ay,imu_az,imu_gx,imu_gy,imu_gz";
 
-/// 单帧日志条目（阶段 6 字段全集）。
-pub struct LogRow {
-    pub step: u64,
-    pub t: f64,
-    pub true_state: VehicleState, // 物理引擎真值（NED）
-    pub est_state: VehicleState,  // 估计器输出（NED）
-    pub cmd: ActuatorCmd,
-    pub imu: ImuSample,
-}
-
-/// 轻量 CSV 记录器（带表头，缓冲刷盘）。
+/// CSV 写出器（行缓冲，析构自动 flush）。
 pub struct CsvLogger {
-    file: File,
+    w: BufWriter<File>,
+    ok: bool,
 }
 
 impl CsvLogger {
-    const HEADER: &'static str = "step,t,true_n,true_e,true_d,est_n,est_e,est_d,\
-vx,vy,vz,attw,attx,atty,attz,omg_p,omg_q,omg_r,\
-cmd0,cmd1,cmd2,cmd3,accelx,accely,accelz,gyrox,gyroy,gyroz";
-
     pub fn new<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        let mut file = File::create(path)?;
-        writeln!(file, "{}", Self::HEADER)?;
-        Ok(Self { file })
+        let f = File::create(path)?;
+        let mut w = BufWriter::new(f);
+        writeln!(w, "{}", LOG_HEADER)?;
+        Ok(Self { w, ok: true })
     }
 
-    pub fn write(&mut self, r: &LogRow) -> std::io::Result<()> {
-        let ts = &r.true_state;
-        let es = &r.est_state;
-        let c = r.cmd.motor;
-        let a = r.imu.accel;
-        let g = r.imu.gyro;
+    /// 写入一帧 `LogRow`。
+    pub fn write(&mut self, row: &LogRow) -> std::io::Result<()> {
+        if !self.ok {
+            return Ok(());
+        }
+        let t = &row.true_state;
+        let e = &row.est_state;
+        let c = &row.cmd;
+        let imu = &row.imu;
+        let line = format!(
+            "{}", row.step
+        );
+        // 用 writeln 拼字段避免长 format 串出错；直接逐字段写更清晰。
+        let _ = line;
         writeln!(
-            self.file,
-            "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
-            r.step,
-            r.t,
-            ts.pos[0].0, ts.pos[1].0, ts.pos[2].0,
-            es.pos[0].0, es.pos[1].0, es.pos[2].0,
-            ts.vel[0].0, ts.vel[1].0, ts.vel[2].0,
-            ts.att.w, ts.att.x, ts.att.y, ts.att.z,
-            ts.omega[0].0, ts.omega[1].0, ts.omega[2].0,
-            c[0], c[1], c[2], c[3],
-            a[0].0, a[1].0, a[2].0,
-            g[0].0, g[1].0, g[2].0,
-        )
+            self.w,
+            "{},{:.6},\
+             {:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},\
+             {:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},\
+             {:.6},{:.6},{:.6},{:.6},\
+             {:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+            row.step, row.t,
+            t.pos[0].0, t.pos[1].0, t.pos[2].0,
+            t.vel[0].0, t.vel[1].0, t.vel[2].0,
+            t.att.w, t.att.x, t.att.y, t.att.z,
+            t.omega[0].0, t.omega[1].0, t.omega[2].0,
+            e.pos[0].0, e.pos[1].0, e.pos[2].0,
+            e.vel[0].0, e.vel[1].0, e.vel[2].0,
+            e.att.w, e.att.x, e.att.y, e.att.z,
+            e.omega[0].0, e.omega[1].0, e.omega[2].0,
+            c.motor[0], c.motor[1], c.motor[2], c.motor[3],
+            imu.accel[0].0, imu.accel[1].0, imu.accel[2].0,
+            imu.gyro[0].0, imu.gyro[1].0, imu.gyro[2].0,
+        )?;
+        Ok(())
     }
 
-    /// 强制刷盘（场景结束调用，避免进程退出丢失尾部缓冲）。
-    pub fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
+    pub fn flush(&mut self) {
+        let _ = self.w.flush();
+    }
+}
+
+impl Drop for CsvLogger {
+    fn drop(&mut self) {
+        self.flush();
     }
 }

@@ -14,12 +14,12 @@ use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond,
 use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, PosSample, VehicleState};
 
 use crate::plant::QuadrotorPlant;
-use crate::physics::{RigidBodyWorld, PhyFfiWorld};
+use crate::physics::{RigidBodyWorld, PhySdkWorld};
 use crate::wind::WindField;
 use crate::sensor::SensorConfig;
 
-/// 生产路径便捷别名：用真实 C 物理引擎的控制器。
-pub type RealFlyController = FlyController<PhyFfiWorld>;
+/// 生产路径便捷别名：用真实物理引擎（phy-sdk）的控制器。
+pub type RealFlyController = FlyController<PhySdkWorld>;
 
 /// 测试/调试便捷：返回四路满油门（归一化 1.0）执行器指令。
 pub fn actuator_full() -> ActuatorCmd {

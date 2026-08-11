@@ -1,4 +1,4 @@
-//! 被控对象：把物理引擎（`phy_ffi` 预编译库）接入飞控闭环。
+//! 被控对象：把物理引擎接入飞控闭环。
 //!
 //! 职责：
 //! 1. 持有物理引擎世界句柄，index 0 = 四旋翼机体刚体。
@@ -8,12 +8,10 @@
 //!    - 机体气动阻力：型阻（0.5·ρ·Cd·|v|·v，三轴）+ 诱导阻力（随前飞速度，
 //!      悬停≈0，前飞→k·T 沿 -Z），在机体坐标系施加。
 //!    - 地面效应：近地（h < 1.5×桨径）推力增益 +30%。
-//!    经 FFI `apply_force`/`apply_torque` 注入（半隐式欧拉，step 前每帧一次）。
+//!    经 `apply_impulse`/`apply_torque_impulse` 注入（半隐式欧拉，step 前每帧一次）。
 //! 3. 坐标桥接：物理引擎是 Y-up 世界系 / 机体(前-右-上)，飞控是 NED 世界系 /
-//!    机体(前-右-下)。所有轴映射只在 `plant` 边界发生（见 `coord` 模块）。
+//!    机体(前-右-下)。所有轴映射只在 `plant` 边界发生。
 //! 4. `read_sensors`：由刚体真值生成 `ImuSample`/`PosSample`（NED 语义）喂飞控。
-
-use std::os::raw::c_double;
 
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::vehicle::{
@@ -240,8 +238,19 @@ where
         let f_world_tot = rotate_by_quat(q, f_body_tot);
         let tau_world = rotate_by_quat(q, tau_body);
 
-        self.world.apply_force(self.body_id, &f_world_tot, self.dt, 0);
-        self.world.apply_torque(self.body_id, &tau_world, self.dt, 0);
+        // impulse 模型：把每帧"力 × dt"化为线冲量，"力矩 × dt"化为角冲量注入。
+        let f_impulse = [
+            f_world_tot[0] * self.dt,
+            f_world_tot[1] * self.dt,
+            f_world_tot[2] * self.dt,
+        ];
+        let tau_impulse = [
+            tau_world[0] * self.dt,
+            tau_world[1] * self.dt,
+            tau_world[2] * self.dt,
+        ];
+        self.world.apply_impulse(self.body_id, &f_impulse, 0);
+        self.world.apply_torque_impulse(self.body_id, &tau_impulse, 0);
 
         // ---- 步进物理引擎 ----
         let rc = self.world.step(self.dt);
@@ -407,7 +416,3 @@ fn rotate_by_quat_conj(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
         r20 * v[0] + r21 * v[1] + r22 * v[2],
     ]
 }
-
-// 抑制未使用告警：c_double 仅用于明确 ABI 宽度。
-#[allow(dead_code)]
-fn _assert_c_double(_: c_double) {}

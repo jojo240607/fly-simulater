@@ -3,13 +3,14 @@
 //! 当前：`fly-simulater run --hover` 跑 SIL 悬停场景（物理引擎 FFI + flyctrl-core 控制律）。
 //! 后续：HIL 模式经 USB CDC 接真实飞控（见 DESIGN.md §9）。
 
+use fly_sim_core::controller::ControllerKind;
+use fly_sim_core::physics::PhySdkWorld;
+use fly_sim_core::sensor;
+use fly_sim_core::sim;
+use fly_sim_core::wind;
 use fly_simulater::airframe;
-use fly_simulater::controller::ControllerKind;
-use fly_simulater::physics::PhyFfiWorld;
-use fly_simulater::phy_ffi::phy_ffi_abi_version;
-use fly_simulater::sensor;
-use fly_simulater::sim;
-use fly_simulater::wind;
+use fly_simulater::log::CsvLogger;
+use fly_simulater::view;
 
 /// CLI 解析结果。
 struct Cli {
@@ -19,6 +20,7 @@ struct Cli {
     controller: ControllerKind,
     fail_motor: Option<u8>, // 阶段 5：电机故障注入（0..3）
     log_path: Option<String>, // 阶段 6：CSV 日志输出路径
+    view: bool,             // 阶段 7：实时 3D 可视化
 }
 
 impl Cli {
@@ -45,6 +47,7 @@ fn parse_args() -> Cli {
         controller: ControllerKind::Pid,
         fail_motor: None,
         log_path: None,
+        view: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -98,6 +101,9 @@ fn parse_args() -> Cli {
                     std::process::exit(2);
                 }
             }
+            "--view" => {
+                cli.view = true;
+            }
             "--help" | "-h" => {
                 println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind] [--controller pid|indi|lqr] [--fail-motor 0..3] [--sensor-noise] [--log <path.csv>]");
                 println!("  --airframe      外部机架 TOML（缺省用内置 default_quad）");
@@ -118,10 +124,8 @@ fn parse_args() -> Cli {
 }
 
 fn main() {
-    // 1. 核对物理引擎 ABI 版本（期望 >= 2，含刚体单实例操控符号）。
-    let abi = unsafe { phy_ffi_abi_version() };
-    println!("[main] phy_ffi ABI version = {}", abi);
-    assert!(abi >= 2, "物理引擎库过旧，需要 ABI >= 2（含 per-body FFI）");
+    // 1. 物理引擎以 Rust 源码级依赖（phy-sdk rlib）接入，无 C-ABI / ABI 版本检查。
+    println!("[main] 物理引擎: phy-sdk (Rust rlib, 源码级依赖)");
 
     // 2. 解析 CLI + 加载机架（外部 TOML 或内置默认，阶段 0）。
     let cli = parse_args();
@@ -155,21 +159,47 @@ fn main() {
     } else {
         sensor::SensorConfig::default()
     };
-    let mut loop_sim = sim::SimLoop::new(PhyFfiWorld::create_empty(), &cfg, dt, wind, sensor_cfg, cli.controller);
-
-    // 阶段 6：CSV 日志。
-    if let Some(ref p) = cli.log_path {
-        loop_sim.enable_log(p);
-        println!("[main] CSV 日志 -> {}", p);
-    }
 
     // 阶段 5：电机故障注入（单电机停转）。
+    let mut fail_mask = [false; 4];
     if let Some(m) = cli.fail_motor {
-        let mut mask = [false; 4];
-        mask[m as usize] = true;
-        loop_sim.set_motor_failure(mask);
+        fail_mask[m as usize] = true;
         println!("[main] 注入电机故障: m{} 停转", m);
     }
+
+    // 阶段 7：实时 3D 可视化（后台快跑仿真 + 采样渲染）。窗口关闭即退出。
+    if cli.view {
+        println!("[main] 启动实时 3D 可视化（后台仿真 + 渲染采样）...");
+        view::run_view(
+            &cfg,
+            dt,
+            wind,
+            sensor_cfg,
+            cli.controller,
+            &cli.scenario,
+            fail_mask,
+        );
+        return;
+    }
+
+    // 阶段 6：批处理式 SIL（命令行 + 可选 CSV）。
+    let mut loop_sim =
+        sim::SimLoop::new(PhySdkWorld::create_empty(), &cfg, dt, wind, sensor_cfg, cli.controller);
+
+    // 阶段 6：CSV 日志（经 on_step 回调注入；runner 决定如何存储）。
+    if let Some(ref p) = cli.log_path {
+        match CsvLogger::new(p) {
+            Ok(mut logger) => {
+                println!("[main] CSV 日志 -> {}", p);
+                loop_sim.set_on_step(Box::new(move |row| {
+                    let _ = logger.write(row);
+                }));
+            }
+            Err(e) => eprintln!("[main] 无法创建日志 {}: {}", p, e),
+        }
+    }
+
+    loop_sim.set_motor_failure(fail_mask);
 
     let ok = match cli.scenario.as_str() {
         "wind" => {

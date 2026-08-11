@@ -8,14 +8,23 @@ name = "fly-simulater"
 path = "src/main.rs"
 
 [dependencies]
-# 飞控核心：SIL/HIL 共享控制律（no_std crate，host std 环境可依赖）。
-# 注意：路径指向 joc-app-rust 同级的 flyctrl/core。
+# 仿真内核（本次拆出的库 crate）：物理抽象 / 风 / 传感器 / 推进 / 控制 / 主循环。
+fly-sim-core = { path = "fly-sim-core" }
+# 机架配置类型（no_std，host 端解析 TOML 后构造 VehicleConfig）。
 flyctrl-core = { path = "../../mcu/oop/flyctrl/core" }
 # 机架数据输入：从外部 TOML 加载机型参数（替代硬编码 default_quad）。
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+# 阶段 7：实时 3D 可视化——复用物理引擎的渲染原语（Camera + 软件光栅化 Framebuffer）。
+phy-demo = { path = "../../game/physics/crates/phy-demo" }
+# 矩阵/向量数学（与 phy-demo 同一 nalgebra 实例，用于投影矩阵构造）。
+phy-math = { path = "../../game/physics/crates/phy-math" }
+# 窗口 + 软件后端（无 GPU 依赖，纯 CPU 光栅化，保证 MinGW 工具链可编译运行）。
+winit = "0.30"
+softbuffer = "0.4"
 
-[build-dependencies]
+[workspace]
+members = ["fly-sim-core"]
 
 [profile.release]
 opt-level = 3

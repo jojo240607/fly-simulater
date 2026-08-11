@@ -1,0 +1,15 @@
+[package]
+name = "fly-sim-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 飞控核心：SIL/HIL 共享控制律（no_std crate，host std 环境可依赖）。
+flyctrl-core = { path = "../../../mcu/oop/flyctrl/core" }
+# 物理引擎（Rust 源码级依赖，rlib）。
+phy-sdk = { path = "../../../game/physics/crates/phy-sdk" }
+phy-rigid = { path = "../../../game/physics/crates/phy-rigid" }
+phy-math = { path = "../../../game/physics/crates/phy-math" }
+
+[profile.release]
+opt-level = 3

@@ -1,16 +1,16 @@
 //! 阶段 7 集成测试：用 `ToyWorld` 玩具级物理替身验证 `QuadrotorPlant` 与物理抽象层，
 //! 无需启动 C 物理引擎。这些测试锁住 phase 2/3/4 的真实度回归与接口充分性：
-//! - 满油门 -> 机体上升（旋翼推力经 `apply_force` 注入，ToyWorld 积分后上升）；
+//! - 满油门 -> 机体上升（旋翼推力经 `apply_impulse` 注入，ToyWorld 积分后上升）；
 //! - 纯偏航力矩 -> 机体绕 Z 轴角速度变化（瞬态力矩语义）；
 //! - 瞬态力/矩 `step` 后清零（不残留幽灵推力，防替换引擎出残留力 bug）；
 //! - plant 在替身世界上连续 step 不产出 NaN（接口充分性）。
 //!
 //! 运行：`cargo test --test physics_toy`
 
-use fly_simulater::physics::{RigidBodyWorld, ToyWorld};
-use fly_simulater::plant::QuadrotorPlant;
+use fly_sim_core::{RigidBodyWorld, ToyWorld};
+use fly_sim_core::controller::actuator_full;
+use fly_sim_core::QuadrotorPlant;
 use fly_simulater::airframe::load_airframe;
-use fly_simulater::controller::actuator_full;
 
 const DT: f64 = 0.004;
 
@@ -40,7 +40,8 @@ fn yaw_torque_spins_body() {
     let id = world.add_body(1.0, &[0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[0.01, 0.01, 0.01]);
     let tz = 0.05;
     for _ in 0..100 {
-        world.apply_torque(id, &[0.0, 0.0, tz], DT, 0);
+        // 力矩冲量 = 力矩 × dt。
+        world.apply_torque_impulse(id, &[0.0, 0.0, tz * DT], 0);
         world.step(DT);
     }
     let w = world.get_angular_velocity(id);
@@ -52,7 +53,8 @@ fn transient_force_cleared_after_step() {
     // 施加一次力后 step，再 step 一次（不施加），机体不应继续被该力加速（力已清零）。
     let mut world = ToyWorld::new(9.81);
     let id = world.add_body(1.0, &[0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[0.01, 0.01, 0.01]);
-    world.apply_force(id, &[1.0, 0.0, 0.0], DT, 0);
+    // 线冲量 = 力 × dt（瞬态，step 后不残留）。
+    world.apply_impulse(id, &[1.0 * DT, 0.0, 0.0], 0);
     world.step(DT);
     let v1 = world.get_velocity(id);
     // 第二帧不施加任何力（除重力）。
