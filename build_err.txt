@@ -1,0 +1,179 @@
+warning: linker stderr: corrupt .drectve at end of def file
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `fly-simulater` (build script) generated 1 warning
+warning: unused import: `PosSample`
+  --> D:\project\mcu\oop\flyctrl\core\src\hil.rs:19:35
+   |
+19 | use crate::vehicle::{ActuatorCmd, PosSample};
+   |                                   ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `estimate`
+  --> D:\project\mcu\oop\flyctrl\core\src\estimator\learning.rs:26:23
+   |
+26 |     fn correct(&self, estimate: &VehicleState, _imu: &ImuSample, _gps: &Option<PosSample>) -> ([f32; 3], [f32; 3]) {
+   |                       ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_estimate`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `mat_add` is never used
+  --> D:\project\mcu\oop\flyctrl\core\src\estimator\ekf.rs:58:4
+   |
+58 | fn mat_add(a: &[f32], b: &[f32], c: &mut [f32], n: usize) {
+   |    ^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `protocol` is never read
+  --> D:\project\mcu\oop\flyctrl\core\src\hal\actuator.rs:42:5
+   |
+39 | pub struct MockMotors {
+   |            ---------- field in this struct
+...
+42 |     protocol: OutputProtocol,
+   |     ^^^^^^^^
+   |
+   = note: `MockMotors` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `flyctrl-core` (lib) generated 4 warnings (run `cargo fix --lib -p flyctrl-core` to apply 2 suggestions)
+warning: unused import: `MeterPerSecondSquared`
+  --> src\plant.rs:22:50
+   |
+22 | use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
+   |                                                  ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Controller`
+ --> src\controller.rs:8:32
+  |
+8 | use flyctrl_core::controller::{Controller, IndiController, LqrController, PidController, Setpoint};
+  |                                ^^^^^^^^^^
+
+warning: unused import: `OutputProtocol`
+  --> src\controller.rs:10:50
+   |
+10 | use flyctrl_core::hal::actuator::{MotorActuator, OutputProtocol};
+   |                                                  ^^^^^^^^^^^^^^
+
+warning: unused import: `flyctrl_core::config::VehicleConfig`
+  --> src\main.rs:15:5
+   |
+15 | use flyctrl_core::config::VehicleConfig;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `f_world`
+   --> src\plant.rs:209:13
+    |
+209 |         let f_world = rotate_by_quat(q, f_body);
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_f_world`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\plant.rs:306:13
+    |
+306 |         let mut tf = self.read_body_tf();
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `qup`
+   --> src\sim.rs:107:26
+    |
+107 |                 let (up, qup) = self.ctrl.debug_up();
+    |                          ^^^ help: if this is intentional, prefix it with an underscore: `_qup`
+
+warning: unused variable: `vn`
+   --> src\sensor.rs:204:27
+    |
+204 |             let (n, e, d, vn, ve, vd) = *self.gps_delay.buf.front().unwrap();
+    |                           ^^ help: if this is intentional, prefix it with an underscore: `_vn`
+
+warning: unused variable: `ve`
+   --> src\sensor.rs:204:31
+    |
+204 |             let (n, e, d, vn, ve, vd) = *self.gps_delay.buf.front().unwrap();
+    |                               ^^ help: if this is intentional, prefix it with an underscore: `_ve`
+
+warning: unused variable: `vd`
+   --> src\sensor.rs:204:35
+    |
+204 |             let (n, e, d, vn, ve, vd) = *self.gps_delay.buf.front().unwrap();
+    |                                   ^^ help: if this is intentional, prefix it with an underscore: `_vd`
+
+warning: function `phy_world_create_rigid` is never used
+  --> src\phy_ffi.rs:21:12
+   |
+21 |     pub fn phy_world_create_rigid() -> *mut PhyWorldHandle;
+   |            ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `phy_world_create_fluid` is never used
+  --> src\phy_ffi.rs:23:12
+   |
+23 |     pub fn phy_world_create_fluid() -> *mut PhyWorldHandle;
+   |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `phy_world_create_granular` is never used
+  --> src\phy_ffi.rs:24:12
+   |
+24 |     pub fn phy_world_create_granular() -> *mut PhyWorldHandle;
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `phy_world_create_coupled` is never used
+  --> src\phy_ffi.rs:25:12
+   |
+25 |     pub fn phy_world_create_coupled() -> *mut PhyWorldHandle;
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `phy_world_step` is never used
+  --> src\phy_ffi.rs:28:12
+   |
+28 |     pub fn phy_world_step(w: *mut PhyWorldHandle, dt: f64) -> i32;
+   |            ^^^^^^^^^^^^^^
+
+warning: function `phy_world_time` is never used
+  --> src\phy_ffi.rs:30:12
+   |
+30 |     pub fn phy_world_time(w: *mut PhyWorldHandle) -> f64;
+   |            ^^^^^^^^^^^^^^
+
+warning: function `phy_world_rigid_count` is never used
+  --> src\phy_ffi.rs:33:12
+   |
+33 |     pub fn phy_world_rigid_count(w: *mut PhyWorldHandle) -> usize;
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `phy_world_save` is never used
+  --> src\phy_ffi.rs:77:12
+   |
+77 |     pub fn phy_world_save(w: *mut PhyWorldHandle, path: *const c_char) -> i32;
+   |            ^^^^^^^^^^^^^^
+
+warning: function `phy_world_load` is never used
+  --> src\phy_ffi.rs:78:12
+   |
+78 |     pub fn phy_world_load(path: *const c_char) -> *mut PhyWorldHandle;
+   |            ^^^^^^^^^^^^^^
+
+warning: function `quat_ned_to_up` is never used
+  --> src\plant.rs:51:4
+   |
+51 | fn quat_ned_to_up(q_ned: Quaternion) -> [f64; 4] {
+   |    ^^^^^^^^^^^^^^
+
+warning: function `vec_ned_to_up` is never used
+  --> src\plant.rs:58:4
+   |
+58 | fn vec_ned_to_up(ned: [f32; 3]) -> [f64; 3] {
+   |    ^^^^^^^^^^^^^
+
+warning: `fly-simulater` (bin "fly-simulater") generated 21 warnings (run `cargo fix --bin "fly-simulater" -p fly-simulater` to apply 10 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s

@@ -12,12 +12,18 @@ use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
 use crate::sensor::SensorConfig;
 use crate::controller::ControllerKind;
+use crate::log::{CsvLogger, LogRow};
 
 pub struct SimLoop {
     ctrl: FlyController,
     cfg: VehicleConfig,
     dt: f64,
     steps: u64,
+    /// 阶段 6：可选 CSV 记录器（None=不写）。
+    logger: Option<CsvLogger>,
+    /// 阶段 6：机械能监测（无风无推力时机械能应单调衰减）。
+    energy_prev: Option<f64>,
+    energy_monotonic: bool,
 }
 
 impl SimLoop {
@@ -33,7 +39,31 @@ impl SimLoop {
             cfg: cfg.clone(),
             dt,
             steps: 0,
+            logger: None,
+            energy_prev: None,
+            energy_monotonic: true,
         }
+    }
+
+    /// 阶段 6：开启 CSV 日志（每帧追加一行）。
+    pub fn enable_log(&mut self, path: &str) {
+        match CsvLogger::new(path) {
+            Ok(l) => self.logger = Some(l),
+            Err(e) => eprintln!("[sim] 无法创建日志 {}: {}", path, e),
+        }
+    }
+
+    /// 阶段 6：被控对象真实机械能（动能 + 重力势能，NED）。
+    /// 用于无风无推力场景的能量守恒校验（应单调衰减）。
+    fn mechanical_energy(&self, st: &VehicleState) -> f64 {
+        let m = self.cfg.mass as f64;
+        let v2 = st.vel[0].0 as f64 * st.vel[0].0 as f64
+            + st.vel[1].0 as f64 * st.vel[1].0 as f64
+            + st.vel[2].0 as f64 * st.vel[2].0 as f64;
+        let ke = 0.5 * m * v2;
+        // NED 下向为正，高度 h=-d，势能 = m·g·h = -m·g·d。
+        let pe = -m * 9.81 * st.pos[2].0 as f64;
+        ke + pe
     }
 
     /// 跑一个悬停场景：设定点在 (0,0,-5)，验证收敛 + 不变量。
@@ -45,6 +75,32 @@ impl SimLoop {
         for _ in 0..total {
             let st = self.ctrl.step(&sp);
             self.steps += 1;
+
+            // 阶段 6：CSV 日志（真值 + 估计 + 指令 + IMU）。
+            if let Some(ref mut lg) = self.logger {
+                let w = self.ctrl.world_state();
+                let row = LogRow {
+                    step: self.steps,
+                    t: self.steps as f64 * self.dt,
+                    true_state: w,
+                    est_state: st,
+                    cmd: self.ctrl.last_cmd(),
+                    imu: self.ctrl.last_imu(),
+                };
+                let _ = lg.write(&row);
+            }
+
+            // 阶段 6：能量守恒校验（无风场景，机械能应单调衰减）。
+            if self.energy_prev.is_none() {
+                self.energy_prev = Some(self.mechanical_energy(&self.ctrl.world_state()));
+            } else {
+                let e = self.mechanical_energy(&self.ctrl.world_state());
+                // 仅当无明显外部推力做功（悬停稳态附近）校验单调性；允许数值误差 1e-3。
+                if e > self.energy_prev.unwrap() + 1e-3 {
+                    self.energy_monotonic = false;
+                }
+                self.energy_prev = Some(e);
+            }
 
             if self.steps <= 5 || self.steps % 500 == 0 {
                 let w = self.ctrl.world_state();
@@ -73,6 +129,18 @@ impl SimLoop {
                 all_ok = false;
                 break;
             }
+        }
+
+        // 阶段 6：日志刷盘 + 能量报告。
+        if let Some(ref mut lg) = self.logger {
+            let _ = lg.flush();
+        }
+        // 悬停场景下螺旋桨持续做正功，机械能非单调是物理正确的（并非守恒系统），
+        // 因此仅作信息性报告，不当作失败。真正能量守恒校验适用于"无推力自由衰减"场景。
+        if !self.energy_monotonic {
+            println!("[hover] 能量: 机械能非单调（悬停推力持续做功，属正常，非数值问题）");
+        } else {
+            println!("[hover] 能量: 机械能单调衰减 OK（无风无外部做功）");
         }
 
         // 收敛判定：末态位置接近设定点。

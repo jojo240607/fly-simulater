@@ -10,6 +10,7 @@ mod sim;
 mod airframe;
 mod wind;
 mod sensor;
+mod log;
 
 use flyctrl_core::config::VehicleConfig;
 use phy_ffi::phy_ffi_abi_version;
@@ -22,6 +23,7 @@ struct Cli {
     sensor_noise: bool,
     controller: ControllerKind,
     fail_motor: Option<u8>, // 阶段 5：电机故障注入（0..3）
+    log_path: Option<String>, // 阶段 6：CSV 日志输出路径
 }
 
 impl Cli {
@@ -47,6 +49,7 @@ fn parse_args() -> Cli {
         sensor_noise: false,
         controller: ControllerKind::Pid,
         fail_motor: None,
+        log_path: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -92,13 +95,22 @@ fn parse_args() -> Cli {
             "--sensor-noise" => {
                 cli.sensor_noise = true;
             }
+            "--log" => {
+                if let Some(p) = args.next() {
+                    cli.log_path = Some(p);
+                } else {
+                    eprintln!("[main] --log 需要跟一个输出路径");
+                    std::process::exit(2);
+                }
+            }
             "--help" | "-h" => {
-                println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind] [--controller pid|indi|lqr] [--fail-motor 0..3] [--sensor-noise]");
+                println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind] [--controller pid|indi|lqr] [--fail-motor 0..3] [--sensor-noise] [--log <path.csv>]");
                 println!("  --airframe      外部机架 TOML（缺省用内置 default_quad）");
                 println!("  --scenario      hover=无风悬停(默认) | wind=抗风悬停(阶段3)");
                 println!("  --controller    pid=PID(默认) | indi=INDI+PID基线 | lqr=LQR");
                 println!("  --fail-motor    注入单电机故障 0..3（该电机停转，阶段5）");
                 println!("  --sensor-noise  开启真实 IMU/GPS 噪声（暴露 EKF 对噪声不耐受，见 PLAN 阶段5）");
+                println!("  --log           CSV 日志输出（真值/估计/指令/IMU，阶段6）");
                 std::process::exit(0);
             }
             other => {
@@ -149,6 +161,12 @@ fn main() {
         crate::sensor::SensorConfig::default()
     };
     let mut loop_sim = sim::SimLoop::new(&cfg, dt, wind, sensor_cfg, cli.controller);
+
+    // 阶段 6：CSV 日志。
+    if let Some(ref p) = cli.log_path {
+        loop_sim.enable_log(p);
+        println!("[main] CSV 日志 -> {}", p);
+    }
 
     // 阶段 5：电机故障注入（单电机停转）。
     if let Some(m) = cli.fail_motor {

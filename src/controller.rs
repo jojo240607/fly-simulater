@@ -188,6 +188,11 @@ impl FlyController {
     pub fn last_cmd(&self) -> ActuatorCmd {
         self.motors.last
     }
+
+    /// 最近一次 IMU 样本（阶段 6 日志用）。
+    pub fn last_imu(&self) -> ImuSample {
+        self.imu.last
+    }
 }
 
 // 辅助：构造悬停设定点。

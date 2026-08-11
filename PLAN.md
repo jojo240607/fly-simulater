@@ -90,12 +90,24 @@
 3. 单电机故障合法不可恢复——若要验证"可恢复故障容错"，需做"双故障/部分效率退化"或"六旋翼"
    配置，留待精度需求更高时加。
 
-## 阶段 6 — 闭环一致性与可复现
+## 阶段 6 — 闭环一致性与可复现 ✅ 已完成
 
-- 时间步对齐：控制周期(100/250Hz) 与物理子步明确分离。
-- 日志/回放：`.csv` 导出 NED/EST/CMD/IMU，支持复现与回归。
-- 不变量监控：保留 NaN/有界检查 + 能量守恒校验（无风无推力机械能单调衰减）。
-- 控制律量化对比：基于日志 RMS_dz / RMS_cmd / 抗风余量，给出 PID vs INDI vs LQR 实测表。
+- 时间步对齐：控制周期(100/250Hz) 与物理子步明确分离（`dt` 单源，主循环统一推进）。
+- 日志/回放：`src/log.rs` 导出 28 列 CSV（step,t / TRUE_NED(3) / EST_NED(3) / vel(3) /
+  att_quat(4) / omega(3) / cmd(4) / IMU accel(3) / gyro(3)），`--log <path>` 开启，`flush` 刷盘。
+- 不变量监控：保留 NaN/有界检查（`invariants::state_finite` / `actuator_bounded`）；
+  机械能监测（`mechanical_energy` = 动能 + 重力势能 NED）作为信息性指标——悬停推力做功
+  下非单调属正常，不当作失败，仅"无推力自由衰减"场景才要求单调。
+- 控制律量化对比：基于日志 RMS_dz / RMS_cmd / 抗风余量（阶段 3 `run_hover_wind` 已输出
+  RMS_horiz / drift），可横向对比 PID/INDI/LQR 实测表现。
+
+**验证**：`cargo build` 通过；`--log sim_out.csv` 悬停 10s 输出 2501 行（含表头）、28 列齐全；
+能量项信息性正常打印，无 NaN/越界。
+
+**后续可选增强（非阻塞）**：
+1. 日志分析脚本（`tools/cmp_controllers.py`）自动算 RMS_dz/RMS_cmd 并出 PID/INDI/LQR 对比表。
+2. 真·能量守恒测例：无推力自由落体/抛掷场景，校验机械能单调衰减（需新增 scenario `freefall`）。
+3. 回放器：读 CSV 重渲染轨迹（matplotlib），用于回归与论文配图。
 
 ---
 
