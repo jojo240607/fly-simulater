@@ -206,3 +206,31 @@
 
 **后续可选**（未做）：日志分析脚本、CSV 回放渲染器、传感器噪声下 EKF 鲁棒性回归（已知 `--sensor-noise`
 发散，待 EKF 调参或噪声门限处理）。
+
+---
+
+## 阶段 10 — 日志分析 + 轨迹回放工具链 ✅ 已完成
+
+**目的**：PLAN §6 可选 #1/#3 落地。SIL 跑完 CSV 后，能自动量化控制律差异、并把轨迹渲染成 3D 图，
+用于回归对比与论文/汇报配图，不依赖人工看数。
+
+**新增**：
+- `tools/cmp_controllers.py`：读多个 `--log` 产出的 CSV，自动算 `RMS_dz`(高度跟踪误差) /
+  `RMS_horiz`(水平偏离) / `RMS_cmd`(平均油门幅度) / `final_dz`(末态高度残差) / `drift_e`(末态水平偏移)，
+  打印对齐对比表，附带 NED 坐标解读（d 向下为正：`final_dz<0` = 停在设定点上方）。
+  用法：`python tools/cmp_controllers.py logs/pid.csv logs/indi.csv logs/lqr.csv --labels pid indi lqr`
+- `tools/replay.py`：读 CSV 把 NED 转回"上为正"Z 轴，matplotlib 画 3D 真值轨迹 + 设定点星标 +
+  末态机体姿态箭头（可叠加估计轨迹）。用法：`python tools/replay.py logs/pid.csv --save traj.png`
+  依赖 `matplotlib` + `numpy`（已 `pip install`，纯工具侧依赖，不影响 Rust 工程）。
+
+**修复（同批）**：
+- `src/log.rs` CSV 写出 bug：原 `writeln!` 直接写 `BufWriter`，但 `main.rs` 末尾 `std::process::exit`
+  **跳过 `CsvLogger` 析构** → 末尾若干帧缓冲未 flush，导致日志文件缺失最后 ~16 行（2499 步场景丢 16 行）。
+  修复：`CsvLogger::write` 每帧末尾显式 `self.w.flush()`，保证 `process::exit` 下日志完整。
+  同时加字段数自检（正常 38 列，异常时补零并 WARN），避免下游解析错位。
+- `fly-sim-core/tests/sil.rs` 集成测试修正：`default_quad` 是 `VehicleConfig` 的关联函数，
+  改为 `VehicleConfig::default_quad()`（此前误写成 `flyctrl_core::config::default_quad` 导致编译失败）。
+
+**验证**：三个控制律（pid/indi/lqr）悬停日志均 2500 行 × 38 列完整；
+`cmp_controllers.py` 给出对比表（三者 RMS_dz≈0.116m，收敛一致）；`replay.py` 正常产出 PNG；
+`cargo test` 4/4 PASS。

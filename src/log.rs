@@ -39,31 +39,45 @@ impl CsvLogger {
         let e = &row.est_state;
         let c = &row.cmd;
         let imu = &row.imu;
-        let line = format!(
-            "{}", row.step
-        );
-        // 用 writeln 拼字段避免长 format 串出错；直接逐字段写更清晰。
-        let _ = line;
-        writeln!(
-            self.w,
+        // 防御性：任何非有限值替换为 0.0，避免下游 CSV 解析因 "NaN"/"inf" 文本而出错。
+        let f = |v: f64| -> f64 { if v.is_finite() { v } else { 0.0 } };
+        let s = format!(
             "{},{:.6},\
              {:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},\
              {:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},\
              {:.6},{:.6},{:.6},{:.6},\
              {:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
             row.step, row.t,
-            t.pos[0].0, t.pos[1].0, t.pos[2].0,
-            t.vel[0].0, t.vel[1].0, t.vel[2].0,
-            t.att.w, t.att.x, t.att.y, t.att.z,
-            t.omega[0].0, t.omega[1].0, t.omega[2].0,
-            e.pos[0].0, e.pos[1].0, e.pos[2].0,
-            e.vel[0].0, e.vel[1].0, e.vel[2].0,
-            e.att.w, e.att.x, e.att.y, e.att.z,
-            e.omega[0].0, e.omega[1].0, e.omega[2].0,
-            c.motor[0], c.motor[1], c.motor[2], c.motor[3],
-            imu.accel[0].0, imu.accel[1].0, imu.accel[2].0,
-            imu.gyro[0].0, imu.gyro[1].0, imu.gyro[2].0,
-        )?;
+            f(t.pos[0].0 as f64), f(t.pos[1].0 as f64), f(t.pos[2].0 as f64),
+            f(t.vel[0].0 as f64), f(t.vel[1].0 as f64), f(t.vel[2].0 as f64),
+            f(t.att.w as f64), f(t.att.x as f64), f(t.att.y as f64), f(t.att.z as f64),
+            f(t.omega[0].0 as f64), f(t.omega[1].0 as f64), f(t.omega[2].0 as f64),
+            f(e.pos[0].0 as f64), f(e.pos[1].0 as f64), f(e.pos[2].0 as f64),
+            f(e.vel[0].0 as f64), f(e.vel[1].0 as f64), f(e.vel[2].0 as f64),
+            f(e.att.w as f64), f(e.att.x as f64), f(e.att.y as f64), f(e.att.z as f64),
+            f(e.omega[0].0 as f64), f(e.omega[1].0 as f64), f(e.omega[2].0 as f64),
+            f(c.motor[0] as f64), f(c.motor[1] as f64), f(c.motor[2] as f64), f(c.motor[3] as f64),
+            f(imu.accel[0].0 as f64), f(imu.accel[1].0 as f64), f(imu.accel[2].0 as f64),
+            f(imu.gyro[0].0 as f64), f(imu.gyro[1].0 as f64), f(imu.gyro[2].0 as f64),
+        );
+        // 字段数自检：正常 38 列；若异常（理论不应发生）补齐零，避免下游解析错位。
+        let cols = s.split(',').count();
+        if cols != 38 {
+            eprintln!(
+                "[log] WARN step {}: malformed row ({} cols, expected 38) — padding",
+                row.step, cols
+            );
+            let mut padded = s;
+            while padded.split(',').count() < 38 {
+                padded.push_str(",0.000000");
+            }
+            writeln!(self.w, "{}", padded)?;
+            return Ok(());
+        }
+        writeln!(self.w, "{}", s)?;
+        // 每帧落盘：main 用 std::process::exit 会跳过 Drop（不 flush BufWriter），
+        // 逐帧 flush 确保日志完整（SIL 非实时场景，开销可接受）。
+        self.w.flush()?;
         Ok(())
     }
 
