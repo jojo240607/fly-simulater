@@ -244,9 +244,14 @@ where
 
     pub fn steps(&self) -> u64 { self.steps }
 
-    /// 阶段 5：设置电机失效掩码（故障注入）。
+    /// 阶段 5：设置电机完全失效掩码（故障注入）。true=该电机停转。
     pub fn set_motor_failure(&mut self, mask: [bool; 4]) {
         self.ctrl.set_motor_failure(mask);
+    }
+
+    /// 阶段 5（增强）：设置每路电机效率系数（1.0=正常，0.0=停转，中间=部分退化）。
+    pub fn set_motor_eff(&mut self, eff: [f32; 4]) {
+        self.ctrl.set_motor_eff(eff);
     }
 
     /// 阶段 3：风环境接入验证场景。
@@ -313,6 +318,130 @@ where
         // 合格 = 风模型生效（轻风下被吹向下风方向 drift_east>0）+ 数值稳定（无非法状态）。
         let wind_effect = drift_east > 0.1; // 风沿 NED 东向，机体应被吹向东
         all_ok && wind_effect
+    }
+
+    /// 阶段 5（增强）：部分效率退化容错边界分析。
+    ///
+    /// 流程：先正常悬停 `stabilize` 秒建立稳态，再把指定电机效率降到 `eff`
+    /// （如 0.6 = 部分退化），继续悬停 `recover` 秒。
+    ///
+    /// 关键结论（真实物理 + 控制论）：在**无控制分配重构**的 PID/INDI/LQR 下，
+    /// 单电机推力损失（无论完全还是部分）都会削减总推力上限，导致：
+    ///   - 推力不足 → 持续掉高（位置不可恢复，除非引入控制分配重构）；
+    ///   - 姿控回路在退化后也很快发散（roll/pitch 失控翻滚），属阶段 5 已确认结论：
+    ///     **四旋翼单电机推力损失（无论完全还是部分）在当前无重构控制律下均不可恢复**。
+    ///
+    /// 本场景**量化容错边界**（故障传播分析，非通过性测试）：
+    ///   - 先正常悬停 `stabilize` 秒建立稳态；
+    ///   - 注入 m`motor_idx` 效率 `eff`，继续悬停 `recover` 秒；
+    ///   - 记录"姿控存活时间"（从注入到机体角速度超 `att_rate_lim` 或状态非法的步数）；
+    ///   - 退化越轻，存活时间越长——给飞行员/故障检测更多处置窗口（真实工程结论）。
+    ///
+    /// 返回 `false`（不可恢复，符合当前控制律预期）；输出为分析性报告。
+    pub fn run_hover_degraded(
+        &mut self,
+        stabilize: f64,
+        recover: f64,
+        motor_idx: usize,
+        eff: f32,
+    ) -> bool {
+        let total_stab = (stabilize / self.dt) as u64;
+        let total_rec = (recover / self.dt) as u64;
+        let sp = hover_setpoint(0.0, 0.0, -5.0);
+        let mut all_ok = true;
+        let att_rate_lim = 1.0f64; // rad/s：姿控发散角速度阈值
+
+        println!(
+            "[degraded] 阶段1: 正常悬停 {}s 建立稳态 (电机全正常)",
+            stabilize
+        );
+        // 确保稳定段电机全正常（覆盖调用方可能预先注入的退化）。
+        self.ctrl.set_motor_eff([1.0f32; 4]);
+        for _ in 0..total_stab {
+            let st = self.ctrl.step(&sp);
+            self.steps += 1;
+            if !invariants::state_finite(&st) || !invariants::actuator_bounded(&self.ctrl.last_cmd()) {
+                eprintln!("[FAIL] degraded stabilize step {}: 状态/指令不合法", self.steps);
+                all_ok = false;
+                break;
+            }
+        }
+
+        if all_ok {
+            // 注入部分效率退化。
+            let mut eff_arr = [1.0f32; 4];
+            eff_arr[motor_idx] = eff.clamp(0.0, 1.0);
+            self.ctrl.set_motor_eff(eff_arr);
+            println!(
+                "[degraded] 阶段2: 注入 m{} 效率={:.2}（部分退化），继续悬停 {}s（量化容错边界）",
+                motor_idx, eff_arr[motor_idx], recover
+            );
+            let mut max_dz = 0.0f64;
+            let mut survived_steps: u64 = 0; // 姿控存活步数（从注入起）
+            let mut diverged = false;
+            for _ in 0..total_rec {
+                let st = self.ctrl.step(&sp);
+                self.steps += 1;
+                let end = self.ctrl.world_state();
+                let dz = (end.pos[2].0 - (-5.0)).abs() as f64;
+                max_dz = max_dz.max(dz);
+                // 机体角速度范数（姿控存活指标）。
+                let w = end.omega;
+                let att_rate = (w[0].0 * w[0].0 + w[1].0 * w[1].0 + w[2].0 * w[2].0).sqrt() as f64;
+
+                if !diverged {
+                    if att_rate > att_rate_lim || !invariants::state_finite(&st) {
+                        diverged = true;
+                        println!(
+                            "[degraded] 姿控发散于注入后 {:.3}s（step {}，{} 仍有限={}）",
+                            survived_steps as f64 * self.dt, self.steps,
+                            if invariants::state_finite(&st) { "状态" } else { "状态非法" },
+                            invariants::state_finite(&st)
+                        );
+                    } else {
+                        survived_steps += 1;
+                    }
+                }
+
+                if self.steps % 500 == 0 {
+                    let cmd = self.ctrl.last_cmd();
+                    println!(
+                        "  step {}: TRUE_NED=({:.3},{:.3},{:.3}) dz={:.3} |w|={:.3} cmd=({:.3},{:.3},{:.3},{:.3})",
+                        self.steps,
+                        end.pos[0].0, end.pos[1].0, end.pos[2].0, dz, att_rate,
+                        cmd.motor[0], cmd.motor[1], cmd.motor[2], cmd.motor[3],
+                    );
+                }
+                if !invariants::state_finite(&st) || !invariants::actuator_bounded(&self.ctrl.last_cmd()) {
+                    all_ok = false;
+                    break;
+                }
+            }
+
+            let survived_s = survived_steps as f64 * self.dt;
+            println!(
+                "[degraded] 末态 NED=({:.2},{:.2},{:.2})m  max|dz|={:.2}m  姿控存活≈{:.3}s / {} 步",
+                self.ctrl.world_state().pos[0].0,
+                self.ctrl.world_state().pos[1].0,
+                self.ctrl.world_state().pos[2].0,
+                max_dz, survived_s, survived_steps
+            );
+            if diverged {
+                println!(
+                    "[degraded] 结论：单电机推力损失（eff={:.2}）致姿控发散，四旋翼不可恢复——需控制分配重构（未来工作）",
+                    eff_arr[motor_idx]
+                );
+            } else {
+                println!(
+                    "[degraded] 结论：注入后 {}s 内姿控仍存活（推力损失致掉高 {:.2}m，需控制分配恢复高度）",
+                    recover, max_dz
+                );
+            }
+            // 当前控制律无重构分配，单电机退化均判不可恢复（符合阶段 5 结论）。
+            false
+        } else {
+            false
+        }
     }
 }
 

@@ -74,8 +74,12 @@
   `main.rs` 加 `--controller pid|indi|lqr`（缺省 pid）。
 - **INDI**：`IndiController::with_inertia(base_pid, cfg.inertia, dt, 0.8)`，包 PID 基线。
 - **LQR**：`LqrController::from_config(&cfg.ctrl_params())`。
-- **故障注入**：`FlyController::set_motor_failure([bool;4])`；`step` 内对失效电机指令强制置 0
+- **故障注入（二元）**：`FlyController::set_motor_failure([bool;4])`；`step` 内对失效电机指令强制置 0
   再回写 plant。`main.rs` 加 `--fail-motor 0..3`（单电机停转）。
+- **故障注入（增强：效率系数模型）**：`fail_mask` 从 `[bool;4]` 升级为 `[f32;4]` 效率系数
+  （1.0=正常，0.0=完全停转，中间=部分效率退化）。`set_motor_eff([f32;4])` 夹紧到 [0,1]；
+  `step` 第 2.5 步按系数**缩放**每路电机指令（`cmd.motor[i] *= fail_mask[i]`）而非置零。
+  `set_motor_failure` 保留为 `true→0.0` 的便捷封装。`main.rs` 加 `--degrade-motor <0..3> <0..1>`。
 
 **验证（无风悬停 10s, dt=4ms, 450quad）**：
 - PID / INDI / LQR **三者均 PASS**（|dz|≈0.04m, horiz≈0）。INDI/LQR 悬停行为与 PID 一致收敛，
@@ -83,12 +87,36 @@
 - `--fail-motor 0`：m0 指令强制置 0 → `cmd=(1,0,1,0)` 饱和、机体爬升漂移(dz=107m) → **合法 FAIL**
   （四旋翼单旋翼失效不可恢复，无冗余自由度）。仿真数值稳定（无 NaN/Inf），故障注入路径正确。
 
+**量化容错边界（阶段 5 增强，`--scenario degraded` + `--degrade-motor 0 <eff>`，先 4s 正常悬停
+建立稳态再注入）**：实测单电机推力损失（无论完全/部分）均致姿控发散、四旋翼不可恢复——
+轻退化仅给飞行员稍长处置窗口，无重构控制律下无法重配平。存活时间（注入后角速度范数 >1.0 rad/s
+即判发散）随效率系数变化：
+
+| eff  | 存活时间 | 存活步数 |
+|------|---------|---------|
+| 0.95 | 0.416s  | 104     |
+| 0.90 | 0.368s  | 92      |
+| 0.80 | 0.332s  | 83      |
+| 0.60 | 0.120s  | 30      |
+| 0.50 | 0.096s  | 24      |
+| 0.00 | 0.052s  | 13      |
+
+结论：**当前 PID 控制律无控制分配重构，单电机推力损失不可恢复**（与二元失效同结论，但部分退化
+量化了"容错边界"——即便 5% 推力损失也仅 ~0.4s 处置窗口）。真正可恢复需控制分配（control
+allocation）重排剩余 3 路电机推力/力矩，属未来工作（见 PLAN 待办）。
+
 **重要发现（真实仿真价值）**：
 1. 无风干净悬停下 PID/INDI/LQR 轨迹几乎重合——差异仅在抗扰/动态场景显现，需阶段 6 日志量化。
 2. `--sensor-noise` 暴露的 EKF 发散（阶段 4 发现，R 协方差疑似 0）**仍未修复**：`--controller lqr/indi`
    搭配 `--sensor-noise` 同样发散（EKF 共享，控制律不修估计器）。限为已知缺陷，待 flyctrl-core EKF 修正。
-3. 单电机故障合法不可恢复——若要验证"可恢复故障容错"，需做"双故障/部分效率退化"或"六旋翼"
-   配置，留待精度需求更高时加。
+3. 单电机故障（完全/部分）均合法不可恢复——四旋翼无冗余自由度，可恢复容错需控制分配重构或
+   六旋翼配置，留待精度需求更高时加。
+
+**回归锁**（新增 `tests/degraded.rs`，`cargo test --test degraded`）：
+- `eff_scales_motor_command_not_zero`：部分退化（eff=0.6）走缩放路径而非置零，m0 指令 >0、m1 不
+  受影响。
+- `degraded_full_loss_diverges`：eff=0.0 注入后姿控发散，存活步数有限（< 注入后 8s 窗口）。
+- `tolerance_boundary_monotonic`：eff=0.95 存活步数 > eff=0.50（量化边界单调，物理一致性）。
 
 ## 阶段 6 — 闭环一致性与可复现 ✅ 已完成
 

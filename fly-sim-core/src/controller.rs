@@ -99,8 +99,10 @@ pub struct FlyController<W> {
     gps: SimGps,
     motors: SimMotors,
     cfg: VehicleConfig,
-    /// 阶段 5：故障注入——电机失效掩码（true=该电机停转/0% 效率）。
-    fail_mask: [bool; 4],
+    /// 阶段 5：故障注入——每路电机推进效率系数（1.0=正常，0.0=完全停转，
+    /// 中间值=部分效率退化）。实测：四旋翼在当前无重构控制律下，单电机推力
+    /// 损失（无论完全还是部分）均致姿控发散、不可恢复（见 sim.rs run_hover_degraded）。
+    fail_mask: [f32; 4],
 }
 
 impl<W> FlyController<W>
@@ -151,13 +153,25 @@ where
             gps,
             motors,
             cfg: cfg.clone(),
-            fail_mask: [false; 4],
+            fail_mask: [1.0; 4],
         }
     }
 
-    /// 阶段 5：设置电机失效掩码（阶段 5 故障注入）。索引 0..3 对应 m0..m3。
+    /// 阶段 5：设置电机完全失效掩码（true=该电机效率置 0，停转）。
+    /// 索引 0..3 对应 m0..m3。四旋翼单电机完全停转不可恢复（阶段 5 结论）。
     pub fn set_motor_failure(&mut self, mask: [bool; 4]) {
-        self.fail_mask = mask;
+        for i in 0..4 {
+            self.fail_mask[i] = if mask[i] { 0.0 } else { 1.0 };
+        }
+    }
+
+    /// 阶段 5（增强）：设置每路电机效率系数（1.0=正常，0.0=完全停转，
+    /// 中间值=部分效率退化）。索引 0..3 对应 m0..m3。
+    pub fn set_motor_eff(&mut self, eff: [f32; 4]) {
+        for i in 0..4 {
+            // 夹紧到 [0,1]，防御非法 CLI 输入。
+            self.fail_mask[i] = eff[i].clamp(0.0, 1.0);
+        }
     }
 
     /// 推模式：先让 plant 产出当帧样本，存入传感器 trait，再跑控制律，最后 step 世界。
@@ -174,12 +188,11 @@ where
             CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, setpoint, &mut self.motors, &self.cfg),
         };
 
-        // 2.5) 阶段 5：故障注入——失效电机指令强行置 0。
+        // 2.5) 阶段 5：故障注入——按效率系数缩放每路电机指令。
+        // 1.0=正常，0.0=停转，中间值=部分效率退化（细粒度故障注入）。
         let mut cmd = self.motors.last;
         for i in 0..4 {
-            if self.fail_mask[i] {
-                cmd.motor[i] = 0.0;
-            }
+            cmd.motor[i] = (cmd.motor[i] as f32) * self.fail_mask[i];
         }
 
         // 2.6) 把控制指令显式回写被控对象（注入推力/力矩）。

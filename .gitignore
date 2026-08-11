@@ -7,6 +7,10 @@ run_out.txt
 build_out.txt
 build_err.txt
 sim_out.csv
+logs/
+
+# Temporary debug scripts (tools/_*.py)
+tools/_*.py
 
 # Editor / OS
 .vscode/

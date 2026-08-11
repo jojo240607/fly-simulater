@@ -18,7 +18,8 @@ struct Cli {
     scenario: String, // "hover" | "wind" | "freefall"
     sensor_noise: bool,
     controller: ControllerKind,
-    fail_motor: Option<u8>, // 阶段 5：电机故障注入（0..3）
+    fail_motor: Option<u8>, // 阶段 5：电机完全失效注入（0..3）
+    degrade_motor: Option<(u8, f32)>, // 阶段 5（增强）：部分效率退化 (idx, eff)
     log_path: Option<String>, // 阶段 6：CSV 日志输出路径
     view: bool,             // 阶段 7：实时 3D 可视化
 }
@@ -46,6 +47,7 @@ fn parse_args() -> Cli {
         sensor_noise: false,
         controller: ControllerKind::Pid,
         fail_motor: None,
+        degrade_motor: None,
         log_path: None,
         view: false,
     };
@@ -90,6 +92,20 @@ fn parse_args() -> Cli {
                     std::process::exit(2);
                 }
             }
+            "--degrade-motor" => {
+                // 接受两参数：<idx 0..3> <eff 0..1>。
+                let idx = args.next().and_then(|s| s.parse::<u8>().ok());
+                let eff = args.next().and_then(|s| s.parse::<f32>().ok());
+                match (idx, eff) {
+                    (Some(i @ 0..=3), Some(e)) if (0.0..=1.0).contains(&e) => {
+                        cli.degrade_motor = Some((i, e));
+                    }
+                    _ => {
+                        eprintln!("[main] --degrade-motor 需要 <0..3> <0..1> 两参数");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--sensor-noise" => {
                 cli.sensor_noise = true;
             }
@@ -105,11 +121,12 @@ fn parse_args() -> Cli {
                 cli.view = true;
             }
             "--help" | "-h" => {
-                println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind] [--controller pid|indi|lqr] [--fail-motor 0..3] [--sensor-noise] [--log <path.csv>]");
+                println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind|freefall|degraded] [--controller pid|indi|lqr] [--fail-motor 0..3] [--degrade-motor <0..3> <0..1>] [--sensor-noise] [--log <path.csv>] [--view]");
                 println!("  --airframe      外部机架 TOML（缺省用内置 default_quad）");
                 println!("  --scenario      hover=无风悬停(默认) | wind=抗风悬停(阶段3) | freefall=自由落体能量守恒(阶段9)");
                 println!("  --controller    pid=PID(默认) | indi=INDI+PID基线 | lqr=LQR");
-                println!("  --fail-motor    注入单电机故障 0..3（该电机停转，阶段5）");
+                println!("  --fail-motor    注入单电机完全失效 0..3（该电机停转，阶段5）");
+                println!("  --degrade-motor 注入单电机部分效率退化 <0..3> <0..1>（如 0 0.6=60%推力，可重配平）");
                 println!("  --sensor-noise  开启真实 IMU/GPS 噪声（暴露 EKF 对噪声不耐受，见 PLAN 阶段5）");
                 println!("  --log           CSV 日志输出（真值/估计/指令/IMU，阶段6）");
                 std::process::exit(0);
@@ -160,11 +177,15 @@ fn main() {
         sensor::SensorConfig::default()
     };
 
-    // 阶段 5：电机故障注入（单电机停转）。
-    let mut fail_mask = [false; 4];
+    // 阶段 5：电机故障注入（完全失效或部分效率退化，统一为效率系数数组）。
+    let mut eff_mask = [1.0f32; 4];
     if let Some(m) = cli.fail_motor {
-        fail_mask[m as usize] = true;
-        println!("[main] 注入电机故障: m{} 停转", m);
+        eff_mask[m as usize] = 0.0;
+        println!("[main] 注入电机故障: m{} 完全停转 (eff=0)", m);
+    }
+    if let Some((m, e)) = cli.degrade_motor {
+        eff_mask[m as usize] = e;
+        println!("[main] 注入电机部分退化: m{} 效率={:.2}", m, e);
     }
 
     // 阶段 7：实时 3D 可视化（后台快跑仿真 + 采样渲染）。窗口关闭即退出。
@@ -177,7 +198,7 @@ fn main() {
             sensor_cfg,
             cli.controller,
             &cli.scenario,
-            fail_mask,
+            eff_mask,
         );
         return;
     }
@@ -199,7 +220,7 @@ fn main() {
         }
     }
 
-    loop_sim.set_motor_failure(fail_mask);
+    loop_sim.set_motor_eff(eff_mask);
 
     let ok = match cli.scenario.as_str() {
         "freefall" => {
@@ -216,6 +237,25 @@ fn main() {
             println!("[main] running SIL anti-wind hover (15s, dt={}ms)...", dt * 1000.0);
             let r = loop_sim.run_hover_wind(15.0);
             println!("[main] SIL anti-wind {}", if r { "PASS" } else { "FAIL" });
+            r
+        }
+        "degraded" => {
+            // 部分效率退化容错：先 4s 正常悬停，再注入退化后 8s 重配平。
+            // 退化电机/效率来自 --degrade-motor 或 --fail-motor（eff=0）。
+            let (idx, eff) = if let Some((m, e)) = cli.degrade_motor {
+                (m as usize, e)
+            } else if let Some(m) = cli.fail_motor {
+                (m as usize, 0.0)
+            } else {
+                println!("[main] degraded 场景需要 --degrade-motor <idx> <eff> 或 --fail-motor <idx>");
+                std::process::exit(2);
+            };
+            println!(
+                "[main] running SIL degraded-hover (m{} eff={:.2}, 4s+8s, dt={}ms)...",
+                idx, eff, dt * 1000.0
+            );
+            let r = loop_sim.run_hover_degraded(4.0, 8.0, idx, eff);
+            println!("[main] SIL degraded-hover {}", if r { "PASS(可恢复)" } else { "FAIL" });
             r
         }
         _ => {

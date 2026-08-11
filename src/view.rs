@@ -227,7 +227,7 @@ pub fn run_view(
     sensor_cfg: sensor::SensorConfig,
     kind: ControllerKind,
     scenario: &str,
-    fail_mask: [bool; 4],
+    eff_mask: [f32; 4],
 ) {
     let state = Arc::new(Mutex::new(RenderState {
         pos: [0.0, 0.0, 0.0],
@@ -247,7 +247,7 @@ pub fn run_view(
             sensor_cfg,
             kind,
         );
-        loop_sim.set_motor_failure(fail_mask);
+        loop_sim.set_motor_eff(eff_mask);
         loop_sim.set_on_frame(Box::new(move |st: &VehicleState, cmd: ActuatorCmd| {
             let mut g = sim_state.lock().unwrap();
             g.pos = ned_to_render([
