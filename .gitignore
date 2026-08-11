@@ -22,6 +22,11 @@ server_out.txt
 server_run.log
 orient_out.txt
 env_out.txt
+frame_out.txt
+tsrv.txt
+t.txt
+test_core.txt
+test_all.txt
 
 # 临时测试/编译诊断输出
 test_*.txt
