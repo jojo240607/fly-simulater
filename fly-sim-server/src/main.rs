@@ -23,7 +23,7 @@ use fly_sim_core::physics::PhySdkWorld;
 use fly_sim_core::sensor::SensorConfig;
 use fly_sim_core::sim::SimLoop;
 use fly_sim_core::wind::{WindConfig, WindField};
-use fly_sim_core::render::{ned_quat_to_render, ned_to_render, RenderInput};
+use fly_sim_core::render::RenderInput;
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::controller::Setpoint;
 
@@ -172,10 +172,17 @@ impl SimDriver {
         }
         let (st, cmd) = last?;
 
-        // 构造渲染输入
-        let pos = ned_to_render([st.pos[0].0 as f64, st.pos[1].0 as f64, st.pos[2].0 as f64]);
-        let quat = ned_quat_to_render(st.att);
-        let vel = ned_to_render([st.vel[0].0 as f64, st.vel[1].0 as f64, st.vel[2].0 as f64]);
+        // 构造渲染输入：渲染世界 = 引擎世界（同为 Y-up，上=+Y）。直接用引擎位姿。
+        // 引擎悬停时机体 +Z（推力轴）指向 +Y，即旋翼盘水平 → 渲染必然水平。
+        // 不做任何 NED 或 z 镜像变换（镜像会把水平机体翻成侧躺）。
+        let (pos, q_up) = sim.debug_up();
+        let quat = q_up;
+        // 速度：`st.vel` 是 NED (n,e,d)，转引擎世界系 (x=n, y=-d, z=-e) 与渲染一致。
+        let vel = [
+            st.vel[0].0 as f64,
+            -st.vel[2].0 as f64,
+            -st.vel[1].0 as f64,
+        ];
         let mut motors = [0.0f64; 4];
         for i in 0..4 {
             motors[i] = cmd.motor[i] as f64;

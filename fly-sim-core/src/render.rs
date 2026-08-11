@@ -10,10 +10,14 @@
 //! 复用物理引擎 `phy-demo` 的 `Camera`（轨道视角）与 `Framebuffer`（软件光栅化）。
 //! NED 世界系 → 渲染系（右手 Y-up）固定轴映射：render = (N, -D, E)。
 
+use phy_demo::raster::pack;
 use phy_demo::{Camera, Framebuffer};
 use phy_math::na::{Matrix4, Vector4};
 
-/// 一帧渲染所需的全部输入（渲染系，已由调用方完成 NED→render 转换）。
+/// 一帧渲染所需的全部输入（渲染世界 = 物理引擎世界系，右手 Y-up，上=+Y）。
+///
+/// 注意：**渲染直接使用引擎位姿，不做任何坐标/四元数变换**。调用方应直接填
+/// `SimLoop::debug_up()` 返回的引擎世界坐标与四元数，保证悬停时机体水平。
 pub struct RenderInput {
     /// 渲染系位置 (x=north, y=up, z=east)。
     pub pos: [f64; 3],
@@ -60,8 +64,13 @@ impl Default for RenderInput {
     }
 }
 
-// ---- NED → 渲染坐标 固定世界变换：绕 X 轴 +90° 主动旋转 ----
-// NED (n, e, d) -> render (n, -d, e)
+// ---- 渲染世界系约定 ----
+// 渲染世界 = 物理引擎世界系（同为 Y-up，上=+Y）。因此**渲染直接使用引擎位姿**，
+// 不做任何坐标/四元数变换：引擎悬停时机体 +Z（推力轴）指向 +Y，旋翼盘水平，
+// 渲染即水平。任何 NED 或 z 镜像变换都会破坏"上"方向，把水平机体翻成侧躺。
+//
+// 以下 NED 转换保留给原生窗口路径（`view.rs` 早期实现），Web 端不再使用。
+// NED (n, e, d) -> render (n, -d, e)，对应 q_T = rotX(+90°)。
 pub fn ned_to_render(pos_ned: [f64; 3]) -> [f64; 3] {
     [pos_ned[0], -pos_ned[2], pos_ned[1]]
 }
@@ -306,11 +315,90 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
     }
 }
 
+/// 天空渐变背景：垂直三色带（顶=天空蓝，中=地平线淡蓝，底=地面暗色）。
+/// 逐行填充像素，取代 `clear()` 的纯深蓝。
+fn draw_sky(fb: &mut Framebuffer) {
+    let h = fb.height;
+    let horizon = (h as f64 * 0.58) as i32; // 地平线大致位置
+    let ground = (h as f64 * 0.90) as i32;
+    for y in 0..h {
+        // 0..horizon 天空渐变，horizon..ground 地面渐变
+        let c = if y < horizon as u32 {
+            let t = y as f64 / horizon.max(1) as f64;
+            let sky_top = [82.0, 132.0, 210.0]; // 天蓝
+            let sky_hor = [190.0, 210.0, 235.0]; // 地平线淡蓝
+            lerp3(sky_top, sky_hor, t)
+        } else if y < ground as u32 {
+            let t = (y as f64 - horizon as f64) / (ground - horizon).max(1) as f64;
+            let land_hor = [120.0, 130.0, 150.0];
+            let land_dark = [28.0, 34.0, 44.0];
+            lerp3(land_hor, land_dark, t)
+        } else {
+            [24.0, 28.0, 36.0]
+        };
+        let col = pack(c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0);
+        let base = (y as usize) * fb.width as usize;
+        for x in 0..fb.width as usize {
+            fb.pixels[base + x] = col;
+        }
+    }
+}
+
+fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+/// 地面参考：在原点 (0,0,0) 画醒目的十字标（红），便于观察机体相对起飞点位置。
+fn draw_ground_marker(fb: &mut Framebuffer, vp: &Matrix4<f32>, w: u32, h: u32) {
+    let model = Matrix4::<f32>::identity();
+    let m = 0.6f32; // 十字半长（米）
+    // 沿 north(x) 和 east(z) 两条线，y=0 平面。
+    draw_line_world(fb, vp, &model, [-m, 0.0, 0.0], [m, 0.0, 0.0], [230, 80, 70]);
+    draw_line_world(fb, vp, &model, [0.0, 0.0, -m], [0.0, 0.0, m], [230, 80, 70]);
+    // 中心圆点
+    if let Some(pc) = project([0.0, 0.0, 0.0], vp, &model, w, h) {
+        fb.fill_circle(pc.0, pc.1, 4, pc.2, [235, 220, 90]);
+    }
+}
+
+/// 朝向指示器：屏幕左下角固定锚点，画世界系北(红)/上(绿)/东(蓝) 三条方向线。
+/// 方向来自世界原点沿各轴延伸在相机投影下的屏幕位置，随相机旋转真实反映世界朝向。
+fn draw_compass(fb: &mut Framebuffer, vp: &Matrix4<f32>, w: u32, h: u32) {
+    let model = Matrix4::<f32>::identity();
+    // 屏幕锚点（左下角）。
+    let ax = 70i32;
+    let ay = (h as i32) - 60;
+    // 世界原点沿各轴 0.5m 的点投影。
+    let north = project([0.5, 0.0, 0.0], vp, &model, w, h);
+    let up = project([0.0, 0.5, 0.0], vp, &model, w, h);
+    let east = project([0.0, 0.0, 0.5], vp, &model, w, h);
+    let dirs: [(&str, Option<(i32, i32, f32)>, [u8; 3]); 3] = [
+        ("N", north, [230, 90, 90]),
+        ("U", up, [90, 230, 90]),
+        ("E", east, [90, 130, 230]),
+    ];
+    for (label, proj, col) in dirs {
+        if let Some((px, py, _)) = proj {
+            // 从锚点画到投影点
+            fb.draw_line(ax, ay, px, py, 0.0, col);
+            // 端点小圆
+            fb.fill_circle(px, py, 2, 0.0, col);
+            // 标签在锚点处简单标注（用短线区分三色即可，文字由前端可加）
+            let _ = label;
+        }
+    }
+}
+
 /// 渲染一帧：返回 `width*height` 个 `0xAARRGGBB` 像素（`Vec<u32>`）。
 /// 像素内存布局为小端 B,G,R,A，可直接作为 canvas `ImageData` 的字节源。
 pub fn render_frame(width: u32, height: u32, inp: &RenderInput) -> Vec<u32> {
     let mut fb = Framebuffer::new(width, height);
-    fb.clear();
+    // 环境：天空渐变背景（取代纯色 clear）。
+    draw_sky(&mut fb);
     let mut cam = Camera::default();
     cam.yaw = inp.cam_yaw;
     cam.pitch = inp.cam_pitch;
@@ -320,8 +408,10 @@ pub fn render_frame(width: u32, height: u32, inp: &RenderInput) -> Vec<u32> {
     let vp = cam.view_proj(aspect);
 
     draw_ground(&mut fb, &vp);
+    draw_ground_marker(&mut fb, &vp, width, height);
     draw_trail(&mut fb, &vp, &inp.trail, width, height);
     draw_quad(&mut fb, &vp, inp, aspect);
+    draw_compass(&mut fb, &vp, width, height);
 
     fb.pixels
 }

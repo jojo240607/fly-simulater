@@ -274,6 +274,12 @@ where
         (self.ctrl.world_state(), self.ctrl.last_cmd())
     }
 
+    /// 阶段 7+：取引擎世界系（Y-up）真实位姿 (pos xyz, quat wxyz)。绕开 NED 映射，
+    /// 供渲染直接使用（渲染世界系与引擎同为 Y-up，仅 z 轴反号）。
+    pub fn debug_up(&self) -> ([f64; 3], [f64; 4]) {
+        self.ctrl.debug_up()
+    }
+
     /// 阶段 3：风环境接入验证场景。
     ///
     /// 注意：当前默认 PID（ctrl_params）抗风能力极弱（>~0.3 m/s 持续风会因姿态环
