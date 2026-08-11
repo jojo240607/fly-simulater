@@ -148,6 +148,8 @@ fn project(
 /// 画地面网格（render 系 y=0 平面，即 NED d=0 水平面）。
 fn draw_ground(fb: &mut Framebuffer, vp: &Matrix4<f32>) {
     let model = Matrix4::<f32>::identity();
+    // 网格线用柔和低对比色（比地面略亮一点但不抢眼）。
+    let grid_col = [50, 59, 72];
     let span = 10i32;
     for i in -span..=span {
         let a = [i as f32, 0.0, -span as f32];
@@ -156,7 +158,7 @@ fn draw_ground(fb: &mut Framebuffer, vp: &Matrix4<f32>) {
             project(a, vp, &model, fb.width, fb.height),
             project(b, vp, &model, fb.width, fb.height),
         ) {
-            fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, [38, 46, 58]);
+            fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, grid_col);
         }
         let a = [-span as f32, 0.0, i as f32];
         let b = [span as f32, 0.0, i as f32];
@@ -164,7 +166,7 @@ fn draw_ground(fb: &mut Framebuffer, vp: &Matrix4<f32>) {
             project(a, vp, &model, fb.width, fb.height),
             project(b, vp, &model, fb.width, fb.height),
         ) {
-            fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, [38, 46, 58]);
+            fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, grid_col);
         }
     }
 }
@@ -189,6 +191,63 @@ fn draw_trail(fb: &mut Framebuffer, vp: &Matrix4<f32>, trail: &[[f64; 3]], w: u3
             fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, col);
         }
     }
+}
+
+/// 画一个实心四边形（世界/model 空间 4 顶点 → 屏幕，逐像素填充）。
+/// 用于画立体机架（机身平板/电机座/螺旋桨叶），带 Z 深度测试。
+fn fill_quad_world(
+    fb: &mut Framebuffer,
+    vp: &Matrix4<f32>,
+    model: &Matrix4<f32>,
+    corners: [[f32; 3]; 4],
+    color: [u8; 3],
+) {
+    let mut proj = Vec::with_capacity(4);
+    for c in corners {
+        if let Some(p) = project(c, vp, model, fb.width, fb.height) {
+            proj.push(p);
+        } else {
+            return; // 任一顶点被裁剪则整体跳过（简化）
+        }
+    }
+    if proj.len() < 4 {
+        return;
+    }
+    let xs: Vec<i32> = proj.iter().map(|p| p.0).collect();
+    let ys: Vec<i32> = proj.iter().map(|p| p.1).collect();
+    let minx = *xs.iter().min().unwrap();
+    let maxx = *xs.iter().max().unwrap();
+    let miny = *ys.iter().min().unwrap();
+    let maxy = *ys.iter().max().unwrap();
+    // 深度取四角平均（简化，够用）。
+    let depth = (proj[0].2 + proj[1].2 + proj[2].2 + proj[3].2) * 0.25;
+    for y in miny..=maxy {
+        for x in minx..=maxx {
+            if point_in_quad(x, y, &proj) {
+                fb.set_depth(x, y, depth, color);
+            }
+        }
+    }
+}
+
+/// 判断屏幕点 (x,y) 是否在凸四边形（4 个屏幕投影点）内（含边）。
+fn point_in_quad(x: i32, y: i32, quad: &[(i32, i32, f32)]) -> bool {
+    let mut sign = None;
+    for i in 0..4 {
+        let a = (quad[i].0, quad[i].1);
+        let b = (quad[(i + 1) % 4].0, quad[(i + 1) % 4].1);
+        let cross = (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0);
+        let s = if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 };
+        if s == 0 {
+            continue;
+        }
+        match sign {
+            None => sign = Some(s),
+            Some(prev) if prev != s => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// 画三维世界线段（model 空间两点 → 屏幕）。
@@ -221,39 +280,49 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
     let model = t * r;
 
     let arm = inp.arm as f32 * inp.visual_scale;
-    let s = 0.18f32 * inp.visual_scale;
+    let s = 0.20f32 * inp.visual_scale; // 机身平板半宽
+    let center = project([0.0, 0.0, 0.0], vp, &model, fb.width, fb.height);
 
-    let corners = [
-        [-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s],
-        [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s],
+    // ---- 机架：中心扁平机身（实心菱形平板）+ 4 臂 ----
+    // 机身平板（X-Y 平面，z≈0），做一个圆角菱形机身：沿臂对角线方向拉长。
+    let body = [
+        [arm * 0.42, 0.0, 0.0],   // 前
+        [0.0, arm * 0.42, 0.0],   // 右
+        [-arm * 0.42, 0.0, 0.0],  // 后
+        [0.0, -arm * 0.42, 0.0],  // 左
     ];
-    let edges = [
-        [0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7],
+    fill_quad_world(fb, vp, &model, body, [150, 175, 210]); // 机身淡蓝
+    // 机身下沿加一点厚度感（z 偏移）
+    let body_low = [
+        [arm * 0.42, 0.0, -0.05 * inp.visual_scale],
+        [0.0, arm * 0.42, -0.05 * inp.visual_scale],
+        [-arm * 0.42, 0.0, -0.05 * inp.visual_scale],
+        [0.0, -arm * 0.42, -0.05 * inp.visual_scale],
     ];
-    for e in edges {
-        let (a, b) = (corners[e[0]], corners[e[1]]);
-        if let (Some(pa), Some(pb)) = (
-            project(a, vp, &model, fb.width, fb.height),
-            project(b, vp, &model, fb.width, fb.height),
-        ) {
-            fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, [120, 140, 180]);
+    fill_quad_world(fb, vp, &model, body_low, [110, 130, 165]);
+
+    // 机头标记（前）红色小圆点
+    if let Some(pc) = center {
+        if let Some(pn) = project([arm * 0.42, 0.0, 0.0], vp, &model, fb.width, fb.height) {
+            fb.fill_circle(pn.0, pn.1, 3, pn.2, [230, 80, 70]);
         }
+        let _ = pc;
     }
 
+    // 4 臂 + 电机座 + 旋翼盘 + 螺旋桨叶
     let rotor = [
         [-arm, -arm, 0.0],
         [arm, arm, 0.0],
         [arm, -arm, 0.0],
         [-arm, arm, 0.0],
     ];
-    let center = project([0.0, 0.0, 0.0], vp, &model, fb.width, fb.height);
     for i in 0..4 {
         let rr = rotor[i];
         let pr = project(rr, vp, &model, fb.width, fb.height);
         if let (Some(pc), Some(pr)) = (center, pr) {
-            fb.draw_line(pc.0, pc.1, pr.0, pr.1, (pc.2 + pr.2) * 0.5, [80, 90, 110]);
+            // 臂线
+            fb.draw_line(pc.0, pc.1, pr.0, pr.1, (pc.2 + pr.2) * 0.5, [96, 108, 128]);
             let m = inp.motors[i] as f32;
-            let rad = (2.0 + m * 6.0).max(1.0) as i32;
             let eff = inp.eff[i];
             let col = if eff <= 0.02 {
                 let on = (inp.blink.sin() * 0.5 + 0.5) > 0.5;
@@ -265,7 +334,16 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
             } else {
                 [110, 110, 110]
             };
-            fb.fill_circle(pr.0, pr.1, rad, pr.2, col);
+            // 电机座（小实心圆，暗色）
+            fb.fill_circle(pr.0, pr.1, 2, pr.2, [60, 66, 76]);
+            // 旋翼盘：十字叶片（随相角转动，模拟高速旋转）+ 盘心
+            let blade = (3.0 + m * 8.0) as i32;
+            let ang = inp.blink * 3.0 + i as f64 * 1.5708;
+            let cxx = (ang.cos() * blade as f64) as i32;
+            let cyy = (ang.sin() * blade as f64) as i32;
+            fb.draw_line(pr.0 - cxx, pr.1 - cyy, pr.0 + cxx, pr.1 + cyy, pr.2, col);
+            fb.draw_line(pr.0 + cyy, pr.1 - cxx, pr.0 - cyy, pr.1 + cxx, pr.2, col);
+            fb.fill_circle(pr.0, pr.1, 2, pr.2, col);
         }
     }
 
