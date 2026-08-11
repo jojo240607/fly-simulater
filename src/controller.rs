@@ -14,8 +14,21 @@ use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond,
 use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, PosSample, VehicleState};
 
 use crate::plant::QuadrotorPlant;
+use crate::physics::{RigidBodyWorld, PhyFfiWorld};
 use crate::wind::WindField;
 use crate::sensor::SensorConfig;
+
+/// 生产路径便捷别名：用真实 C 物理引擎的控制器。
+pub type RealFlyController = FlyController<PhyFfiWorld>;
+
+/// 测试/调试便捷：返回四路满油门（归一化 1.0）执行器指令。
+pub fn actuator_full() -> ActuatorCmd {
+    let mut c = ActuatorCmd::zero();
+    for i in 0..4 {
+        c.motor[i] = 1.0;
+    }
+    c
+}
 
 /// 控制器种类（阶段 5：高级控制律对比）。
 #[derive(Clone, Copy, Debug)]
@@ -79,9 +92,9 @@ impl MotorActuator for SimMotors {
 
 // ---- 控制器主结构 ----
 
-pub struct FlyController {
+pub struct FlyController<W> {
     hil: CtrlVariant,
-    plant: QuadrotorPlant,
+    plant: QuadrotorPlant<W>,
     imu: SimImu,
     gps: SimGps,
     motors: SimMotors,
@@ -90,8 +103,12 @@ pub struct FlyController {
     fail_mask: [bool; 4],
 }
 
-impl FlyController {
+impl<W> FlyController<W>
+where
+    W: RigidBodyWorld,
+{
     pub fn new(
+        world: W,
         cfg: &VehicleConfig,
         dt: f64,
         wind: Option<WindField>,
@@ -116,7 +133,7 @@ impl FlyController {
             }
         };
 
-        let plant = QuadrotorPlant::new(cfg, dt, wind, sensor_cfg);
+        let plant = QuadrotorPlant::new(world, cfg, dt, wind, sensor_cfg);
 
         let imu = SimImu {
             last: ImuSample {

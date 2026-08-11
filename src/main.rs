@@ -3,18 +3,13 @@
 //! 当前：`fly-simulater run --hover` 跑 SIL 悬停场景（物理引擎 FFI + flyctrl-core 控制律）。
 //! 后续：HIL 模式经 USB CDC 接真实飞控（见 DESIGN.md §9）。
 
-mod phy_ffi;
-mod plant;
-mod controller;
-mod sim;
-mod airframe;
-mod wind;
-mod sensor;
-mod log;
-
-use flyctrl_core::config::VehicleConfig;
-use phy_ffi::phy_ffi_abi_version;
-use crate::controller::ControllerKind;
+use fly_simulater::airframe;
+use fly_simulater::controller::ControllerKind;
+use fly_simulater::physics::PhyFfiWorld;
+use fly_simulater::phy_ffi::phy_ffi_abi_version;
+use fly_simulater::sensor;
+use fly_simulater::sim;
+use fly_simulater::wind;
 
 /// CLI 解析结果。
 struct Cli {
@@ -149,18 +144,18 @@ fn main() {
     // 3. SIL 场景（dt=4ms 对齐 MCU 控制周期）。
     let dt = 0.004;
     let wind = if cli.scenario == "wind" {
-        Some(wind::WindField::new(sim::windy_config()))
+        Some(wind::WindField::new(sim::windy_config())) as Option<_>
     } else {
         None
     };
     // 阶段 4：传感器噪声（默认零噪声保持 PASS；--sensor-noise 开启真实噪声）。
     let sensor_cfg = if cli.sensor_noise {
         println!("[main] 传感器真实噪声已开启（IMU/GPS 噪声+延迟+丢星）");
-        crate::sensor::SensorConfig::realistic()
+        sensor::SensorConfig::realistic()
     } else {
-        crate::sensor::SensorConfig::default()
+        sensor::SensorConfig::default()
     };
-    let mut loop_sim = sim::SimLoop::new(&cfg, dt, wind, sensor_cfg, cli.controller);
+    let mut loop_sim = sim::SimLoop::new(PhyFfiWorld::create_empty(), &cfg, dt, wind, sensor_cfg, cli.controller);
 
     // 阶段 6：CSV 日志。
     if let Some(ref p) = cli.log_path {

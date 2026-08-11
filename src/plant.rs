@@ -21,7 +21,7 @@ use flyctrl_core::vehicle::{
 };
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 
-use crate::phy_ffi::{self, PhyWorldHandle};
+use crate::physics::RigidBodyWorld;
 use crate::wind::{WindField, WindVec};
 use crate::sensor::{SensorConfig, SensorModel};
 
@@ -87,8 +87,8 @@ struct AeroDrag {
 
 // ============================================================ 被控对象
 
-pub struct QuadrotorPlant {
-    world: *mut PhyWorldHandle,
+pub struct QuadrotorPlant<W> {
+    world: W,
     body_id: i64,
     cfg: VehicleConfig,
     dt: f64,
@@ -108,23 +108,20 @@ pub struct QuadrotorPlant {
     sensor: SensorModel,
 }
 
-impl QuadrotorPlant {
+impl<W> QuadrotorPlant<W>
+where
+    W: RigidBodyWorld,
+{
     /// 在世界中创建机体刚体。mass / 转动惯量来自机型配置。
+    /// `world`：实现了 `RigidBodyWorld` 的物理世界（真实引擎或测试替身）。
     /// `wind`：可选风场（阶段 3 抗风/前飞场景）。
     /// `sensor_cfg`：传感器模型配置（阶段 4；默认零噪声保持场景 PASS）。
-    pub fn new(cfg: &VehicleConfig, dt: f64, wind: Option<WindField>, sensor_cfg: SensorConfig) -> Self {
-        // 空刚体世界（无 demo 地面/球），自行添加机体与可选地面。
-        let world = unsafe { phy_ffi::phy_world_create_rigid_empty() };
-        assert!(!world.is_null(), "phy_world_create_rigid_empty 失败");
-
+    pub fn new(world: W, cfg: &VehicleConfig, dt: f64, wind: Option<WindField>, sensor_cfg: SensorConfig) -> Self {
+        let mut world = world;
         // 静态地面盒（质量 0 = 无限质量，不动）。位于 y=-5，半高 0.5。
         let ground_pos7: [f64; 7] = [0.0, -5.0, 0.0, 1.0, 0.0, 0.0, 0.0];
         let ground_inertia: [f64; 3] = [1.0, 1.0, 1.0];
-        let _ground = unsafe {
-            phy_ffi::phy_world_rigid_add_body(
-                world, 1 /*Box*/, 0.0 /*mass=0 静态*/, ground_pos7.as_ptr(), ground_inertia.as_ptr(),
-            )
-        };
+        let _ground = world.add_body(0.0 /*mass=0 静态*/, &ground_pos7, &ground_inertia);
 
         // 初始位姿：NED (0,0,-5) = 悬停 5m 高 -> 引擎 (0, 5, 0)。
         // 初始姿态：机体"上"轴(+Z, 引擎机体系)对齐世界 +Y(上)，即绕 X 轴 +90°。
@@ -146,10 +143,8 @@ impl QuadrotorPlant {
             cfg.inertia[1] as f64,
             cfg.inertia[2] as f64,
         ];
-        let body_id = unsafe {
-            phy_ffi::phy_world_rigid_add_body(world, 1 /*Box*/, cfg.mass as f64, pos7.as_ptr(), inertia3.as_ptr())
-        };
-        assert!(body_id >= 0, "phy_world_rigid_add_body 失败");
+        let body_id = world.add_body(cfg.mass as f64, &pos7, &inertia3);
+        assert!(body_id >= 0, "add_body 失败");
 
         Self {
             world,
@@ -245,17 +240,11 @@ impl QuadrotorPlant {
         let f_world_tot = rotate_by_quat(q, f_body_tot);
         let tau_world = rotate_by_quat(q, tau_body);
 
-        unsafe {
-            phy_ffi::phy_world_rigid_apply_force(
-                self.world, self.body_id, f_world_tot.as_ptr(), self.dt, 0,
-            );
-            phy_ffi::phy_world_rigid_apply_torque(
-                self.world, self.body_id, tau_world.as_ptr(), self.dt, 0,
-            );
-        }
+        self.world.apply_force(self.body_id, &f_world_tot, self.dt, 0);
+        self.world.apply_torque(self.body_id, &tau_world, self.dt, 0);
 
         // ---- 步进物理引擎 ----
-        let rc = unsafe { phy_ffi::phy_world_step_checked(self.world, self.dt) };
+        let rc = self.world.step(self.dt);
         assert_eq!(rc, 0, "物理引擎 step 检测到 NaN/Inf，世界已损坏");
         self.time += self.dt;
     }
@@ -265,10 +254,7 @@ impl QuadrotorPlant {
     /// 返回机体坐标系三轴力 [fx,fy,fz]（N），与世界系推力叠加前先旋到世界系。
     fn aero_drag_body(&self, q: [f64; 4], wind_up: &WindVec) -> AeroDrag {
         // 机体线速度（世界系 -> 机体系）：用现成 rotate_by_quat_conj。
-        let mut vel = [0.0f64; 3];
-        unsafe {
-            phy_ffi::phy_world_rigid_get_velocity(self.world, self.body_id, vel.as_mut_ptr());
-        }
+        let vel = self.world.get_velocity(self.body_id);
         // 相对风速：机体速度 - 风速（同世界系）。
         let mut v_rel = [0.0f64; 3];
         for i in 0..3 {
@@ -304,12 +290,8 @@ impl QuadrotorPlant {
     /// 由刚体真值生成传感器样本（NED 语义）喂飞控。
     pub fn read_sensors(&mut self) -> (ImuSample, Option<PosSample>) {
         let mut tf = self.read_body_tf();
-        let mut vel = [0.0f64; 3];
-        let mut ang = [0.0f64; 3];
-        unsafe {
-            phy_ffi::phy_world_rigid_get_velocity(self.world, self.body_id, vel.as_mut_ptr());
-            phy_ffi::phy_world_rigid_get_angular_velocity(self.world, self.body_id, ang.as_mut_ptr());
-        }
+        let vel = self.world.get_velocity(self.body_id);
+        let ang = self.world.get_angular_velocity(self.body_id);
 
         let pos_up = [tf[0], tf[1], tf[2]];
         let q_up = [tf[3], tf[4], tf[5], tf[6]];
@@ -346,13 +328,11 @@ impl QuadrotorPlant {
     }
 
     /// 按 `body_id` 偏移读回该刚体的 7 元组 (pos.xyz + quat.wxyz)。
-    /// `phy_world_get_rigid_transforms` 不带 id，故分配足够 buf 并取末尾 7 个。
+    /// 通过 `get_rigid_transforms` 批量读回后取本 body 段（trait 接口形态，引擎/替身一致）。
     fn read_body_tf(&self) -> [f64; 7] {
         let len = (self.body_id as usize + 1) * 7;
         let mut buf = vec![0.0f64; len];
-        unsafe {
-            phy_ffi::phy_world_get_rigid_transforms(self.world, buf.as_mut_ptr(), len);
-        }
+        self.world.get_rigid_transforms(&mut buf);
         let off = self.body_id as usize * 7;
         [
             buf[off], buf[off + 1], buf[off + 2], buf[off + 3], buf[off + 4], buf[off + 5],
@@ -373,12 +353,8 @@ impl QuadrotorPlant {
         let q_up = [tf[3], tf[4], tf[5], tf[6]];
         let pos_ned = vec_up_to_ned(pos_up);
         let quat_ned = quat_up_to_ned(q_up);
-        let mut vel = [0.0f64; 3];
-        let mut ang = [0.0f64; 3];
-        unsafe {
-            phy_ffi::phy_world_rigid_get_velocity(self.world, self.body_id, vel.as_mut_ptr());
-            phy_ffi::phy_world_rigid_get_angular_velocity(self.world, self.body_id, ang.as_mut_ptr());
-        }
+        let vel = self.world.get_velocity(self.body_id);
+        let ang = self.world.get_angular_velocity(self.body_id);
         VehicleState {
             pos: [Meter(pos_ned[0]), Meter(pos_ned[1]), Meter(pos_ned[2])],
             vel: [
@@ -389,12 +365,6 @@ impl QuadrotorPlant {
             att: quat_ned,
             omega: [RadianPerSecond(ang[0] as f32), RadianPerSecond(ang[1] as f32), RadianPerSecond(-ang[2] as f32)],
         }
-    }
-}
-
-impl Drop for QuadrotorPlant {
-    fn drop(&mut self) {
-        unsafe { phy_ffi::phy_world_destroy(self.world) };
     }
 }
 

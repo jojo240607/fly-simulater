@@ -111,8 +111,39 @@
 
 ---
 
+## 阶段 7 — 物理引擎解耦（依赖倒置 + 可替换替身）✅ 已完成
+
+**动机**（来自用户提供的"物理引擎接口设计"讨论）：仿真层不应直接耦合具体物理引擎
+（我们原本在 `plant.rs` 里裸调 `phy_ffi` C-ABI 函数），应依赖 `RigidBodyWorld` trait，
+使引擎可替换、且能注入玩具级替身做单元测试（无需启动 C 引擎、加速测试、验证接口充分性）。
+
+**实现**：
+- `src/physics.rs`：定义 `RigidBodyWorld` trait（最小充分接口：`body_count/add_body/
+  apply_force/apply_torque/get_velocity/get_angular_velocity/get_rigid_transforms/step/time`）。
+  **关键语义约定（写进文档）**：`apply_force/apply_torque` 为**瞬态**，引擎 `step` 后必清零，
+  防替换引擎出"幽灵残留推力"。重力由引擎内部持有（世界系 (0,-g,0)），不每次传入。
+- `PhyFfiWorld`：真实引擎适配器，包 `phy_ffi` 不安全调用为 trait 方法（`Drop` 自管销毁）。
+- `ToyWorld`：半隐式欧拉刚体积分 + 简单地面碰撞的测试替身，确定性、无外部依赖。
+- `QuadrotorPlant<W>` / `FlyController<W>` / `SimLoop<W>` 全部静态泛型化（`W: RigidBodyWorld`），
+  生产路径用 `PhyFfiWorld`（便捷别名 `RealFlyController = FlyController<PhyFfiWorld>`）。
+- 引入 `src/lib.rs`，使集成测试 `use fly_simulater::...` 验证**公共接口**（可替换性验证）。
+- `tests/physics_toy.rs`：4 个集成测试（满油门上升 / 纯力矩生角速度 / 瞬态力 step 后清零 /
+  plant 替身连续 step 无 NaN），全 PASS。
+
+**与"通用物理引擎接口"提案的取舍**（已在模块文档记录）：
+- 不暴露 `set_state`/`at_point`：四旋翼推力沿机体过质心轴，纯力矩用 `apply_torque`，
+  `at_point` 对四旋翼无意义；引擎持有状态，仿真层不写回。
+- 保留批量 `get_rigid_transforms`：真实引擎 ABI 即此形态，替身对齐避免为单 body 改 ABI。
+- 静态泛型（`impl RigidBodyWorld`）而非 `dyn`：避免 vtable 跨 C-FFI 边界的 ABI 风险。
+
+**验证**：`cargo build` 通过；生产悬停 PASS（dz=0.04，与重构前一致，行为零回归）；
+`cargo test --test physics_toy` 4/4 PASS。
+
+---
+
 ## 实施顺序
 
-**0 → 1 → 2 → 4 → 3 → 5 → 6**
+**0 → 1 → 2 → 4 → 3 → 5 → 6 → 7**
 
-0/1/2 是"机架真实 + 气动可信"的地基，最先做；4 独立于风场但真实 EKF 验证离不开；3 与 4 耦合；5 验收；6 保证可持续迭代。
+0/1/2 是"机架真实 + 气动可信"的地基，最先做；4 独立于风场但真实 EKF 验证离不开；3 与 4 耦合；
+5 验收；6 保证可持续迭代；7 把物理引擎依赖倒置，解锁替身单测与未来换引擎。

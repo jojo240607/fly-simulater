@@ -7,15 +7,15 @@ use flyctrl_core::invariants;
 use flyctrl_core::vehicle::VehicleState;
 
 use crate::controller::{hover_setpoint, FlyController};
-use crate::plant::QuadrotorPlant;
+use crate::physics::RigidBodyWorld;
 use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
 use crate::sensor::SensorConfig;
 use crate::controller::ControllerKind;
 use crate::log::{CsvLogger, LogRow};
 
-pub struct SimLoop {
-    ctrl: FlyController,
+pub struct SimLoop<W> {
+    ctrl: FlyController<W>,
     cfg: VehicleConfig,
     dt: f64,
     steps: u64,
@@ -26,8 +26,12 @@ pub struct SimLoop {
     energy_monotonic: bool,
 }
 
-impl SimLoop {
+impl<W> SimLoop<W>
+where
+    W: RigidBodyWorld,
+{
     pub fn new(
+        world: W,
         cfg: &VehicleConfig,
         dt: f64,
         wind: Option<WindField>,
@@ -35,7 +39,7 @@ impl SimLoop {
         kind: ControllerKind,
     ) -> Self {
         Self {
-            ctrl: FlyController::new(cfg, dt, wind, sensor_cfg, kind),
+            ctrl: FlyController::new(world, cfg, dt, wind, sensor_cfg, kind),
             cfg: cfg.clone(),
             dt,
             steps: 0,
@@ -224,9 +228,7 @@ impl SimLoop {
     }
 }
 
-// 抑制未使用告警：QuadrotorPlant 在 controller 内部已使用，这里保留引用便于扩展。
-#[allow(dead_code)]
-fn _assert_plant(_: QuadrotorPlant) {}
+// 抑制未使用告警。
 #[allow(dead_code)]
 fn _assert_state(_: VehicleState) {}
 
