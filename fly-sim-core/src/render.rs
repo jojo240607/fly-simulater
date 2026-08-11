@@ -331,23 +331,37 @@ pub fn make_fuselage_texture() -> Texture {
     let (w, h) = (64u32, 64u32);
     let mut data = vec![0u32; (w * h) as usize];
     let mut rng: u64 = 0x9E3779B97F4A7C15;
+    let cx = w as f32 * 0.5;
+    let cy = h as f32 * 0.5;
     for y in 0..h {
         for x in 0..w {
-            // 伪随机
+            let fx = x as f32;
+            let fy = y as f32;
             rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
             let n = (rng & 0xFF) as f32 / 255.0;
-            // 碳纤维暗底 + 细亮纹
-            let mut r = 40.0 + n * 12.0;
-            let mut g = 46.0 + n * 12.0;
-            let mut b = 52.0 + n * 12.0;
-            // 水平细纹
-            if y % 8 < 1 {
-                r += 12.0; g += 13.0; b += 14.0;
+            // 碳纤维斜纹编织：交错 45° 亮/暗细线（更真实的编织观感）
+            let diag1 = ((fx + fy) as i32) % 6 == 0;
+            let diag2 = ((fx - fy) as i32) % 6 == 0;
+            let mut r = 34.0 + n * 10.0;
+            let mut g = 40.0 + n * 10.0;
+            let mut b = 46.0 + n * 10.0;
+            if diag1 || diag2 {
+                r += 14.0; g += 15.0; b += 16.0;
             }
-            // 中央警示条（黄色）
-            let cx = (w / 2) as i32;
-            if (x as i32 - cx).abs() < 6 && y < h / 3 {
-                r = 225.0; g = 190.0; b = 60.0;
+            // 边缘黑边（机身边框）
+            let edge = fx < 3.0 || fx > w as f32 - 3.0 || fy < 3.0 || fy > h as f32 - 3.0;
+            // 中央横向红色装饰条（DJI 风格红色机头带），横向中带
+            let band = (fy - cy).abs() < 5.0;
+            if band {
+                r = 200.0; g = 48.0; b = 42.0;
+            }
+            // 圆形 Logo 白点在右上
+            let logo = ((fx - w as f32 * 0.78).powi(2) + (fy - h as f32 * 0.30).powi(2)).sqrt() < 4.0;
+            if logo {
+                r = 240.0; g = 240.0; b = 245.0;
+            }
+            if edge {
+                r = 16.0; g = 18.0; b = 22.0;
             }
             let c = ((0xFFu32) << 24) | ((r as u32 & 0xFF) << 16) | ((g as u32 & 0xFF) << 8) | (b as u32 & 0xFF);
             data[(y * w + x) as usize] = c;
@@ -356,27 +370,32 @@ pub fn make_fuselage_texture() -> Texture {
     Texture::new(w, h, data)
 }
 
-/// 程序化生成一张"螺旋桨叶片"纹理：半透明感 + 径向渐变 + 碳纤维纹。
+/// 程序化生成一张"螺旋桨叶片"纹理：径向渐变 + 3 片桨叶扇区，模拟高速旋转。
 pub fn make_rotor_texture() -> Texture {
     let (w, h) = (64u32, 64u32);
     let mut data = vec![0u32; (w * h) as usize];
-    let mut rng: u64 = 0x1234_5678_9abc;
     for y in 0..h {
         for x in 0..w {
             let dx = (x as f32 - w as f32 * 0.5) / (w as f32 * 0.5);
             let dy = (y as f32 - h as f32 * 0.5) / (h as f32 * 0.5);
             let rr = (dx * dx + dy * dy).sqrt(); // 0..1 径向
-            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-            let n = (rng & 0xFF) as f32 / 255.0;
-            // 中心亮、边缘暗的圆盘，带细纹
-            let a = (1.0 - rr * 0.8).clamp(0.0, 1.0);
-            let mut r = 60.0 + a * 160.0;
-            let mut g = 180.0 + a * 60.0;
-            let mut b = 100.0 + a * 80.0;
-            if y % 6 < 1 {
-                r += 15.0; g += 10.0;
+            // 中心小圆盘（电机轴）向外，螺旋桨模糊成圆盘
+            let a = (1.0 - rr).clamp(0.0, 1.0);
+            // 淡灰半透明桨盘（高速旋转模糊），中心略亮
+            let mut lum = 150.0 * a;
+            // 中心电机轴深色点
+            if rr < 0.15 {
+                lum = 45.0;
             }
-            // 半透明：alpha 255，但颜色偏淡表现高速旋转模糊
+            // 螺旋桨叶片 3 片扇区（角度判断，深色桨叶）
+            let ang = dy.atan2(dx);
+            let blade_zone = (ang * 3.0).sin() > 0.6;
+            if blade_zone && rr > 0.15 {
+                lum *= 0.55; // 桨叶区域更暗（可见桨叶轮廓）
+            }
+            let r = lum * 1.0;
+            let g = lum * 0.95;
+            let b = lum * 1.05;
             let c = ((0xFFu32) << 24) | ((r as u32 & 0xFF) << 16) | ((g as u32 & 0xFF) << 8) | (b as u32 & 0xFF);
             data[(y * w + x) as usize] = c;
         }
@@ -470,25 +489,7 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
         }
     }
 
-    let axes = [
-        ([0.6, 0.0, 0.0], [220, 70, 70]),
-        ([0.0, 0.6, 0.0], [70, 220, 70]),
-        ([0.0, 0.0, 0.6], [70, 70, 220]),
-    ];
-    if let Some(pc) = center {
-        for (ax, col) in axes {
-            let pa = project(
-                [ax[0] * inp.visual_scale, ax[1] * inp.visual_scale, ax[2] * inp.visual_scale],
-                vp,
-                &model,
-                fb.width,
-                fb.height,
-            );
-            if let Some(pa) = pa {
-                fb.draw_line(pc.0, pc.1, pa.0, pa.1, (pc.2 + pa.2) * 0.5, col);
-            }
-        }
-    }
+    // 机体朝向指示由屏幕角落的 draw_compass（北/上/东）提供，不再在机体上画长坐标轴。
 
     // 速度矢量箭头
     if let Some(pc) = center {
