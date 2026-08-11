@@ -1272,6 +1272,7 @@ dependencies = [
  "phy-core",
  "phy-field",
  "phy-math",
+ "rayon",
  "serde",
  "serde_json",
 ]

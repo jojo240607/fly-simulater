@@ -170,6 +170,78 @@ where
         all_ok && converged
     }
 
+    /// 阶段 9：自由落体能量守恒测例。
+    ///
+    /// 关闭所有执行器（无推力），仅重力做功，验证物理引擎积分器 +
+    /// `RigidBodyWorld` 接口的能量守恒正确性：**有气动阻力时机械能应单调衰减**，
+    /// 无气动阻力时（当前默认机型阻力极小，近似守恒）应非增长（数值耗散允许轻微衰减）。
+    ///
+    /// 机体从 (0,0,-5) 释放，初始零速度、水平姿态。测例用 ToyWorld 与生产世界
+    /// 都应成立（验证替身与真实引擎一致）。
+    pub fn run_freefall(&mut self, seconds: f64) -> bool {
+        let total = (seconds / self.dt) as u64;
+        let mut all_ok = true;
+        let e0 = self.mechanical_energy(&self.ctrl.world_state());
+        let start_d = self.ctrl.world_state().pos[2].0;
+        let mut e_min = f64::INFINITY;
+        let mut e_max = f64::NEG_INFINITY;
+        let mut non_increasing = true;
+        const TOL: f64 = 0.5; // 允许接触求解器在落地瞬间的极小数值噪声
+
+        for _ in 0..total {
+            // 不跑控制律、不注入推力：传零指令 + 直接推进物理世界。
+            let zero = flyctrl_core::vehicle::ActuatorCmd::zero();
+            self.ctrl.plant_apply(&zero);
+            self.ctrl.plant_step();
+            self.steps += 1;
+
+            if let Some(ref mut cb) = self.on_frame {
+                cb(&self.ctrl.world_state(), self.ctrl.last_cmd());
+            }
+            if let Some(ref mut cb) = self.on_step {
+                let w = self.ctrl.world_state();
+                let st = w.clone();
+                let row = LogRow {
+                    step: self.steps,
+                    t: self.steps as f64 * self.dt,
+                    true_state: w,
+                    est_state: st,
+                    cmd: self.ctrl.last_cmd(),
+                    imu: self.ctrl.last_imu(),
+                };
+                cb(&row);
+            }
+
+            let e = self.mechanical_energy(&self.ctrl.world_state());
+            e_min = e_min.min(e);
+            e_max = e_max.max(e);
+            // 不变量：机械能绝不允许超过初始值 + TOL（阻力/落地只耗散能量，
+            // 积分器若注入非物理能量会使 e 显著抬升 —— 这是真正的 bug 信号）。
+            if e > e0 + TOL {
+                non_increasing = false;
+            }
+
+            // 不变量：状态有限。
+            if !invariants::state_finite(&self.ctrl.world_state()) {
+                eprintln!("[FAIL] freefall step {}: state not finite", self.steps);
+                all_ok = false;
+                break;
+            }
+        }
+
+        let end = self.ctrl.world_state();
+        let fell = end.pos[2].0 > start_d; // NED d 向下为正，下落 => d 增大
+        println!(
+            "[freefall] end pos NED = ({:.3},{:.3},{:.3})m (初始 d={:.3})",
+            end.pos[0].0, end.pos[1].0, end.pos[2].0, start_d
+        );
+        println!(
+            "[freefall] 机械能: E0={:.3}J 范围[{:.3},{:.3}] 不增={}",
+            e0, e_min, e_max, non_increasing
+        );
+        all_ok && fell && non_increasing
+    }
+
     pub fn steps(&self) -> u64 { self.steps }
 
     /// 阶段 5：设置电机失效掩码（故障注入）。

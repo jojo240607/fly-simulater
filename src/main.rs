@@ -15,7 +15,7 @@ use fly_simulater::view;
 /// CLI 解析结果。
 struct Cli {
     airframe: Option<String>,
-    scenario: String, // "hover" | "wind"
+    scenario: String, // "hover" | "wind" | "freefall"
     sensor_noise: bool,
     controller: ControllerKind,
     fail_motor: Option<u8>, // 阶段 5：电机故障注入（0..3）
@@ -37,8 +37,8 @@ impl Cli {
     }
 }
 
-/// 极简 CLI：支持 `--airframe <path>`、`--scenario <hover|wind>`、`--sensor-noise`、
-/// `--controller <pid|indi|lqr>`、`--fail-motor <0..3>`。
+/// 极简 CLI：支持 `--airframe <path>`、`--scenario <hover|wind|freefall>`、
+/// `--sensor-noise`、`--controller <pid|indi|lqr>`、`--fail-motor <0..3>`。
 fn parse_args() -> Cli {
     let mut cli = Cli {
         airframe: None,
@@ -64,7 +64,7 @@ fn parse_args() -> Cli {
                 if let Some(s) = args.next() {
                     cli.scenario = s;
                 } else {
-                    eprintln!("[main] --scenario 需要跟 hover|wind");
+                    eprintln!("[main] --scenario 需要跟 hover|wind|freefall");
                     std::process::exit(2);
                 }
             }
@@ -107,7 +107,7 @@ fn parse_args() -> Cli {
             "--help" | "-h" => {
                 println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind] [--controller pid|indi|lqr] [--fail-motor 0..3] [--sensor-noise] [--log <path.csv>]");
                 println!("  --airframe      外部机架 TOML（缺省用内置 default_quad）");
-                println!("  --scenario      hover=无风悬停(默认) | wind=抗风悬停(阶段3)");
+                println!("  --scenario      hover=无风悬停(默认) | wind=抗风悬停(阶段3) | freefall=自由落体能量守恒(阶段9)");
                 println!("  --controller    pid=PID(默认) | indi=INDI+PID基线 | lqr=LQR");
                 println!("  --fail-motor    注入单电机故障 0..3（该电机停转，阶段5）");
                 println!("  --sensor-noise  开启真实 IMU/GPS 噪声（暴露 EKF 对噪声不耐受，见 PLAN 阶段5）");
@@ -202,6 +202,16 @@ fn main() {
     loop_sim.set_motor_failure(fail_mask);
 
     let ok = match cli.scenario.as_str() {
+        "freefall" => {
+            println!("[main] running freefall energy-conservation (10s, dt={}ms)...", dt * 1000.0);
+            let r = loop_sim.run_freefall(10.0);
+            println!(
+                "[main] freefall {} ({} steps)",
+                if r { "PASS" } else { "FAIL" },
+                loop_sim.steps()
+            );
+            r
+        }
         "wind" => {
             println!("[main] running SIL anti-wind hover (15s, dt={}ms)...", dt * 1000.0);
             let r = loop_sim.run_hover_wind(15.0);

@@ -157,7 +157,10 @@
 
 **修复**：
 - `fly-sim-core/src/physics.rs` `PhySdkWorld::create_empty`：取 `RigidSubsystem` 并设
-  `rw.world.params.sleep_time = 0.0`，为飞控仿真世界关闭休眠（引擎通用默认不动）。
+  `rw.world.params.sleep_time = f64::INFINITY`，为飞控仿真世界关闭休眠。**不能设 `0.0`**
+  （初始静止体 `sleep_time` 本为 0，`0>=0` 第一步即休眠，自由落体零推力场景会起步即冻结）；
+  **也不能把速度阈值 `sleep_lin_vel2/ang_vel2` 设无穷大**（那会让 `near_rest` 恒真、`sleep_time`
+  照常累积、到默认 0.5s 后仍休眠）。正确做法是把休眠时长阈值 `sleep_time` 抬到无穷大。
 - `flyctrl-core/src/fdir.rs` `Fdir::update`：冻结判据增加"加速度范数明显偏离合理静态重力
   区间 `[6,14] m/s²`"条件——真实 IMU 卡死常输出恒定为 0 或异常值（断流/失重/过载），
   稳定悬停（|a|≈9.81）不再误判。
@@ -170,8 +173,36 @@
 
 ## 实施顺序
 
-**0 → 1 → 2 → 4 → 3 → 5 → 6 → 7 → 8**
+**0 → 1 → 2 → 4 → 3 → 5 → 6 → 7 → 8 → 9**
 
 0/1/2 是"机架真实 + 气动可信"的地基，最先做；4 独立于风场但真实 EKF 验证离不开；3 与 4 耦合；
 5 验收；6 保证可持续迭代；7 把物理引擎依赖倒置，解锁替身单测与未来换引擎；
 8 修复阶段 5/7 遗留的悬停冻结/误判潜伏 BUG（此前 PASS 系假象）。
+
+---
+
+## 阶段 9 — 自由落体能量守恒测例 ✅ 已完成
+
+**目的**：在 PLAN §6 可选 #2 基础上，加一个无推力场景，验证物理引擎积分器 + `RigidBodyWorld`
+接口的能量守恒正确性——有气动阻力时机械能应**不增**（阻力/落地只耗散，积分器不得注入能量）。
+
+**实现**：
+- `fly-sim-core/src/sim.rs` `SimLoop::run_freefall(seconds)`：不跑控制律、传零指令、直接
+  `plant_apply(&zero)` + `plant_step()` 推进物理世界。每步算 `mechanical_energy`
+  （`0.5·m·v² − m·g·d`，NED d 向下为正），断言：(1) 机械能从不超过初始值 + 0.5J 容差
+  （catch 积分器能量注入的真实 bug）；(2) 机体确实下落（NED d 增大）；(3) 状态有限。
+- `fly-sim-core/src/controller.rs`：新增 `plant_apply` / `plant_step` 公开方法（无控场景用）。
+- `src/main.rs`：`--scenario freefall` 接入；help 文本与错误提示补全。
+
+**修复（依赖库 `phy-rigid`，独立仓库 `d:/project/game/physics`）**：
+- `scene.rs:17` 从 `crate::world` 导入 `gravity` 失败（world.rs 未重导出，已改为从 `phy_math` 直引）。
+- `scene.rs:46` `SceneDesc.gravity: Vec3<T>` 缺 `#[serde(with="crate::shape::serde_geom")]`，
+  导致 derive 走到 nalgebra 自带 serde（nalgebra 版本漂移后 `Vec3: Serialize` 不再满足）→ 编译失败。
+  已补 `serde_geom`，与 `RigidWorld.gravity` 一致。
+
+**验证**：`cargo build` 通过（顺带修好 phy-rigid 编译）；`--scenario freefall` PASS
+（机体从 d=-5 自由下坠、触地静止于 d≈+2.985，机械能 E0=58.86J 全程不增）；`--scenario hover`
+仍 PASS（收敛 d≈-4.96m、cmd≈0.50）；`cargo test` 4/4 PASS。
+
+**后续可选**（未做）：日志分析脚本、CSV 回放渲染器、传感器噪声下 EKF 鲁棒性回归（已知 `--sensor-noise`
+发散，待 EKF 调参或噪声门限处理）。

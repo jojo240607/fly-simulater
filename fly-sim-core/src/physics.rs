@@ -79,9 +79,17 @@ impl PhySdkWorld {
         // 四旋翼仿真必须关闭引擎的"休眠"机制（B1 Sleeping）：
         // 悬停稳定后机体速度趋于 0，引擎会误判为"近静止"并将 body 置 sleeping、
         // 清零速度并冻结位置——这会让本应维持悬停/可坠落的机体被锁死，且 disarm
-        // 后无法靠重力坠回。飞控需要世界始终积分，故把休眠时间阈值设为 0（永不休眠）。
+        // 后无法靠重力坠回。飞控需要世界始终积分。
+        //
+        // world.step 的休眠判定是"near_rest（速度低于阈值）且 sleep_time>=st 即休眠"。
+        // - 不能把 sleep_time 设为 0：初始静止体 sleep_time 本为 0，0>=0 在**第一步**
+        //   立即休眠（自由落体零推力场景正是如此，机体起步即冻结）。
+        // - 也不能把速度阈值设为无穷大：那会让 near_rest 恒为真，sleep_time 照样累积、
+        //   到默认 0.5s 后仍休眠（本 bug 第一次修复就踩中）。
+        // 正确做法是把 sleep_time（休眠时长阈值 st）设为无穷大：sleep_time >= ∞ 永不
+        // 成立 → 永不休眠。速度阈值保持默认即可。
         if let Some(rw) = get_as_mut::<RigidSubsystem<f64>>(&mut s.world, s.rigid_idx) {
-            rw.world.params.sleep_time = 0.0;
+            rw.world.params.sleep_time = f64::INFINITY;
         }
         s
     }

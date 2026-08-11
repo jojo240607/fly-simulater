@@ -196,6 +196,16 @@ where
         self.plant.state_ned()
     }
 
+    /// 阶段 9：直接把执行器指令写入被控对象（不跑控制律，供自由落体等无控场景）。
+    pub fn plant_apply(&mut self, cmd: &ActuatorCmd) {
+        self.plant.apply_actuators(cmd);
+    }
+
+    /// 阶段 9：直接推进物理世界一步（不跑控制律，供自由落体等无控场景）。
+    pub fn plant_step(&mut self) {
+        self.plant.step();
+    }
+
     /// 调试：返回引擎世界系真实坐标与四元数。
     pub fn debug_up(&self) -> ([f64; 3], [f64; 4]) {
         self.plant.debug_up()
