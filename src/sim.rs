@@ -10,6 +10,7 @@ use crate::controller::{hover_setpoint, FlyController};
 use crate::plant::QuadrotorPlant;
 use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
+use crate::sensor::SensorConfig;
 
 pub struct SimLoop {
     ctrl: FlyController,
@@ -19,9 +20,9 @@ pub struct SimLoop {
 }
 
 impl SimLoop {
-    pub fn new(cfg: &VehicleConfig, dt: f64, wind: Option<WindField>) -> Self {
+    pub fn new(cfg: &VehicleConfig, dt: f64, wind: Option<WindField>, sensor_cfg: SensorConfig) -> Self {
         Self {
-            ctrl: FlyController::new(cfg, dt, wind),
+            ctrl: FlyController::new(cfg, dt, wind, sensor_cfg),
             cfg: cfg.clone(),
             dt,
             steps: 0,

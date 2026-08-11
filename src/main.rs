@@ -9,6 +9,7 @@ mod controller;
 mod sim;
 mod airframe;
 mod wind;
+mod sensor;
 
 use flyctrl_core::config::VehicleConfig;
 use phy_ffi::phy_ffi_abi_version;
@@ -17,11 +18,12 @@ use phy_ffi::phy_ffi_abi_version;
 struct Cli {
     airframe: Option<String>,
     scenario: String, // "hover" | "wind"
+    sensor_noise: bool,
 }
 
-/// 极简 CLI：支持 `--airframe <path>` 与 `--scenario <hover|wind>`。
+/// 极简 CLI：支持 `--airframe <path>`、`--scenario <hover|wind>`、`--sensor-noise`。
 fn parse_args() -> Cli {
-    let mut cli = Cli { airframe: None, scenario: "hover".to_string() };
+    let mut cli = Cli { airframe: None, scenario: "hover".to_string(), sensor_noise: false };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -41,10 +43,14 @@ fn parse_args() -> Cli {
                     std::process::exit(2);
                 }
             }
+            "--sensor-noise" => {
+                cli.sensor_noise = true;
+            }
             "--help" | "-h" => {
-                println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind]");
-                println!("  --airframe  外部机架 TOML（缺省用内置 default_quad）");
-                println!("  --scenario  hover=无风悬停(默认) | wind=抗风悬停(阶段3)");
+                println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind] [--sensor-noise]");
+                println!("  --airframe      外部机架 TOML（缺省用内置 default_quad）");
+                println!("  --scenario      hover=无风悬停(默认) | wind=抗风悬停(阶段3)");
+                println!("  --sensor-noise  开启真实 IMU/GPS 噪声（暴露 EKF 对噪声不耐受，见 PLAN 阶段5）");
                 std::process::exit(0);
             }
             other => {
@@ -87,7 +93,14 @@ fn main() {
     } else {
         None
     };
-    let mut loop_sim = sim::SimLoop::new(&cfg, dt, wind);
+    // 阶段 4：传感器噪声（默认零噪声保持 PASS；--sensor-noise 开启真实噪声）。
+    let sensor_cfg = if cli.sensor_noise {
+        println!("[main] 传感器真实噪声已开启（IMU/GPS 噪声+延迟+丢星）");
+        crate::sensor::SensorConfig::realistic()
+    } else {
+        crate::sensor::SensorConfig::default()
+    };
+    let mut loop_sim = sim::SimLoop::new(&cfg, dt, wind, sensor_cfg);
 
     let ok = match cli.scenario.as_str() {
         "wind" => {

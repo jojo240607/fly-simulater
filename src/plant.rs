@@ -23,6 +23,7 @@ use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPe
 
 use crate::phy_ffi::{self, PhyWorldHandle};
 use crate::wind::{WindField, WindVec};
+use crate::sensor::{SensorConfig, SensorModel};
 
 // ============================================================ 坐标桥接
 //
@@ -103,12 +104,15 @@ pub struct QuadrotorPlant {
     time: f64,
     /// 阶段 3：可选风场（世界系 UP 风速）。None = 无风。
     wind: Option<WindField>,
+    /// 阶段 4：传感器真实化模型（IMU 噪声/偏置/GPS 延迟丢星）。
+    sensor: SensorModel,
 }
 
 impl QuadrotorPlant {
     /// 在世界中创建机体刚体。mass / 转动惯量来自机型配置。
     /// `wind`：可选风场（阶段 3 抗风/前飞场景）。
-    pub fn new(cfg: &VehicleConfig, dt: f64, wind: Option<WindField>) -> Self {
+    /// `sensor_cfg`：传感器模型配置（阶段 4；默认零噪声保持场景 PASS）。
+    pub fn new(cfg: &VehicleConfig, dt: f64, wind: Option<WindField>, sensor_cfg: SensorConfig) -> Self {
         // 空刚体世界（无 demo 地面/球），自行添加机体与可选地面。
         let world = unsafe { phy_ffi::phy_world_create_rigid_empty() };
         assert!(!world.is_null(), "phy_world_create_rigid_empty 失败");
@@ -159,6 +163,7 @@ impl QuadrotorPlant {
             gravity: 9.81,
             time: 0.0,
             wind,
+            sensor: SensorModel::new(sensor_cfg, dt),
         }
     }
 
@@ -326,22 +331,18 @@ impl QuadrotorPlant {
         // 引擎机体(上+Z) -> 飞控机体(下-Z)：z 翻转
         let accel_fc = [sf_body_up[0] as f32, sf_body_up[1] as f32, -sf_body_up[2] as f32];
 
-        let imu = ImuSample {
-            accel: [
-                MeterPerSecondSquared(accel_fc[0]),
-                MeterPerSecondSquared(accel_fc[1]),
-                MeterPerSecondSquared(accel_fc[2]),
-            ],
-            gyro: [
-                RadianPerSecond(omega_fc[0]),
-                RadianPerSecond(omega_fc[1]),
-                RadianPerSecond(omega_fc[2]),
-            ],
-        };
-        let pos = PosSample {
-            pos: [Meter(pos_ned[0]), Meter(pos_ned[1]), Meter(pos_ned[2])],
-        };
-        (imu, Some(pos))
+        // NED 速度（真值）：世界 UP 系 vel 转 NED。
+        let vel_ned = vec_up_to_ned(vel);
+
+        // 阶段 4：真值过传感器模型（噪声/偏置/延迟/丢星）。
+        let (imu, pos_sample) = self.sensor.process(
+            self.dt,
+            accel_fc,
+            omega_fc,
+            pos_ned,
+            vel_ned,
+        );
+        (imu, pos_sample)
     }
 
     /// 按 `body_id` 偏移读回该刚体的 7 元组 (pos.xyz + quat.wxyz)。
