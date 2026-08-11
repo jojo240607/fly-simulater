@@ -151,25 +151,25 @@
 
 > 因为物理引擎以**预编译 C-ABI 库**集成（§1.1/§3.1），本工程**不能**直接改 `phy-rigid` 源码或加 `apply_body_wrench`。四旋翼需要的「单刚体施力/读速」能力，必须回到 `d:/project/game/physics/crates/phy-ffi/` 工程，新增 FFI 符号并重新构建出库（`PHY_FFI_GEN_HEADER=1 cargo build -p phy-ffi` 重新生成 `phy_ffi.h`），再更新本工程的 `vendor/phy-ffi/`。
 
-### 5.1 需在 `phy-ffi` 新增的符号（FFI 层）
+### 5.1 需在 `phy-ffi` 新增的符号（FFI 层，已落地，ABI v2）
 ```c
-// 创建刚体：shape 类型 + 质量 + 初始位姿 + 转动惯量；返回 body id（>=0），失败 <0。
+// 创建刚体：shape 类型(0=Sphere/1=Box) + 质量 + 初始位姿(pos7=pos.xyz+quat.wijk) + 主转动惯量(inertia3=Ixx,Iyy,Izz)；
+// 返回 body id（>=0），失败 -1。
 int64_t phy_world_rigid_add_body(PhyWorldHandle *w, int32_t shape_kind,
                                  double mass, const double *pos7, const double *inertia3);
 
-// 施加/清除作用于指定刚体的外力(世界系牛顿) 与外力矩(世界系 N·m)。
-// mode: 0=累加(每帧) / 1=覆盖(先清后设) / 2=清除。具体语义以库实现为准，本工程用"覆盖"模式每帧重设。
-int32_t phy_world_rigid_apply_force(PhyWorldHandle *w, int64_t id, const double *f3, int32_t mode);
-int32_t phy_world_rigid_apply_torque(PhyWorldHandle *w, int64_t id, const double *t3, int32_t mode);
+// 施加世界系力(牛顿)/力矩(N·m)到指定刚体，按半隐式欧拉直接积分进 vel/ang_vel(×inv_mass×dt / ×I_world⁻¹×dt)。
+// dt 与同帧 step 一致；mode 当前按累加(0)处理(引擎 step 不消费外力字段，故在 FFI 层积分)。
+// 返回 0 成功，-1 失败(空指针/id 越界/panic)。
+int32_t phy_world_rigid_apply_force(PhyWorldHandle *w, int64_t id, const double *f3, double dt, int32_t mode);
+int32_t phy_world_rigid_apply_torque(PhyWorldHandle *w, int64_t id, const double *t3, double dt, int32_t mode);
 
-// 读回指定刚体的线速度 / 角速度(世界系,各 3×f64)，返回 0 成功。
+// 读回指定刚体的线速度 / 角速度(世界系,各 3×f64)，返回 0 成功，-1 失败。
 int32_t phy_world_rigid_get_velocity(PhyWorldHandle *w, int64_t id, double *out3);
 int32_t phy_world_rigid_get_angular_velocity(PhyWorldHandle *w, int64_t id, double *out3);
-
-// 可选：直接按 id 取位姿(替代全量 transforms 扫描,性能更好)。
-int32_t phy_world_rigid_get_transform(PhyWorldHandle *w, int64_t id, double *pos7);
 ```
-- 这些符号需配套更新 `PHY_FFI_ABI_VERSION`（签名新增，+1）并在 `pkg/release/` 重新发布 `.dll`/`.a`/`.rlib`/`.def`/`.h`。
+- **已落地**：`d:/project/game/physics/crates/phy-ffi/src/lib.rs` 已加上述 5 个符号，`PHY_FFI_ABI_VERSION` 自增到 **2**，并 `build_package.py` 重新发布 `pkg/release/`（`.dll`/`.lib`/`.rlib`/`.h` 已含新符号）。
+- 积分语义说明：引擎 `RigidWorld::step` 仅对 `vel` 加重力、**不动 `ang_vel`**、也不消费外力字段，故 `apply_force/torque` 在 `step` 前由本工程每帧调用一次完成积分；`PhyWorldHandle` 不存"上次施加量"，`mode` 保留但当前统一按累加（调用方每帧只调一次即可）。
 - Rust 侧实现：在 `phy-ffi` 里从 `PhyWorldHandle` 取回 `&mut World<f64>`，调用 `phy-rigid` 既有的 `Body` 字段（`vel`/`ang_vel`/`inv_inertia_local`）与新增的 `apply_body_wrench`（若 `phy-rigid` 也缺则一并补，但这属于物理引擎内部演进，由 `physics` 工程维护）。
 
 ### 5.2 给 `phy-ffi` 提 PR 的内存/安全约定

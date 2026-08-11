@@ -1,0 +1,18 @@
+[package]
+name = "fly-simulater"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "fly-simulater"
+path = "src/main.rs"
+
+[dependencies]
+# 飞控核心：SIL/HIL 共享控制律（no_std crate，host std 环境可依赖）。
+# 注意：路径指向 joc-app-rust 同级的 flyctrl/core。
+flyctrl-core = { path = "../../mcu/oop/flyctrl/core" }
+
+[build-dependencies]
+
+[profile.release]
+opt-level = 3
