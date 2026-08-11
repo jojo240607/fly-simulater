@@ -21,6 +21,7 @@ diag_out.txt
 server_out.txt
 server_run.log
 orient_out.txt
+env_out.txt
 
 # 临时测试/编译诊断输出
 test_*.txt

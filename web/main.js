@@ -60,8 +60,15 @@
     if (!imgData || imgData.width !== w || imgData.height !== h) {
       imgData = ctx.createImageData(w, h);
     }
-    // 后端像素已是 B,G,R,A 字节序，直接拷入 ImageData（同布局）。
-    imgData.data.set(px);
+    // 后端像素是 u32(0xAARRGGBB) 的小端字节 = [B,G,R,A]；ImageData 需要 [R,G,B,A]，
+    // 故交换每像素的 R/B。
+    const d = imgData.data;
+    for (let i = 0, j = 0; i < px.length; i += 4, j += 4) {
+      d[j] = px[i + 2];       // R = B(后端)
+      d[j + 1] = px[i + 1];   // G
+      d[j + 2] = px[i];       // B = R(后端)
+      d[j + 3] = px[i + 3];   // A
+    }
     // 若后端帧尺寸与 canvas 不同，缩放绘制
     if (canvas.width !== w || canvas.height !== h) {
       const tmp = document.createElement("canvas");
