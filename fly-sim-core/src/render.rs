@@ -325,13 +325,38 @@ fn edge2(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
     (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 }
 
+/// 画屏幕空间圆环（Bresenham 式逐点描边），带深度。
+fn draw_circle_outline(fb: &mut Framebuffer, cx: i32, cy: i32, r: i32, depth: f32, color: [u8; 3]) {
+    let r = r.max(1);
+    let mut x = 0;
+    let mut y = r;
+    let mut d = 3 - 2 * r;
+    while x <= y {
+        let pts = [
+            (cx + x, cy + y), (cx - x, cy + y), (cx + x, cy - y), (cx - x, cy - y),
+            (cx + y, cy + x), (cx - y, cy + x), (cx + y, cy - x), (cx - y, cy - x),
+        ];
+        for (px, py) in pts {
+            if px >= 0 && py >= 0 && (px as u32) < fb.width && (py as u32) < fb.height {
+                fb.set_depth(px, py, depth, color);
+            }
+        }
+        if d < 0 {
+            d += 4 * x + 6;
+        } else {
+            d += 4 * (x - y) + 10;
+            y -= 1;
+        }
+        x += 1;
+    }
+}
+
 /// 程序化生成一张"碳纤维 + 警示条"机身纹理（避免依赖外部图片，后端离线可用）。
 /// 用伪随机碳纤维纹路 + 中心警示色块。
 pub fn make_fuselage_texture() -> Texture {
     let (w, h) = (64u32, 64u32);
     let mut data = vec![0u32; (w * h) as usize];
     let mut rng: u64 = 0x9E3779B97F4A7C15;
-    let cx = w as f32 * 0.5;
     let cy = h as f32 * 0.5;
     for y in 0..h {
         for x in 0..w {
@@ -371,51 +396,13 @@ pub fn make_fuselage_texture() -> Texture {
 }
 
 /// 程序化生成一张"螺旋桨叶片"纹理：径向渐变 + 3 片桨叶扇区，模拟高速旋转。
-pub fn make_rotor_texture() -> Texture {
-    let (w, h) = (64u32, 64u32);
-    let mut data = vec![0u32; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let dx = (x as f32 - w as f32 * 0.5) / (w as f32 * 0.5);
-            let dy = (y as f32 - h as f32 * 0.5) / (h as f32 * 0.5);
-            let rr = (dx * dx + dy * dy).sqrt(); // 0..1 径向
-            // 中心小圆盘（电机轴）向外，螺旋桨模糊成圆盘
-            let a = (1.0 - rr).clamp(0.0, 1.0);
-            // 淡灰半透明桨盘（高速旋转模糊），中心略亮
-            let mut lum = 150.0 * a;
-            // 中心电机轴深色点
-            if rr < 0.15 {
-                lum = 45.0;
-            }
-            // 螺旋桨叶片 3 片扇区（角度判断，深色桨叶）
-            let ang = dy.atan2(dx);
-            let blade_zone = (ang * 3.0).sin() > 0.6;
-            if blade_zone && rr > 0.15 {
-                lum *= 0.55; // 桨叶区域更暗（可见桨叶轮廓）
-            }
-            let r = lum * 1.0;
-            let g = lum * 0.95;
-            let b = lum * 1.05;
-            let c = ((0xFFu32) << 24) | ((r as u32 & 0xFF) << 16) | ((g as u32 & 0xFF) << 8) | (b as u32 & 0xFF);
-            data[(y * w + x) as usize] = c;
-        }
-    }
-    Texture::new(w, h, data)
-}
-
 /// 惰性获取机身纹理（线程安全，仅生成一次）。
 fn fuselage_tex() -> &'static Texture {
     static T: OnceLock<Texture> = OnceLock::new();
     T.get_or_init(make_fuselage_texture)
 }
 
-/// 惰性获取螺旋桨纹理（线程安全，仅生成一次）。
-fn rotor_tex() -> &'static Texture {
-    static T: OnceLock<Texture> = OnceLock::new();
-    T.get_or_init(make_rotor_texture)
-}
-
-/// 画四旋翼：中心盒 + 4 臂线 + 旋翼盘 + 机体坐标轴 + 失效高亮 + 速度箭头。
+/// 画四旋翼：中心盒 + 4 臂线 + 旋翼盘 + 失效高亮 + 速度箭头。
 fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect: f32) {
     let _ = aspect; // 模型空间与宽高比无关；宽高比已体现在 vp。
     let t = Matrix4::new(
@@ -428,7 +415,6 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
     let model = t * r;
 
     let arm = inp.arm as f32 * inp.visual_scale;
-    let s = 0.20f32 * inp.visual_scale; // 机身平板半宽
     let center = project([0.0, 0.0, 0.0], vp, &model, fb.width, fb.height);
 
     // ---- 机架：中心扁平机身（贴纹理的菱形平板）+ 4 臂 ----
@@ -465,17 +451,18 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
         if let (Some(pc), Some(pr)) = (center, pr) {
             // 臂线
             fb.draw_line(pc.0, pc.1, pr.0, pr.1, (pc.2 + pr.2) * 0.5, [96, 108, 128]);
-            // 旋翼盘：贴螺旋桨纹理的方形叶片（模拟高速旋转模糊）。
-            let r = arm * 0.34;
-            let bl = r * inp.visual_scale;
-            let disc = [
-                [rr[0] + bl, rr[1] + bl, 0.0],
-                [rr[0] + bl, rr[1] - bl, 0.0],
-                [rr[0] - bl, rr[1] - bl, 0.0],
-                [rr[0] - bl, rr[1] + bl, 0.0],
-            ];
-            let disc_uvs = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-            draw_textured_quad(fb, vp, &model, disc, disc_uvs, rotor_tex());
+            // 旋翼盘：高速旋转轨迹画成"圈圈"（淡色实心圆盘 + 外圈），随推力大小缩放。
+            let m = inp.motors[i] as f32;
+            let r = arm * 0.34 * (0.6 + m * 0.5); // 转速越高盘越明显
+            let rad = (r * inp.visual_scale) as i32;
+            let spin_col = if m > 0.05 { [140, 170, 190] } else { [70, 80, 95] };
+            // 淡色圆盘（旋转圈）+ 外圈亮边（更明显的旋转轨迹边界）
+            if rad > 2 {
+                fb.fill_circle(pr.0, pr.1, rad, pr.2, spin_col);
+                draw_circle_outline(fb, pr.0, pr.1, rad, pr.2, [190, 215, 230]);
+            } else {
+                fb.fill_circle(pr.0, pr.1, rad, pr.2, spin_col);
+            }
             // 电机座 + 失效/退化高亮
             let eff = inp.eff[i];
             if eff <= 0.02 {
@@ -492,28 +479,26 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
     // 机体朝向指示由屏幕角落的 draw_compass（北/上/东）提供，不再在机体上画长坐标轴。
 
     // 速度矢量箭头
-    if let Some(pc) = center {
-        let v = inp.vel;
-        let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        if speed > 0.05 {
-            let len = (speed * 0.6).min(3.0) as f32;
-            let dir = [v[0] as f32 / speed as f32, v[1] as f32 / speed as f32, v[2] as f32 / speed as f32];
-            let tip = [dir[0] * len, dir[1] * len, dir[2] * len];
-            draw_line_world(fb, vp, &model, [0.0, 0.0, 0.0], tip, [40, 200, 220]);
-            let up = [0.0f32, 1.0, 0.0];
-            let n = [
-                dir[1] * up[2] - dir[2] * up[1],
-                dir[2] * up[0] - dir[0] * up[2],
-                dir[0] * up[1] - dir[1] * up[0],
-            ];
-            let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
-            let n = [n[0] / nl, n[1] / nl, n[2] / nl];
-            let back = 0.3f32 * len;
-            let wing = 0.18f32 * len;
-            let base = [tip[0] - dir[0] * back, tip[1] - dir[1] * back, tip[2] - dir[2] * back];
-            draw_line_world(fb, vp, &model, tip, [base[0] + n[0] * wing, base[1] + n[1] * wing, base[2] + n[2] * wing], [40, 200, 220]);
-            draw_line_world(fb, vp, &model, tip, [base[0] - n[0] * wing, base[1] - n[1] * wing, base[2] - n[2] * wing], [40, 200, 220]);
-        }
+    let v = inp.vel;
+    let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if speed > 0.05 {
+        let len = (speed * 0.6).min(3.0) as f32;
+        let dir = [v[0] as f32 / speed as f32, v[1] as f32 / speed as f32, v[2] as f32 / speed as f32];
+        let tip = [dir[0] * len, dir[1] * len, dir[2] * len];
+        draw_line_world(fb, vp, &model, [0.0, 0.0, 0.0], tip, [40, 200, 220]);
+        let up = [0.0f32, 1.0, 0.0];
+        let n = [
+            dir[1] * up[2] - dir[2] * up[1],
+            dir[2] * up[0] - dir[0] * up[2],
+            dir[0] * up[1] - dir[1] * up[0],
+        ];
+        let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+        let n = [n[0] / nl, n[1] / nl, n[2] / nl];
+        let back = 0.3f32 * len;
+        let wing = 0.18f32 * len;
+        let base = [tip[0] - dir[0] * back, tip[1] - dir[1] * back, tip[2] - dir[2] * back];
+        draw_line_world(fb, vp, &model, tip, [base[0] + n[0] * wing, base[1] + n[1] * wing, base[2] + n[2] * wing], [40, 200, 220]);
+        draw_line_world(fb, vp, &model, tip, [base[0] - n[0] * wing, base[1] - n[1] * wing, base[2] - n[2] * wing], [40, 200, 220]);
     }
 }
 
@@ -567,31 +552,20 @@ fn draw_ground_marker(fb: &mut Framebuffer, vp: &Matrix4<f32>, w: u32, h: u32) {
     }
 }
 
-/// 朝向指示器：屏幕左下角固定锚点，画世界系北(红)/上(绿)/东(蓝) 三条方向线。
-/// 方向来自世界原点沿各轴延伸在相机投影下的屏幕位置，随相机旋转真实反映世界朝向。
-fn draw_compass(fb: &mut Framebuffer, vp: &Matrix4<f32>, w: u32, h: u32) {
-    let model = Matrix4::<f32>::identity();
-    // 屏幕锚点（左下角）。
-    let ax = 70i32;
-    let ay = (h as i32) - 60;
-    // 世界原点沿各轴 0.5m 的点投影。
-    let north = project([0.5, 0.0, 0.0], vp, &model, w, h);
-    let up = project([0.0, 0.5, 0.0], vp, &model, w, h);
-    let east = project([0.0, 0.0, 0.5], vp, &model, w, h);
-    let dirs: [(&str, Option<(i32, i32, f32)>, [u8; 3]); 3] = [
-        ("N", north, [230, 90, 90]),
-        ("U", up, [90, 230, 90]),
-        ("E", east, [90, 130, 230]),
+/// 朝向图例：屏幕左下角画三个固定的小色点 + 短线段（北N/上U/东E），
+/// **完全脱离世界投影**，作为纯屏幕图例，不会延伸到场景深处。
+fn draw_compass(fb: &mut Framebuffer, _vp: &Matrix4<f32>, _w: u32, h: u32) {
+    let x = 24i32;
+    let y0 = (h as i32) - 40;
+    let dirs: [(&str, [u8; 3]); 3] = [
+        ("N", [230, 90, 90]),
+        ("U", [90, 230, 90]),
+        ("E", [90, 130, 230]),
     ];
-    for (label, proj, col) in dirs {
-        if let Some((px, py, _)) = proj {
-            // 从锚点画到投影点
-            fb.draw_line(ax, ay, px, py, 0.0, col);
-            // 端点小圆
-            fb.fill_circle(px, py, 2, 0.0, col);
-            // 标签在锚点处简单标注（用短线区分三色即可，文字由前端可加）
-            let _ = label;
-        }
+    for (i, (_label, col)) in dirs.iter().enumerate() {
+        let y = y0 + i as i32 * 14;
+        fb.draw_line(x, y, x + 14, y, 0.0, *col);
+        fb.fill_circle(x, y, 2, 0.0, *col);
     }
 }
 
