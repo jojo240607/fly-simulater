@@ -24,7 +24,7 @@ winit = "0.30"
 softbuffer = "0.4"
 
 [workspace]
-members = ["fly-sim-core"]
+members = ["fly-sim-core", "fly-sim-server"]
 
 [profile.release]
 opt-level = 3

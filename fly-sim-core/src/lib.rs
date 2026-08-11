@@ -15,6 +15,7 @@ pub mod controller;
 pub mod log;
 pub mod physics;
 pub mod plant;
+pub mod render;
 pub mod sensor;
 pub mod sim;
 pub mod wind;

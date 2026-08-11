@@ -1,16 +1,14 @@
 [package]
-name = "fly-sim-core"
+name = "fly-sim-server"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# 飞控核心：SIL/HIL 共享控制律（no_std crate，host std 环境可依赖）。
+fly-sim-core = { path = "../fly-sim-core" }
 flyctrl-core = { path = "../../../mcu/oop/flyctrl/core" }
-# 物理引擎（Rust 源码级依赖，rlib）。
 phy-sdk = { path = "../../../game/physics/crates/phy-sdk" }
 phy-rigid = { path = "../../../game/physics/crates/phy-rigid" }
 phy-math = { path = "../../../game/physics/crates/phy-math" }
-# 软件光栅化原语（Camera / Framebuffer），用于 3D 可视化（原生窗口 + Web 后端共用）。
 phy-demo = { path = "../../../game/physics/crates/phy-demo" }
 
 [profile.release]

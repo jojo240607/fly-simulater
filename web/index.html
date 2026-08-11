@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fly Simulator 3D (Web)</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --fg:#c9d1d9; --accent:#3fb950; --warn:#e3b341; --bad:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { padding:10px 16px; border-bottom:1px solid #30363d; display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .sub { color:#8b949e; font-size:12px; }
+  .layout { display:flex; height:calc(100vh - 48px); }
+  .stage { flex:1; display:flex; align-items:center; justify-content:center; background:#05070a; position:relative; }
+  canvas { background:#05070a; image-rendering:pixelated; border:1px solid #30363d; cursor:grab; }
+  canvas:active { cursor:grabbing; }
+  .side { width:300px; background:var(--panel); border-left:1px solid #30363d; padding:14px; overflow-y:auto; }
+  .group { margin-bottom:18px; }
+  .group h3 { margin:0 0 8px; font-size:12px; color:#8b949e; text-transform:uppercase; letter-spacing:.06em; }
+  label { display:block; font-size:12px; margin:6px 0 3px; color:#c9d1d9; }
+  select, input[type=range] { width:100%; }
+  select { background:#0d1117; color:var(--fg); border:1px solid #30363d; padding:5px; border-radius:4px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row .val { font-size:12px; color:var(--accent); min-width:48px; text-align:right; }
+  .tele { font-size:12px; line-height:1.7; }
+  .tele .k { color:#8b949e; }
+  .tele .v { color:var(--fg); float:right; }
+  .motorbar { height:10px; background:#0d1117; border:1px solid #30363d; margin:3px 0; position:relative; }
+  .motorbar > span { position:absolute; left:0; top:0; bottom:0; background:var(--accent); }
+  .badge { display:inline-block; padding:2px 7px; border-radius:10px; font-size:11px; }
+  .badge.ok { background:rgba(63,185,80,.15); color:var(--accent); }
+  .badge.bad { background:rgba(248,81,73,.15); color:var(--bad); }
+  .hint { font-size:11px; color:#8b949e; margin-top:8px; line-height:1.5; }
+  #status { font-size:11px; color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fly Simulator 3D</h1>
+  <span class="sub">Web 后端 · 软件光栅化 · WebSocket 推帧</span>
+  <span id="status">连接中…</span>
+</header>
+<div class="layout">
+  <div class="stage">
+    <canvas id="view" width="720" height="540"></canvas>
+  </div>
+  <div class="side">
+    <div class="group">
+      <h3>场景</h3>
+      <label>场景类型</label>
+      <select id="scenario">
+        <option value="hover">悬停 (hover)</option>
+        <option value="wind">抗风 (wind)</option>
+        <option value="degraded">退化故障 (degraded)</option>
+      </select>
+      <label>控制律</label>
+      <select id="controller">
+        <option value="pid">PID</option>
+        <option value="lqr">LQR</option>
+        <option value="indi">INDI</option>
+      </select>
+    </div>
+    <div class="group">
+      <h3>故障注入</h3>
+      <label>单电机停转</label>
+      <select id="fail">
+        <option value="-1">无</option>
+        <option value="0">电机 0</option>
+        <option value="1">电机 1</option>
+        <option value="2">电机 2</option>
+        <option value="3">电机 3</option>
+      </select>
+      <label>效率退化 (电机 0, 0=停转 1=正常)</label>
+      <div class="row">
+        <input type="range" id="deg" min="0" max="1" step="0.05" value="0.6" />
+        <span class="val" id="degv">0.60</span>
+      </div>
+      <label>基础风速 (m/s, 北向)</label>
+      <div class="row">
+        <input type="range" id="wind" min="0" max="12" step="0.5" value="0" />
+        <span class="val" id="windv">0.0</span>
+      </div>
+    </div>
+    <div class="group">
+      <h3>遥测</h3>
+      <div class="tele">
+        <div><span class="k">高度</span><span class="v" id="t-alt">–</span></div>
+        <div><span class="k">水平位移</span><span class="v" id="t-horiz">–</span></div>
+        <div><span class="k">速度</span><span class="v" id="t-spd">–</span></div>
+        <div><span class="k">滚转</span><span class="v" id="t-roll">–</span></div>
+        <div><span class="k">俯仰</span><span class="v" id="t-pitch">–</span></div>
+        <div><span class="k">偏航</span><span class="v" id="t-yaw">–</span></div>
+        <div><span class="k">状态</span><span class="v" id="t-state">–</span></div>
+      </div>
+      <div style="margin-top:10px">
+        <div style="font-size:11px;color:#8b949e">电机推力</div>
+        <div id="motors"></div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="hint">
+        拖拽画面：旋转视角 · 滚轮：缩放<br/>
+        退化场景：先 4s 稳态再注入故障，发散后自动重演。
+      </div>
+    </div>
+  </div>
+</div>
+<script src="main.js"></script>
+</body>
+</html>

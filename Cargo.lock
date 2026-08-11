@@ -419,6 +419,19 @@ name = "fly-sim-core"
 version = "0.1.0"
 dependencies = [
  "flyctrl-core",
+ "phy-demo",
+ "phy-math",
+ "phy-rigid",
+ "phy-sdk",
+]
+
+[[package]]
+name = "fly-sim-server"
+version = "0.1.0"
+dependencies = [
+ "fly-sim-core",
+ "flyctrl-core",
+ "phy-demo",
  "phy-math",
  "phy-rigid",
  "phy-sdk",

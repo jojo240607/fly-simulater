@@ -6,8 +6,20 @@ test_out.txt
 run_out.txt
 build_out.txt
 build_err.txt
+build_srv.txt
+build_test.txt
 sim_out.csv
 logs/
+
+# Web 诊断产物（无头浏览器测试的截图/日志）
+web_check.png
+web_check_canvas.png
+web_check_out.txt
+view_out.txt
+view_deg_out.txt
+diag_out.txt
+server_out.txt
+server_run.log
 
 # Temporary debug scripts (tools/_*.py)
 tools/_*.py

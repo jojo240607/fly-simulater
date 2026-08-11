@@ -6,6 +6,7 @@
 //! 日志机制：核心只产出 `LogRow`（纯数据），通过 `on_step` 回调交给 runner 决定
 //! 如何存储（CSV / 内存 / 可视化）。核心不碰任何文件系统 I/O。
 
+use flyctrl_core::controller::Setpoint;
 use flyctrl_core::invariants;
 use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
 
@@ -252,6 +253,25 @@ where
     /// 阶段 5（增强）：设置每路电机效率系数（1.0=正常，0.0=停转，中间=部分退化）。
     pub fn set_motor_eff(&mut self, eff: [f32; 4]) {
         self.ctrl.set_motor_eff(eff);
+    }
+
+    /// 阶段 7+（Web 后端）：单步推进 + 触发可视化回调，返回当前真值状态与最近控制指令。
+    ///
+    /// 用于增量驱动仿真（每显示帧推进若干物理步），区别于 `run_*` 的整段阻塞运行。
+    pub fn step_frame(&mut self, sp: &Setpoint) -> (VehicleState, ActuatorCmd) {
+        let st = self.ctrl.step(sp);
+        self.steps += 1;
+        let w = self.ctrl.world_state();
+        let cmd = self.ctrl.last_cmd();
+        if let Some(ref mut cb) = self.on_frame {
+            cb(&w, cmd);
+        }
+        (w, cmd)
+    }
+
+    /// 阶段 7+（Web 后端）：取当前真值状态（NED）与最近控制指令快照，供渲染/遥测使用。
+    pub fn snapshot(&self) -> (VehicleState, ActuatorCmd) {
+        (self.ctrl.world_state(), self.ctrl.last_cmd())
     }
 
     /// 阶段 3：风环境接入验证场景。

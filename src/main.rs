@@ -199,6 +199,7 @@ fn main() {
             cli.controller,
             &cli.scenario,
             eff_mask,
+            cli.degrade_motor.map(|(m, e)| (m as usize, e)),
         );
         return;
     }

@@ -12,8 +12,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use phy_demo::{Camera, Framebuffer};
-use phy_math::na::{Matrix4, Point3, Vector4};
+use phy_demo::Camera;
+use phy_math::na::Point3;
 
 use fly_sim_core::controller::ControllerKind;
 use fly_sim_core::physics::PhySdkWorld;
@@ -21,7 +21,7 @@ use fly_sim_core::sensor;
 use fly_sim_core::sim;
 use fly_sim_core::wind::WindField;
 use flyctrl_core::config::VehicleConfig;
-use flyctrl_core::vehicle::{ActuatorCmd, Quaternion, VehicleState};
+use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
 
 /// 渲染共享状态：已转换到渲染坐标系（右手 Y-up）的机体位姿 + 电机指令。
 pub struct RenderState {
@@ -31,195 +31,16 @@ pub struct RenderState {
     pub quat: [f64; 4],
     /// 四路电机归一化推力 [0,1]，用于旋翼盘视觉。
     pub motors: [f64; 4],
-}
-
-// ---- NED → 渲染坐标 固定世界变换：绕 X 轴 +90° 主动旋转 ----
-// NED (n, e, d) -> render (n, -d, e)
-// 对应四元数 q_T = rotX(+90°) = (√2/2, √2/2, 0, 0)
-fn ned_to_render(pos_ned: [f64; 3]) -> [f64; 3] {
-    [pos_ned[0], -pos_ned[2], pos_ned[1]]
-}
-
-/// Hamilton 四元数积（a∘b）。
-fn ham_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    let (aw, ax, ay, az) = (a[0], a[1], a[2], a[3]);
-    let (bw, bx, by, bz) = (b[0], b[1], b[2], b[3]);
-    [
-        aw * bw - ax * bx - ay * by - az * bz,
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-    ]
-}
-
-/// NED 姿态（机体→NED）转渲染系姿态（机体→render）：q_r = q_T * q_ned。
-fn ned_quat_to_render(q_ned: Quaternion) -> [f64; 4] {
-    let q_t = [
-        std::f64::consts::FRAC_1_SQRT_2,
-        std::f64::consts::FRAC_1_SQRT_2,
-        0.0,
-        0.0,
-    ];
-    let qn = [q_ned.w as f64, q_ned.x as f64, q_ned.y as f64, q_ned.z as f64];
-    ham_mul(q_t, qn)
-}
-
-/// 单位四元数 → 列主序旋转矩阵（nalgebra `Matrix4::new` 按列填充）。
-fn quat_to_mat4(q: [f64; 4]) -> Matrix4<f32> {
-    let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt().max(1e-9);
-    let (w, x, y, z) = (q[0] / n, q[1] / n, q[2] / n, q[3] / n);
-    // 标准旋转矩阵（行主序视图）：
-    let r00 = 1.0 - 2.0 * (y * y + z * z);
-    let r01 = 2.0 * (x * y - z * w);
-    let r02 = 2.0 * (x * z + y * w);
-    let r10 = 2.0 * (x * y + z * w);
-    let r11 = 1.0 - 2.0 * (x * x + z * z);
-    let r12 = 2.0 * (y * z - x * w);
-    let r20 = 2.0 * (x * z - y * w);
-    let r21 = 2.0 * (y * z + x * w);
-    let r22 = 1.0 - 2.0 * (x * x + y * y);
-    // 转列主序：new(col0, col1, col2, col3)。nalgebra Matrix4<f32> 需 f32 分量。
-    Matrix4::new(
-        r00 as f32, r10 as f32, r20 as f32, 0.0, // col0
-        r01 as f32, r11 as f32, r21 as f32, 0.0, // col1
-        r02 as f32, r12 as f32, r22 as f32, 0.0, // col2
-        0.0, 0.0, 0.0, 1.0, // col3
-    )
-}
-
-/// 模型空间点 → 屏幕像素（含深度 1/w）。近裁剪 + NDC 裁剪。
-fn project(
-    p_model: [f32; 3],
-    vp: &Matrix4<f32>,
-    model: &Matrix4<f32>,
-    w: u32,
-    h: u32,
-) -> Option<(i32, i32, f32)> {
-    let world = *model * Vector4::new(p_model[0], p_model[1], p_model[2], 1.0);
-    let clip = *vp * world;
-    if clip.w <= 1e-5 {
-        return None;
-    }
-    let inv = 1.0 / clip.w;
-    let ndc_x = clip.x * inv;
-    let ndc_y = clip.y * inv;
-    let ndc_z = clip.z * inv;
-    if ndc_z < -1.0 || ndc_z > 1.0 {
-        return None;
-    }
-    let sx = ((ndc_x * 0.5 + 0.5) * (w as f32 - 1.0)) as i32;
-    let sy = ((1.0 - (ndc_y * 0.5 + 0.5)) * (h as f32 - 1.0)) as i32;
-    Some((sx, sy, inv))
-}
-
-/// 画地面网格（render 系 y=0 平面，即 NED d=0 水平面）。
-fn draw_ground(fb: &mut Framebuffer, vp: &Matrix4<f32>) {
-    let model = Matrix4::<f32>::identity();
-    let span = 10i32;
-    for i in -span..=span {
-        // 沿 east(z) 的线，位于 north=i
-        let a = [i as f32, 0.0, -span as f32];
-        let b = [i as f32, 0.0, span as f32];
-        if let (Some(pa), Some(pb)) = (
-            project(a, vp, &model, fb.width, fb.height),
-            project(b, vp, &model, fb.width, fb.height),
-        ) {
-            fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, [38, 46, 58]);
-        }
-        // 沿 north(x) 的线，位于 east=i
-        let a = [-span as f32, 0.0, i as f32];
-        let b = [span as f32, 0.0, i as f32];
-        if let (Some(pa), Some(pb)) = (
-            project(a, vp, &model, fb.width, fb.height),
-            project(b, vp, &model, fb.width, fb.height),
-        ) {
-            fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, [38, 46, 58]);
-        }
-    }
-}
-
-/// 画四旋翼：中心盒 + 4 臂线 + 旋翼盘 + 机体坐标轴。
-fn draw_quad(
-    fb: &mut Framebuffer,
-    vp: &Matrix4<f32>,
-    rs: &RenderState,
-    arm: f64,
-    visual_scale: f32,
-) {
-    // 模型矩阵 = 平移(render pos) * 旋转(render 姿态)
-    let t = Matrix4::new(
-        1.0, 0.0, 0.0, rs.pos[0] as f32,
-        0.0, 1.0, 0.0, rs.pos[1] as f32,
-        0.0, 0.0, 1.0, rs.pos[2] as f32,
-        0.0, 0.0, 0.0, 1.0,
-    );
-    let r = quat_to_mat4(rs.quat);
-    let model = t * r;
-
-    let arm = arm as f32 * visual_scale;
-    let s = 0.18f32 * visual_scale; // 中心盒半边长
-
-    // 中心盒 8 角 + 12 棱
-    let corners = [
-        [-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s],
-        [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s],
-    ];
-    let edges = [
-        [0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7],
-    ];
-    for e in edges {
-        let (a, b) = (corners[e[0]], corners[e[1]]);
-        if let (Some(pa), Some(pb)) = (
-            project(a, vp, &model, fb.width, fb.height),
-            project(b, vp, &model, fb.width, fb.height),
-        ) {
-            fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, [120, 140, 180]);
-        }
-    }
-
-    // 4 旋翼（X 型四象限）+ 臂线 + 旋翼盘
-    let rotor = [
-        [-arm, -arm, 0.0], // 后右
-        [arm, arm, 0.0],   // 前左
-        [arm, -arm, 0.0],  // 前右
-        [-arm, arm, 0.0],  // 后左
-    ];
-    let center = project([0.0, 0.0, 0.0], vp, &model, fb.width, fb.height);
-    for i in 0..4 {
-        let rr = rotor[i];
-        let pr = project(rr, vp, &model, fb.width, fb.height);
-        if let (Some(pc), Some(pr)) = (center, pr) {
-            fb.draw_line(pc.0, pc.1, pr.0, pr.1, (pc.2 + pr.2) * 0.5, [80, 90, 110]);
-            let m = rs.motors[i] as f32;
-            let rad = (2.0 + m * 6.0).max(1.0) as i32;
-            let col = if m > 0.05 { [70, 200, 120] } else { [110, 110, 110] };
-            fb.fill_circle(pr.0, pr.1, rad, pr.2, col);
-        }
-    }
-
-    // 机体坐标轴：X 前(红) / Y 右(绿) / Z 下(蓝)
-    let axes = [
-        ([0.6, 0.0, 0.0], [220, 70, 70]),
-        ([0.0, 0.6, 0.0], [70, 220, 70]),
-        ([0.0, 0.0, 0.6], [70, 70, 220]),
-    ];
-    if let Some(pc) = center {
-        for (ax, col) in axes {
-            let pa = project(
-                [ax[0] * visual_scale, ax[1] * visual_scale, ax[2] * visual_scale],
-                vp,
-                &model,
-                fb.width,
-                fb.height,
-            );
-            if let Some(pa) = pa {
-                fb.draw_line(pc.0, pc.1, pa.0, pa.1, (pc.2 + pa.2) * 0.5, col);
-            }
-        }
-    }
+    /// 渲染系速度 (x=north, y=up, z=east) m/s，用于速度矢量箭头。
+    pub vel: [f64; 3],
+    /// 四路电机效率系数 [0,1]（1=正常，0=完全停转），用于失效/退化高亮。
+    pub eff: [f32; 4],
 }
 
 /// 入口：启动后台仿真 + 渲染窗口。
+///
+/// `degrade` = `Some((motor_idx, eff))` 时运行退化场景（先稳态再注入，实时高亮失效电机）；
+/// 否则按 `scenario` 跑 "wind" / 默认悬停。
 pub fn run_view(
     cfg: &VehicleConfig,
     dt: f64,
@@ -228,16 +49,21 @@ pub fn run_view(
     kind: ControllerKind,
     scenario: &str,
     eff_mask: [f32; 4],
+    degrade: Option<(usize, f32)>,
 ) {
     let state = Arc::new(Mutex::new(RenderState {
         pos: [0.0, 0.0, 0.0],
         quat: [1.0, 0.0, 0.0, 0.0],
         motors: [0.0; 4],
+        vel: [0.0, 0.0, 0.0],
+        eff: eff_mask,
     }));
     // 后台仿真线程：全速推进整个场景，逐物理步把真值推入共享状态。
     let sim_state = state.clone();
+    let sim_state_eff = sim_state.clone(); // 供 degraded 注入后同步 eff 高亮使用
     let cfg2 = cfg.clone();
     let scenario_owned = scenario.to_string();
+    let degrade_owned = degrade;
     std::thread::spawn(move || {
         let mut loop_sim = sim::SimLoop::new(
             PhySdkWorld::create_empty(),
@@ -250,18 +76,37 @@ pub fn run_view(
         loop_sim.set_motor_eff(eff_mask);
         loop_sim.set_on_frame(Box::new(move |st: &VehicleState, cmd: ActuatorCmd| {
             let mut g = sim_state.lock().unwrap();
-            g.pos = ned_to_render([
+            g.pos = fly_sim_core::render::ned_to_render([
                 st.pos[0].0 as f64,
                 st.pos[1].0 as f64,
                 st.pos[2].0 as f64,
             ]);
-            g.quat = ned_quat_to_render(st.att);
+            g.quat = fly_sim_core::render::ned_quat_to_render(st.att);
+            g.vel = fly_sim_core::render::ned_to_render([
+                st.vel[0].0 as f64,
+                st.vel[1].0 as f64,
+                st.vel[2].0 as f64,
+            ]);
             for i in 0..4 {
                 g.motors[i] = cmd.motor[i] as f64;
             }
         }));
         let ok = match scenario_owned.as_str() {
             "wind" => loop_sim.run_hover_wind(15.0),
+            "degraded" => {
+                if let Some((m, e)) = degrade_owned {
+                    // 复刻 run_hover_degraded：先稳态再注入，并同步渲染态的 eff 高亮。
+                    let ok = loop_sim.run_hover_degraded(4.0, 8.0, m, e);
+                    {
+                        let mut g = sim_state_eff.lock().unwrap();
+                        g.eff = [1.0f32; 4];
+                        g.eff[m] = e;
+                    }
+                    ok
+                } else {
+                    loop_sim.run_hover(10.0)
+                }
+            }
             _ => loop_sim.run_hover(10.0),
         };
         println!("[view] 仿真线程结束，结果 = {}", if ok { "PASS" } else { "FAIL" });
@@ -290,6 +135,8 @@ fn run_window(state: Arc<Mutex<RenderState>>, arm: f64) {
         dragging: bool,
         last_x: f64,
         last_y: f64,
+        trail: Vec<[f64; 3]>,
+        blink: f64,
     }
 
     impl ApplicationHandler for App {
@@ -361,25 +208,39 @@ fn run_window(state: Arc<Mutex<RenderState>>, arm: f64) {
                     surface
                         .resize(NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap())
                         .expect("surface resize 失败");
-                    let mut fb = Framebuffer::new(w, h);
-                    fb.clear();
 
-                    // 相机 target 跟随机体（渲染系）。
+                    // 相机 target 跟随机体（渲染系），并记录轨迹拖尾。
+                    let mut inp = fly_sim_core::render::RenderInput {
+                        arm: self.arm,
+                        cam_yaw: self.cam.yaw,
+                        cam_pitch: self.cam.pitch,
+                        cam_distance: self.cam.distance,
+                        ..Default::default()
+                    };
                     {
                         let g = self.state.lock().unwrap();
                         self.cam.target =
                             Point3::new(g.pos[0] as f32, g.pos[1] as f32, g.pos[2] as f32);
+                        inp.pos = g.pos;
+                        inp.quat = g.quat;
+                        inp.motors = g.motors;
+                        inp.vel = g.vel;
+                        inp.eff = g.eff;
+                        // 轨迹拖尾：每帧记录当前渲染系位置（封顶 120 点 ≈ 历史轨迹）。
+                        self.trail.push(g.pos);
+                        if self.trail.len() > 120 {
+                            self.trail.remove(0);
+                        }
+                        self.blink += 0.08;
                     }
-                    let vp = self.cam.view_proj(w as f32 / h as f32);
+                    inp.trail = self.trail.clone();
+                    inp.blink = self.blink;
 
-                    draw_ground(&mut fb, &vp);
-                    {
-                        let g = self.state.lock().unwrap();
-                        draw_quad(&mut fb, &vp, &g, self.arm, 2.5);
-                    }
+                    // 复用 fly-sim-core 单一渲染源（软件光栅化）。
+                    let pixels = fly_sim_core::render::render_frame(w, h, &inp);
 
                     let mut buf = surface.buffer_mut().expect("buffer_mut 失败");
-                    buf.copy_from_slice(&fb.pixels);
+                    buf.copy_from_slice(&pixels);
                     buf.present().expect("present 失败");
                 }
                 _ => {}
@@ -410,6 +271,8 @@ fn run_window(state: Arc<Mutex<RenderState>>, arm: f64) {
         dragging: false,
         last_x: 0.0,
         last_y: 0.0,
+        trail: Vec::new(),
+        blink: 0.0,
     };
 
     let event_loop = EventLoop::builder()
