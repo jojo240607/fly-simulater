@@ -5,17 +5,32 @@
 //! 同一份 `EkfEstimator` + `PidController` + `Fdir` 算法。
 
 use flyctrl_core::config::VehicleConfig;
-use flyctrl_core::controller::{PidController, Setpoint};
+use flyctrl_core::controller::{Controller, IndiController, LqrController, PidController, Setpoint};
 use flyctrl_core::estimator::EkfEstimator;
 use flyctrl_core::hal::actuator::{MotorActuator, OutputProtocol};
 use flyctrl_core::hal::sensor::{GpsSensor, ImuSensor};
 use flyctrl_core::hil::HilContext;
-use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond};
+use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond, Second};
 use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, PosSample, VehicleState};
 
 use crate::plant::QuadrotorPlant;
 use crate::wind::WindField;
 use crate::sensor::SensorConfig;
+
+/// 控制器种类（阶段 5：高级控制律对比）。
+#[derive(Clone, Copy, Debug)]
+pub enum ControllerKind {
+    Pid,
+    Indi, // INDI 包装 PID 基线
+    Lqr,
+}
+
+/// 不同控制器类型的 HIL 闭环（泛型单态化）。
+enum CtrlVariant {
+    Pid(HilContext<EkfEstimator, PidController>),
+    Indi(HilContext<EkfEstimator, IndiController<PidController>>),
+    Lqr(HilContext<EkfEstimator, LqrController>),
+}
 
 // ---- 真实传感器：把物理引擎真值喂给控制律 ----
 
@@ -65,19 +80,41 @@ impl MotorActuator for SimMotors {
 // ---- 控制器主结构 ----
 
 pub struct FlyController {
-    hil: HilContext<EkfEstimator, PidController>,
+    hil: CtrlVariant,
     plant: QuadrotorPlant,
     imu: SimImu,
     gps: SimGps,
     motors: SimMotors,
     cfg: VehicleConfig,
+    /// 阶段 5：故障注入——电机失效掩码（true=该电机停转/0% 效率）。
+    fail_mask: [bool; 4],
 }
 
 impl FlyController {
-    pub fn new(cfg: &VehicleConfig, dt: f64, wind: Option<WindField>, sensor_cfg: SensorConfig) -> Self {
+    pub fn new(
+        cfg: &VehicleConfig,
+        dt: f64,
+        wind: Option<WindField>,
+        sensor_cfg: SensorConfig,
+        kind: ControllerKind,
+    ) -> Self {
         let ekf = EkfEstimator::default_quad();
-        let ctrl = PidController::from_config(&cfg.ctrl_params());
-        let hil = HilContext::new(ekf, ctrl, flyctrl_core::units::Second(dt as f32));
+        let dt_s = Second(dt as f32);
+        let hil = match kind {
+            ControllerKind::Pid => {
+                let ctrl = PidController::from_config(&cfg.ctrl_params());
+                CtrlVariant::Pid(HilContext::new(ekf, ctrl, dt_s))
+            }
+            ControllerKind::Indi => {
+                let base = PidController::from_config(&cfg.ctrl_params());
+                let indi = IndiController::with_inertia(base, cfg.inertia, dt as f32, 0.8);
+                CtrlVariant::Indi(HilContext::new(ekf, indi, dt_s))
+            }
+            ControllerKind::Lqr => {
+                let ctrl = LqrController::from_config(&cfg.ctrl_params());
+                CtrlVariant::Lqr(HilContext::new(ekf, ctrl, dt_s))
+            }
+        };
 
         let plant = QuadrotorPlant::new(cfg, dt, wind, sensor_cfg);
 
@@ -90,7 +127,20 @@ impl FlyController {
         let gps = SimGps { last: None };
         let motors = SimMotors { last: ActuatorCmd::zero() };
 
-        Self { hil, plant, imu, gps, motors, cfg: cfg.clone() }
+        Self {
+            hil,
+            plant,
+            imu,
+            gps,
+            motors,
+            cfg: cfg.clone(),
+            fail_mask: [false; 4],
+        }
+    }
+
+    /// 阶段 5：设置电机失效掩码（阶段 5 故障注入）。索引 0..3 对应 m0..m3。
+    pub fn set_motor_failure(&mut self, mask: [bool; 4]) {
+        self.fail_mask = mask;
     }
 
     /// 推模式：先让 plant 产出当帧样本，存入传感器 trait，再跑控制律，最后 step 世界。
@@ -101,16 +151,22 @@ impl FlyController {
         self.gps.last = pos_sample;
 
         // 2) 跑控制律（SIL/HIL 共享闭环）。motors.apply 只记录指令。
-        let state = self.hil.step(
-            &mut self.imu,
-            &mut self.gps,
-            setpoint,
-            &mut self.motors,
-            &self.cfg,
-        );
+        let state = match &mut self.hil {
+            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, setpoint, &mut self.motors, &self.cfg),
+            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, setpoint, &mut self.motors, &self.cfg),
+            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, setpoint, &mut self.motors, &self.cfg),
+        };
 
-        // 2.5) 把控制指令显式回写被控对象（注入推力/力矩）。
-        self.plant.apply_actuators(&self.motors.last);
+        // 2.5) 阶段 5：故障注入——失效电机指令强行置 0。
+        let mut cmd = self.motors.last;
+        for i in 0..4 {
+            if self.fail_mask[i] {
+                cmd.motor[i] = 0.0;
+            }
+        }
+
+        // 2.6) 把控制指令显式回写被控对象（注入推力/力矩）。
+        self.plant.apply_actuators(&cmd);
 
         // 3) 推进物理世界（已注入本拍推力）。
         self.plant.step();

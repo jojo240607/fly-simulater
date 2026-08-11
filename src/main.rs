@@ -13,17 +13,41 @@ mod sensor;
 
 use flyctrl_core::config::VehicleConfig;
 use phy_ffi::phy_ffi_abi_version;
+use crate::controller::ControllerKind;
 
 /// CLI 解析结果。
 struct Cli {
     airframe: Option<String>,
     scenario: String, // "hover" | "wind"
     sensor_noise: bool,
+    controller: ControllerKind,
+    fail_motor: Option<u8>, // 阶段 5：电机故障注入（0..3）
 }
 
-/// 极简 CLI：支持 `--airframe <path>`、`--scenario <hover|wind>`、`--sensor-noise`。
+impl Cli {
+    fn parse_controller(s: &str) -> ControllerKind {
+        match s {
+            "pid" => ControllerKind::Pid,
+            "indi" => ControllerKind::Indi,
+            "lqr" => ControllerKind::Lqr,
+            other => {
+                eprintln!("[main] --controller 需要 pid|indi|lqr，收到: {}", other);
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
+/// 极简 CLI：支持 `--airframe <path>`、`--scenario <hover|wind>`、`--sensor-noise`、
+/// `--controller <pid|indi|lqr>`、`--fail-motor <0..3>`。
 fn parse_args() -> Cli {
-    let mut cli = Cli { airframe: None, scenario: "hover".to_string(), sensor_noise: false };
+    let mut cli = Cli {
+        airframe: None,
+        scenario: "hover".to_string(),
+        sensor_noise: false,
+        controller: ControllerKind::Pid,
+        fail_motor: None,
+    };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -43,13 +67,37 @@ fn parse_args() -> Cli {
                     std::process::exit(2);
                 }
             }
+            "--controller" => {
+                if let Some(c) = args.next() {
+                    cli.controller = Cli::parse_controller(&c);
+                } else {
+                    eprintln!("[main] --controller 需要跟 pid|indi|lqr");
+                    std::process::exit(2);
+                }
+            }
+            "--fail-motor" => {
+                if let Some(m) = args.next() {
+                    match m.parse::<u8>() {
+                        Ok(v @ 0..=3) => cli.fail_motor = Some(v),
+                        _ => {
+                            eprintln!("[main] --fail-motor 需要 0..3");
+                            std::process::exit(2);
+                        }
+                    }
+                } else {
+                    eprintln!("[main] --fail-motor 需要跟 0..3");
+                    std::process::exit(2);
+                }
+            }
             "--sensor-noise" => {
                 cli.sensor_noise = true;
             }
             "--help" | "-h" => {
-                println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind] [--sensor-noise]");
+                println!("用法: fly-simulater [--airframe <path.toml>] [--scenario hover|wind] [--controller pid|indi|lqr] [--fail-motor 0..3] [--sensor-noise]");
                 println!("  --airframe      外部机架 TOML（缺省用内置 default_quad）");
                 println!("  --scenario      hover=无风悬停(默认) | wind=抗风悬停(阶段3)");
+                println!("  --controller    pid=PID(默认) | indi=INDI+PID基线 | lqr=LQR");
+                println!("  --fail-motor    注入单电机故障 0..3（该电机停转，阶段5）");
                 println!("  --sensor-noise  开启真实 IMU/GPS 噪声（暴露 EKF 对噪声不耐受，见 PLAN 阶段5）");
                 std::process::exit(0);
             }
@@ -100,7 +148,15 @@ fn main() {
     } else {
         crate::sensor::SensorConfig::default()
     };
-    let mut loop_sim = sim::SimLoop::new(&cfg, dt, wind, sensor_cfg);
+    let mut loop_sim = sim::SimLoop::new(&cfg, dt, wind, sensor_cfg, cli.controller);
+
+    // 阶段 5：电机故障注入（单电机停转）。
+    if let Some(m) = cli.fail_motor {
+        let mut mask = [false; 4];
+        mask[m as usize] = true;
+        loop_sim.set_motor_failure(mask);
+        println!("[main] 注入电机故障: m{} 停转", m);
+    }
 
     let ok = match cli.scenario.as_str() {
         "wind" => {

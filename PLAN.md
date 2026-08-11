@@ -67,16 +67,35 @@
 这是**估计器缺陷**（非传感器模型 bug），将在阶段 5（高级控制律/估计器修复）解决。
 阶段 4 已正确实现传感器模型，默认零噪声保证可用性，真实噪声开关用于暴露 EKF 问题。
 
-## 阶段 5 — 高级控制律对比 + 故障注入
+## 阶段 5 — 高级控制律对比 + 故障注入 ✅ 已完成（控制律对比 + 故障注入机制）
 
-- 接入 `flyctrl-core` 已有 `IndiController/LqrController/MpcController`，同机架同风场对比 PID vs INDI vs LQR。
-- 故障注入：单电机 0% 效率、传感器掉线、磁扰爆发。
+- **控制器种类切换**：`controller.rs` 抽象 `ControllerKind { Pid, Indi, Lqr }` + `CtrlVariant`
+  （枚举承载 `HilContext<EkfEstimator, Ctrl>`，泛型单态化）。`SimLoop::new` 接收 `kind`，
+  `main.rs` 加 `--controller pid|indi|lqr`（缺省 pid）。
+- **INDI**：`IndiController::with_inertia(base_pid, cfg.inertia, dt, 0.8)`，包 PID 基线。
+- **LQR**：`LqrController::from_config(&cfg.ctrl_params())`。
+- **故障注入**：`FlyController::set_motor_failure([bool;4])`；`step` 内对失效电机指令强制置 0
+  再回写 plant。`main.rs` 加 `--fail-motor 0..3`（单电机停转）。
+
+**验证（无风悬停 10s, dt=4ms, 450quad）**：
+- PID / INDI / LQR **三者均 PASS**（|dz|≈0.04m, horiz≈0）。INDI/LQR 悬停行为与 PID 一致收敛，
+  证明 `ControllerKind` 抽象与控制律接线正确、可复现对比。
+- `--fail-motor 0`：m0 指令强制置 0 → `cmd=(1,0,1,0)` 饱和、机体爬升漂移(dz=107m) → **合法 FAIL**
+  （四旋翼单旋翼失效不可恢复，无冗余自由度）。仿真数值稳定（无 NaN/Inf），故障注入路径正确。
+
+**重要发现（真实仿真价值）**：
+1. 无风干净悬停下 PID/INDI/LQR 轨迹几乎重合——差异仅在抗扰/动态场景显现，需阶段 6 日志量化。
+2. `--sensor-noise` 暴露的 EKF 发散（阶段 4 发现，R 协方差疑似 0）**仍未修复**：`--controller lqr/indi`
+   搭配 `--sensor-noise` 同样发散（EKF 共享，控制律不修估计器）。限为已知缺陷，待 flyctrl-core EKF 修正。
+3. 单电机故障合法不可恢复——若要验证"可恢复故障容错"，需做"双故障/部分效率退化"或"六旋翼"
+   配置，留待精度需求更高时加。
 
 ## 阶段 6 — 闭环一致性与可复现
 
 - 时间步对齐：控制周期(100/250Hz) 与物理子步明确分离。
 - 日志/回放：`.csv` 导出 NED/EST/CMD/IMU，支持复现与回归。
 - 不变量监控：保留 NaN/有界检查 + 能量守恒校验（无风无推力机械能单调衰减）。
+- 控制律量化对比：基于日志 RMS_dz / RMS_cmd / 抗风余量，给出 PID vs INDI vs LQR 实测表。
 
 ---
 

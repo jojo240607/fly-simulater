@@ -11,6 +11,7 @@ use crate::plant::QuadrotorPlant;
 use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
 use crate::sensor::SensorConfig;
+use crate::controller::ControllerKind;
 
 pub struct SimLoop {
     ctrl: FlyController,
@@ -20,9 +21,15 @@ pub struct SimLoop {
 }
 
 impl SimLoop {
-    pub fn new(cfg: &VehicleConfig, dt: f64, wind: Option<WindField>, sensor_cfg: SensorConfig) -> Self {
+    pub fn new(
+        cfg: &VehicleConfig,
+        dt: f64,
+        wind: Option<WindField>,
+        sensor_cfg: SensorConfig,
+        kind: ControllerKind,
+    ) -> Self {
         Self {
-            ctrl: FlyController::new(cfg, dt, wind, sensor_cfg),
+            ctrl: FlyController::new(cfg, dt, wind, sensor_cfg, kind),
             cfg: cfg.clone(),
             dt,
             steps: 0,
@@ -81,6 +88,11 @@ impl SimLoop {
     }
 
     pub fn steps(&self) -> u64 { self.steps }
+
+    /// 阶段 5：设置电机失效掩码（故障注入）。
+    pub fn set_motor_failure(&mut self, mask: [bool; 4]) {
+        self.ctrl.set_motor_failure(mask);
+    }
 
     /// 阶段 3：风环境接入验证场景。
     ///
