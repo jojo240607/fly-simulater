@@ -13,6 +13,7 @@
 use phy_demo::raster::pack;
 use phy_demo::{Camera, Framebuffer};
 use phy_math::na::{Matrix4, Vector4};
+use std::sync::OnceLock;
 
 /// 一帧渲染所需的全部输入（渲染世界 = 物理引擎世界系，右手 Y-up，上=+Y）。
 ///
@@ -193,63 +194,6 @@ fn draw_trail(fb: &mut Framebuffer, vp: &Matrix4<f32>, trail: &[[f64; 3]], w: u3
     }
 }
 
-/// 画一个实心四边形（世界/model 空间 4 顶点 → 屏幕，逐像素填充）。
-/// 用于画立体机架（机身平板/电机座/螺旋桨叶），带 Z 深度测试。
-fn fill_quad_world(
-    fb: &mut Framebuffer,
-    vp: &Matrix4<f32>,
-    model: &Matrix4<f32>,
-    corners: [[f32; 3]; 4],
-    color: [u8; 3],
-) {
-    let mut proj = Vec::with_capacity(4);
-    for c in corners {
-        if let Some(p) = project(c, vp, model, fb.width, fb.height) {
-            proj.push(p);
-        } else {
-            return; // 任一顶点被裁剪则整体跳过（简化）
-        }
-    }
-    if proj.len() < 4 {
-        return;
-    }
-    let xs: Vec<i32> = proj.iter().map(|p| p.0).collect();
-    let ys: Vec<i32> = proj.iter().map(|p| p.1).collect();
-    let minx = *xs.iter().min().unwrap();
-    let maxx = *xs.iter().max().unwrap();
-    let miny = *ys.iter().min().unwrap();
-    let maxy = *ys.iter().max().unwrap();
-    // 深度取四角平均（简化，够用）。
-    let depth = (proj[0].2 + proj[1].2 + proj[2].2 + proj[3].2) * 0.25;
-    for y in miny..=maxy {
-        for x in minx..=maxx {
-            if point_in_quad(x, y, &proj) {
-                fb.set_depth(x, y, depth, color);
-            }
-        }
-    }
-}
-
-/// 判断屏幕点 (x,y) 是否在凸四边形（4 个屏幕投影点）内（含边）。
-fn point_in_quad(x: i32, y: i32, quad: &[(i32, i32, f32)]) -> bool {
-    let mut sign = None;
-    for i in 0..4 {
-        let a = (quad[i].0, quad[i].1);
-        let b = (quad[(i + 1) % 4].0, quad[(i + 1) % 4].1);
-        let cross = (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0);
-        let s = if cross > 0 { 1 } else if cross < 0 { -1 } else { 0 };
-        if s == 0 {
-            continue;
-        }
-        match sign {
-            None => sign = Some(s),
-            Some(prev) if prev != s => return false,
-            _ => {}
-        }
-    }
-    true
-}
-
 /// 画三维世界线段（model 空间两点 → 屏幕）。
 fn draw_line_world(
     fb: &mut Framebuffer,
@@ -265,6 +209,191 @@ fn draw_line_world(
     ) {
         fb.draw_line(pa.0, pa.1, pb.0, pb.1, (pa.2 + pb.2) * 0.5, col);
     }
+}
+
+// ================= 真实纹理贴图（软件 UV 光栅化） =================
+
+/// 位图纹理：`data` 为 `0xAARRGGBB` 像素（与帧缓冲同格式）。
+#[derive(Clone)]
+pub struct Texture {
+    pub w: u32,
+    pub h: u32,
+    pub data: Vec<u32>,
+}
+
+impl Texture {
+    pub fn new(w: u32, h: u32, data: Vec<u32>) -> Self {
+        Self { w, h, data }
+    }
+    /// 最近邻采样，uv ∈ [0,1]。
+    fn sample(&self, u: f32, v: f32) -> [u8; 3] {
+        let x = ((u * self.w as f32).clamp(0.0, self.w as f32 - 1.0)) as u32;
+        let y = ((v * self.h as f32).clamp(0.0, self.h as f32 - 1.0)) as u32;
+        let px = self.data[(y * self.w + x) as usize];
+        let (r, g, b) = ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+        [r as u8, g as u8, b as u8]
+    }
+}
+
+/// 一个带 UV 的三角形（模型空间）。
+struct TexTri {
+    pos: [[f32; 3]; 3],
+    uv: [[f32; 2]; 3],
+}
+
+/// 纹理三角形光栅化：透视校正的 UV 插值 + 纹理采样，复用 Framebuffer 的深度测试。
+/// `depth`（1/w，越小越近）与 `Framebuffer::set_depth` 语义一致。
+fn draw_textured_tri(
+    fb: &mut Framebuffer,
+    vp: &Matrix4<f32>,
+    model: &Matrix4<f32>,
+    tri: &TexTri,
+    tex: &Texture,
+) {
+    // 顶点变换 → 屏幕坐标 + 1/w（深度）。
+    let mut sp = [[0.0f32; 2]; 3];
+    let mut invw = [0.0f32; 3];
+    for i in 0..3 {
+        match project(tri.pos[i], vp, model, fb.width, fb.height) {
+            Some((sx, sy, iw)) => {
+                sp[i] = [sx as f32, sy as f32];
+                invw[i] = iw;
+            }
+            None => return,
+        }
+    }
+    let minx = sp.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min).floor().max(0.0) as i32;
+    let maxx = sp.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max).ceil().min(fb.width as f32) as i32;
+    let miny = sp.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min).floor().max(0.0) as i32;
+    let maxy = sp.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max).ceil().min(fb.height as f32) as i32;
+
+    let area = edge2(sp[0], sp[1], sp[2]);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    // 透视校正：每个像素插值 (uv/w, 1/w)，再 uv = (uv/w)/(1/w)。
+    let uv0w = [tri.uv[0][0] * invw[0], tri.uv[0][1] * invw[0]];
+    let uv1w = [tri.uv[1][0] * invw[1], tri.uv[1][1] * invw[1]];
+    let uv2w = [tri.uv[2][0] * invw[2], tri.uv[2][1] * invw[2]];
+
+    for y in miny..=maxy {
+        for x in minx..=maxx {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let w0 = edge2(sp[1], sp[2], [px, py]) / area;
+            let w1 = edge2(sp[2], sp[0], [px, py]) / area;
+            let w2 = edge2(sp[0], sp[1], [px, py]) / area;
+            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                continue;
+            }
+            let iw = w0 * invw[0] + w1 * invw[1] + w2 * invw[2];
+            if iw <= 1e-6 {
+                continue;
+            }
+            let u = (w0 * uv0w[0] + w1 * uv1w[0] + w2 * uv2w[0]) / iw;
+            let v = (w0 * uv0w[1] + w1 * uv1w[1] + w2 * uv2w[1]) / iw;
+            let col = tex.sample(u, v);
+            fb.set_depth(x, y, iw, col);
+        }
+    }
+}
+
+/// 画一个贴纹理的四边形（两个三角形）。
+fn draw_textured_quad(
+    fb: &mut Framebuffer,
+    vp: &Matrix4<f32>,
+    model: &Matrix4<f32>,
+    corners: [[f32; 3]; 4],
+    uvs: [[f32; 2]; 4],
+    tex: &Texture,
+) {
+    // 三角1: 0,1,2；三角2: 0,2,3（逆时针保证正面）。
+    let t1 = TexTri {
+        pos: [corners[0], corners[1], corners[2]],
+        uv: [uvs[0], uvs[1], uvs[2]],
+    };
+    let t2 = TexTri {
+        pos: [corners[0], corners[2], corners[3]],
+        uv: [uvs[0], uvs[2], uvs[3]],
+    };
+    draw_textured_tri(fb, vp, model, &t1, tex);
+    draw_textured_tri(fb, vp, model, &t2, tex);
+}
+
+/// 2D 边函数（有符号面积，判断点在三角形内/插值权重）。
+fn edge2(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// 程序化生成一张"碳纤维 + 警示条"机身纹理（避免依赖外部图片，后端离线可用）。
+/// 用伪随机碳纤维纹路 + 中心警示色块。
+pub fn make_fuselage_texture() -> Texture {
+    let (w, h) = (64u32, 64u32);
+    let mut data = vec![0u32; (w * h) as usize];
+    let mut rng: u64 = 0x9E3779B97F4A7C15;
+    for y in 0..h {
+        for x in 0..w {
+            // 伪随机
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+            let n = (rng & 0xFF) as f32 / 255.0;
+            // 碳纤维暗底 + 细亮纹
+            let mut r = 40.0 + n * 12.0;
+            let mut g = 46.0 + n * 12.0;
+            let mut b = 52.0 + n * 12.0;
+            // 水平细纹
+            if y % 8 < 1 {
+                r += 12.0; g += 13.0; b += 14.0;
+            }
+            // 中央警示条（黄色）
+            let cx = (w / 2) as i32;
+            if (x as i32 - cx).abs() < 6 && y < h / 3 {
+                r = 225.0; g = 190.0; b = 60.0;
+            }
+            let c = ((0xFFu32) << 24) | ((r as u32 & 0xFF) << 16) | ((g as u32 & 0xFF) << 8) | (b as u32 & 0xFF);
+            data[(y * w + x) as usize] = c;
+        }
+    }
+    Texture::new(w, h, data)
+}
+
+/// 程序化生成一张"螺旋桨叶片"纹理：半透明感 + 径向渐变 + 碳纤维纹。
+pub fn make_rotor_texture() -> Texture {
+    let (w, h) = (64u32, 64u32);
+    let mut data = vec![0u32; (w * h) as usize];
+    let mut rng: u64 = 0x1234_5678_9abc;
+    for y in 0..h {
+        for x in 0..w {
+            let dx = (x as f32 - w as f32 * 0.5) / (w as f32 * 0.5);
+            let dy = (y as f32 - h as f32 * 0.5) / (h as f32 * 0.5);
+            let rr = (dx * dx + dy * dy).sqrt(); // 0..1 径向
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+            let n = (rng & 0xFF) as f32 / 255.0;
+            // 中心亮、边缘暗的圆盘，带细纹
+            let a = (1.0 - rr * 0.8).clamp(0.0, 1.0);
+            let mut r = 60.0 + a * 160.0;
+            let mut g = 180.0 + a * 60.0;
+            let mut b = 100.0 + a * 80.0;
+            if y % 6 < 1 {
+                r += 15.0; g += 10.0;
+            }
+            // 半透明：alpha 255，但颜色偏淡表现高速旋转模糊
+            let c = ((0xFFu32) << 24) | ((r as u32 & 0xFF) << 16) | ((g as u32 & 0xFF) << 8) | (b as u32 & 0xFF);
+            data[(y * w + x) as usize] = c;
+        }
+    }
+    Texture::new(w, h, data)
+}
+
+/// 惰性获取机身纹理（线程安全，仅生成一次）。
+fn fuselage_tex() -> &'static Texture {
+    static T: OnceLock<Texture> = OnceLock::new();
+    T.get_or_init(make_fuselage_texture)
+}
+
+/// 惰性获取螺旋桨纹理（线程安全，仅生成一次）。
+fn rotor_tex() -> &'static Texture {
+    static T: OnceLock<Texture> = OnceLock::new();
+    T.get_or_init(make_rotor_texture)
 }
 
 /// 画四旋翼：中心盒 + 4 臂线 + 旋翼盘 + 机体坐标轴 + 失效高亮 + 速度箭头。
@@ -283,27 +412,22 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
     let s = 0.20f32 * inp.visual_scale; // 机身平板半宽
     let center = project([0.0, 0.0, 0.0], vp, &model, fb.width, fb.height);
 
-    // ---- 机架：中心扁平机身（实心菱形平板）+ 4 臂 ----
-    // 机身平板（X-Y 平面，z≈0），做一个圆角菱形机身：沿臂对角线方向拉长。
+    // ---- 机架：中心扁平机身（贴纹理的菱形平板）+ 4 臂 ----
+    // 机身平板（X-Y 平面，z≈0）：贴碳纤维+警示条纹理。
     let body = [
-        [arm * 0.42, 0.0, 0.0],   // 前
-        [0.0, arm * 0.42, 0.0],   // 右
-        [-arm * 0.42, 0.0, 0.0],  // 后
-        [0.0, -arm * 0.42, 0.0],  // 左
+        [arm * 0.45, 0.0, 0.0],   // 前
+        [0.0, arm * 0.45, 0.0],   // 右
+        [-arm * 0.45, 0.0, 0.0],  // 后
+        [0.0, -arm * 0.45, 0.0],  // 左
     ];
-    fill_quad_world(fb, vp, &model, body, [150, 175, 210]); // 机身淡蓝
-    // 机身下沿加一点厚度感（z 偏移）
-    let body_low = [
-        [arm * 0.42, 0.0, -0.05 * inp.visual_scale],
-        [0.0, arm * 0.42, -0.05 * inp.visual_scale],
-        [-arm * 0.42, 0.0, -0.05 * inp.visual_scale],
-        [0.0, -arm * 0.42, -0.05 * inp.visual_scale],
+    let body_uvs = [
+        [0.5, 0.0], [1.0, 0.5], [0.5, 1.0], [0.0, 0.5],
     ];
-    fill_quad_world(fb, vp, &model, body_low, [110, 130, 165]);
+    draw_textured_quad(fb, vp, &model, body, body_uvs, fuselage_tex());
 
     // 机头标记（前）红色小圆点
     if let Some(pc) = center {
-        if let Some(pn) = project([arm * 0.42, 0.0, 0.0], vp, &model, fb.width, fb.height) {
+        if let Some(pn) = project([arm * 0.45, 0.0, 0.0], vp, &model, fb.width, fb.height) {
             fb.fill_circle(pn.0, pn.1, 3, pn.2, [230, 80, 70]);
         }
         let _ = pc;
@@ -322,28 +446,27 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
         if let (Some(pc), Some(pr)) = (center, pr) {
             // 臂线
             fb.draw_line(pc.0, pc.1, pr.0, pr.1, (pc.2 + pr.2) * 0.5, [96, 108, 128]);
-            let m = inp.motors[i] as f32;
+            // 旋翼盘：贴螺旋桨纹理的方形叶片（模拟高速旋转模糊）。
+            let r = arm * 0.34;
+            let bl = r * inp.visual_scale;
+            let disc = [
+                [rr[0] + bl, rr[1] + bl, 0.0],
+                [rr[0] + bl, rr[1] - bl, 0.0],
+                [rr[0] - bl, rr[1] - bl, 0.0],
+                [rr[0] - bl, rr[1] + bl, 0.0],
+            ];
+            let disc_uvs = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+            draw_textured_quad(fb, vp, &model, disc, disc_uvs, rotor_tex());
+            // 电机座 + 失效/退化高亮
             let eff = inp.eff[i];
-            let col = if eff <= 0.02 {
+            if eff <= 0.02 {
                 let on = (inp.blink.sin() * 0.5 + 0.5) > 0.5;
-                if on { [230, 50, 50] } else { [120, 30, 30] }
+                fb.fill_circle(pr.0, pr.1, 5, pr.2, if on { [230, 50, 50] } else { [120, 30, 30] });
             } else if eff < 0.98 {
-                [230, 150, 40]
-            } else if m > 0.05 {
-                [70, 200, 120]
+                fb.fill_circle(pr.0, pr.1, 5, pr.2, [230, 150, 40]);
             } else {
-                [110, 110, 110]
-            };
-            // 电机座（小实心圆，暗色）
-            fb.fill_circle(pr.0, pr.1, 2, pr.2, [60, 66, 76]);
-            // 旋翼盘：十字叶片（随相角转动，模拟高速旋转）+ 盘心
-            let blade = (3.0 + m * 8.0) as i32;
-            let ang = inp.blink * 3.0 + i as f64 * 1.5708;
-            let cxx = (ang.cos() * blade as f64) as i32;
-            let cyy = (ang.sin() * blade as f64) as i32;
-            fb.draw_line(pr.0 - cxx, pr.1 - cyy, pr.0 + cxx, pr.1 + cyy, pr.2, col);
-            fb.draw_line(pr.0 + cyy, pr.1 - cxx, pr.0 - cyy, pr.1 + cxx, pr.2, col);
-            fb.fill_circle(pr.0, pr.1, 2, pr.2, col);
+                fb.fill_circle(pr.0, pr.1, 2, pr.2, [60, 66, 76]);
+            }
         }
     }
 
