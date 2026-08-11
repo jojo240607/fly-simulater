@@ -14,6 +14,7 @@ use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond}
 use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, PosSample, VehicleState};
 
 use crate::plant::QuadrotorPlant;
+use crate::wind::WindField;
 
 // ---- 真实传感器：把物理引擎真值喂给控制律 ----
 
@@ -72,12 +73,12 @@ pub struct FlyController {
 }
 
 impl FlyController {
-    pub fn new(cfg: &VehicleConfig, dt: f64) -> Self {
+    pub fn new(cfg: &VehicleConfig, dt: f64, wind: Option<WindField>) -> Self {
         let ekf = EkfEstimator::default_quad();
         let ctrl = PidController::from_config(&cfg.ctrl_params());
         let hil = HilContext::new(ekf, ctrl, flyctrl_core::units::Second(dt as f32));
 
-        let plant = QuadrotorPlant::new(cfg, dt);
+        let plant = QuadrotorPlant::new(cfg, dt, wind);
 
         let imu = SimImu {
             last: ImuSample {

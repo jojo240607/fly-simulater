@@ -1,0 +1,21 @@
+# 5 寸穿越机风格 X 四旋翼（~0.7kg，高推重比 ~8:1，机动性强）。
+# 用于对比"小轴距高带宽"机型的控制表现。
+
+name = "5inch-X"
+mass = 0.7            # kg
+arm_length = 0.11     # m（5寸桨，中心到电机 ~11cm）
+thrust_coeff = 13.7   # N per 单位推力指令（满油门单电机 ~13.7N，4×≈55N ≈ 8×重力）
+torque_coeff = 0.018  # N·m 反扭矩系数
+inertia = [0.006, 0.006, 0.011]  # Ixx Iyy Izz (kg·m^2)
+motor_tau = 0.03      # 更短响应（高 KV 电机）
+
+drag_coeff = [0.10, 0.10, 0.06]  # 小机身阻力更小
+induced_drag_coeff = 0.08
+disk_area = 0.10
+air_density = 1.225
+
+gravity = 9.81
+tilt_max = 0.60       # 穿越机允许更大倾角
+hover_thrust = 0.35   # 高推重比 -> 悬停油门低
+vmax_xy = 15.0
+vmax_z = 8.0

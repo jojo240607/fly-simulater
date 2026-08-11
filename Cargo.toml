@@ -11,6 +11,9 @@ path = "src/main.rs"
 # 飞控核心：SIL/HIL 共享控制律（no_std crate，host std 环境可依赖）。
 # 注意：路径指向 joc-app-rust 同级的 flyctrl/core。
 flyctrl-core = { path = "../../mcu/oop/flyctrl/core" }
+# 机架数据输入：从外部 TOML 加载机型参数（替代硬编码 default_quad）。
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
 
 [build-dependencies]
 

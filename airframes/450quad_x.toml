@@ -1,0 +1,22 @@
+# 典型 450mm X 四旋翼（~1.2kg，满油门 ~2.4 倍重力）。
+# 惯量为实测/估算对角主惯量（kg·m^2），不再用 m·L² 近似。
+
+name = "450quad-X"
+mass = 1.2            # kg
+arm_length = 0.225    # m（中心到电机）
+thrust_coeff = 5.886  # N per 单位推力指令（=2.4*9.81/4，满油门单电机推力）
+torque_coeff = 0.02   # N·m 反扭矩系数（偏航混控）
+inertia = [0.02, 0.02, 0.04]  # Ixx Iyy Izz (kg·m^2)，X 四旋翼 Izz~2*Ixx
+motor_tau = 0.05      # 电机一阶响应时间常数 (s)
+
+# 机体阻力系数（前/右/下三轴，N/(m/s)^2）：机身/机臂外露气动阻力。
+drag_coeff = [0.18, 0.18, 0.10]
+induced_drag_coeff = 0.12  # 无量纲，动量理论诱导阻力
+disk_area = 0.19          # 桨盘面积 (m^2)，4× 桨盘
+air_density = 1.225       # kg/m^3，标准海平面
+
+gravity = 9.81
+tilt_max = 0.35      # 最大可指令倾角 (rad)
+hover_thrust = 0.5   # 悬停归一化油门
+vmax_xy = 2.0        # 最大水平速度 (m/s)
+vmax_z = 2.0         # 最大垂直速度 (m/s)
