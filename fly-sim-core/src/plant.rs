@@ -259,6 +259,10 @@ where
         ];
         // spin: 0,1 CCW(+1), 2,3 CW(-1)
         let spin: [f64; 4] = [1.0, 1.0, -1.0, -1.0];
+        // 陀螺进动效应：机体角速度（世界系→机体系）用于算螺旋桨角动量进动力矩。
+        let omega_world = self.world.get_angular_velocity(self.body_id);
+        let omega_body = rotate_by_quat_conj(q, omega_world);
+        let rotor_i = self.cfg.rotor_inertia as f64;
         let mut tau_body = [0.0f64; 3];
         for i in 0..4 {
             let (rx, ry) = (arms[i][0], arms[i][1]);
@@ -270,6 +274,12 @@ where
             let tq = spin[i] * q_n[i];
             tau_body[2] += tq;
         }
+        // 陀螺进动：螺旋桨角动量 H = I_rotor·Ω·ẑ(机体)，机体以 ω 转动产生 M_gyro = H × ω。
+        // 四旋翼等速反桨时净 H_z=0（悬停无净陀螺）；转速不对称（机动/偏航/故障）时
+        // 产生俯仰↔滚转耦合力矩（陀螺稳定效应）。
+        let gyro = gyro_torque(&self.motor_speed, &spin, rotor_i, omega_body);
+        tau_body[0] += gyro[0];
+        tau_body[1] += gyro[1];
         // 阶段 3：推进风场，取当前世界系（UP）风速。无风则为 0。
         let wind_up: WindVec = match &mut self.wind {
             Some(w) => w.sample(self.dt),
@@ -450,6 +460,24 @@ fn rotate_by_quat(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+/// 螺旋桨陀螺进动力矩（机体系）：
+/// M_gyro = Σ_i (H_i × ω)，H_i = I_rotor·Ω_i·spin_i·ẑ（机体 Z 轴角动量）。
+/// 四旋翼等速反桨时 ΣH_z=0 → 悬停无净陀螺；转速不对称（机动/偏航/故障）时
+/// 俯仰角速度在滚转轴、滚转角速度在俯仰轴产生耦合力矩。
+pub fn gyro_torque(
+    motor_speed: &[f64; 4],
+    spin: &[f64; 4],
+    rotor_i: f64,
+    omega_body: [f64; 3],
+) -> [f64; 3] {
+    let mut tau = [0.0f64; 3];
+    for i in 0..4 {
+        let hz = rotor_i * motor_speed[i] * spin[i];
+        tau[0] += -hz * omega_body[1]; // M_x = -H_z·ω_y
+        tau[1] += hz * omega_body[0]; // M_y = +H_z·ω_x
+    }
+    tau
+}
 /// 引擎系单位四元数共轭（世界->机体）旋转向量 v。
 fn rotate_by_quat_conj(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
     let (w, x, y, z) = (q[0], q[1], q[2], q[3]);

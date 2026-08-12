@@ -37,8 +37,13 @@ pub struct AirframeToml {
     pub motor_kv: f32,
     #[serde(default = "default_motor_r")]
     pub motor_r: f32,
+    #[serde(default = "default_rotor_inertia")]
+    pub rotor_inertia: f32,
 }
 
+fn default_rotor_inertia() -> f32 {
+    1.2e-5
+}
 fn default_battery_v() -> f32 {
     14.8
 }
@@ -101,6 +106,7 @@ impl AirframeToml {
             battery_r: self.battery_r,
             motor_kv: self.motor_kv,
             motor_r: self.motor_r,
+            rotor_inertia: self.rotor_inertia,
         }
     }
 }
