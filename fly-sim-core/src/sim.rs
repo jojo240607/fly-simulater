@@ -8,6 +8,7 @@
 
 use flyctrl_core::controller::Setpoint;
 use flyctrl_core::invariants;
+use flyctrl_core::units::{Meter, MeterPerSecond, Radian};
 use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
 
 use crate::controller::{hover_setpoint, FlyController};
@@ -17,6 +18,18 @@ use crate::wind::{WindConfig, WindField};
 use crate::sensor::SensorConfig;
 use crate::controller::ControllerKind;
 use crate::log::LogRow;
+
+/// P2-2 路径跟随任务结果。
+pub struct MissionResult {
+    /// 最大跟踪误差（m）。
+    pub max_err: f64,
+    /// 均方根跟踪误差（m）。
+    pub rms_err: f64,
+    /// 任务总时长（s）。
+    pub duration: f64,
+    /// 全程是否姿态稳定（无发散）。
+    pub stable: bool,
+}
 
 pub struct SimLoop<W> {
     ctrl: FlyController<W>,
@@ -368,6 +381,117 @@ where
     ///   - 记录"姿控存活时间"（从注入到机体角速度超 `att_rate_lim` 或状态非法的步数）；
     ///   - 退化越轻，存活时间越长——给飞行员/故障检测更多处置窗口（真实工程结论）。
     ///
+    /// P2-2 任务级逻辑：按 waypoint 折线路径巡航（起飞→水平移动→降落悬停）。
+    ///
+    /// `waypoints`：`(n, e, d, yaw)` NED 坐标序列；`cruise_v` 巡航速度（m/s）。
+    /// 路径按弧长参数化：无人机沿折线以 `cruise_v` 匀速推进，每步给控制器
+    /// 期望位置 + 前馈速度 + 偏航。记录跟踪误差并返回结果。
+    pub fn run_mission(
+        &mut self,
+        waypoints: &[(f64, f64, f64, f64)],
+        cruise_v: f64,
+    ) -> MissionResult {
+        if waypoints.len() < 2 {
+            return MissionResult { max_err: 0.0, rms_err: 0.0, duration: 0.0, stable: true };
+        }
+        // 起飞稳定段：先悬停在第一个 waypoint 2s，让无人机从初始位置爬升并稳定，
+        // 避免初始大跟踪误差（无人机初始在地面而路径起点在空中）导致控制律猛拉发散。
+        {
+            let (n0, e0, d0, y0) = waypoints[0];
+            let sp0 = Setpoint {
+                pos: [Meter(n0 as f32), Meter(e0 as f32), Meter(d0 as f32)],
+                vel: [MeterPerSecond::ZERO; 3],
+                yaw: Radian(y0 as f32),
+            };
+            for _ in 0..(500u64) {
+                // 2s @ dt=4ms
+                let (st, _) = self.step_frame(&sp0);
+                let wtrue = self.ctrl.world_state().omega;
+                let rate =
+                    (wtrue[0].0 * wtrue[0].0 + wtrue[1].0 * wtrue[1].0 + wtrue[2].0 * wtrue[2].0)
+                        .sqrt();
+                if rate > 6.0 || !invariants::state_finite(&st) {
+                    return MissionResult { max_err: 0.0, rms_err: 0.0, duration: 0.0, stable: false };
+                }
+            }
+
+        }
+        // 路径段（弧长参数化）
+        let nseg = waypoints.len() - 1;
+        let mut seg_len = vec![0.0f64; nseg];
+        let mut cum_len = vec![0.0f64; nseg + 1];
+        for i in 0..nseg {
+            let (a, b) = (waypoints[i], waypoints[i + 1]);
+            let dx = b.0 - a.0;
+            let dy = b.1 - a.1;
+            let dz = b.2 - a.2;
+            seg_len[i] = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-9);
+            cum_len[i + 1] = cum_len[i] + seg_len[i];
+        }
+        let total = cum_len[nseg];
+        let mut s = 0.0f64;
+        let mut max_err = 0.0f64;
+        let mut sq_err = 0.0f64;
+        let mut n = 0u64;
+        let mut stable = true;
+
+        while s < total + 1e-6 {
+            // 定位当前路径段与弧长偏移
+            let mut seg = 0usize;
+            while seg < nseg && s > cum_len[seg + 1] {
+                seg += 1;
+            }
+            let local = (s - cum_len[seg]).clamp(0.0, seg_len[seg]);
+            let f = local / seg_len[seg];
+            let a = waypoints[seg];
+            let b = waypoints[seg + 1];
+            let (dx, dy, dz) = (b.0 - a.0, b.1 - a.1, b.2 - a.2);
+            let inv = 1.0 / seg_len[seg];
+            // 期望位置
+            let (pn, pe, pd) = (a.0 + dx * f, a.1 + dy * f, a.2 + dz * f);
+            let _ = inv;
+            // 偏航（段起点 yaw）
+            let yaw = a.3;
+
+            let sp = Setpoint {
+                pos: [Meter(pn as f32), Meter(pe as f32), Meter(pd as f32)],
+                // 位置追踪（不给速度前馈）：让 PID 位置环自行追踪，避免速度前馈
+                // 与高度/姿态环耦合导致移动中掉高。
+                vel: [MeterPerSecond::ZERO; 3],
+                yaw: Radian(yaw as f32),
+            };
+            let (st, _cmd) = self.step_frame(&sp);
+            // 跟踪误差（NED 欧氏）
+            let act = [st.pos[0].0 as f64, st.pos[1].0 as f64, st.pos[2].0 as f64];
+            let err = ((act[0] - pn).powi(2) + (act[1] - pe).powi(2) + (act[2] - pd).powi(2)).sqrt();
+            if err > max_err {
+                max_err = err;
+            }
+            sq_err += err * err;
+            n += 1;
+            // 发散检测：用真值角速度（`st` 为估计状态，起飞加速瞬间 EKF 角速度估计
+            // 可能有尖峰，误判发散）。真值用 world_state()。
+            let wtrue = self.ctrl.world_state().omega;
+            let rate =
+                (wtrue[0].0 * wtrue[0].0 + wtrue[1].0 * wtrue[1].0 + wtrue[2].0 * wtrue[2].0)
+                    .sqrt();
+            // 发散阈值：起飞/转弯的瞬时角速度可达数 rad/s，属正常机动；
+            // 取 6 rad/s 表示真正失控翻滚。当前 PID 悬停控制器在持续移动目标下
+            // 会掉高/振荡（无倾斜垂直分量补偿），任务层据此可靠检测失败（stable=false）。
+            if rate > 6.0 || !invariants::state_finite(&st) {
+                stable = false;
+                break;
+            }
+            s += cruise_v * self.dt;
+        }
+        MissionResult {
+            max_err,
+            rms_err: if n > 0 { (sq_err / n as f64).sqrt() } else { 0.0 },
+            duration: s / cruise_v.max(1e-9),
+            stable,
+        }
+    }
+
     /// 返回 `false`（不可恢复，符合当前控制律预期）；输出为分析性报告。
     pub fn run_hover_degraded(
         &mut self,
