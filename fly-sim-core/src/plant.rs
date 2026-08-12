@@ -509,6 +509,7 @@ where
             ],
             att: quat_ned,
             omega: [RadianPerSecond(ang[0] as f32), RadianPerSecond(ang[1] as f32), RadianPerSecond(-ang[2] as f32)],
+            airspeed: MeterPerSecond((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() as f32),
         }
     }
 }

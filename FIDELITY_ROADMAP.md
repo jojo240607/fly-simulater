@@ -68,7 +68,7 @@
 | **P1** | 在线控制分配重构（冗余容错） | 直接回应"退化不可恢复"痛点 | 待办 |
 | **P1** | 碰撞/接触（着陆/撞击） | 解锁坠落与地形场景 | ✅ 已完成（平面+地形高度图惩罚接触；多刚体待续） |
 | **P1** | Dryden 湍流风场 | 抗风场景真实化，成本低 | ✅ 已完成 |
-| **P2** | 更多传感器（磁力计+气压计已做；空速/VIO 待续） | 丰富 EKF 融合验证 | 部分完成 |
+| **P2** | 更多传感器（磁力计+气压计已做；空速计已做；VIO/RTK 待续） | 丰富 EKF 融合验证 | 部分完成 |
 | **P2** | 任务级逻辑（mission/路径）✅；MAVLink 待续 | 对标"能跑真机流程" | 部分完成 |
 
 ## 四、推进记录（进度跟踪）
@@ -193,7 +193,20 @@
   - 不改现有 IMU/GPS 接口（独立方法，渐进接入）。
 - 验证（独立 `tools/sensor_check.rs`，rustc 直跑）：磁力计水平姿态测量匹配
   B·软铁+硬铁期望、磁北为正、噪声 std≈0.05；气压计围绕真值（偏差<5m）。
-- 待续：空速计、视觉里程计/VIO、RTK-GPS；并接入 EKF 融合验证。
+- 待续：视觉里程计/VIO、RTK-GPS。
+- **空速计已完成（见 P2-3）**：`AirspeedSensor` 特质 + `AirspeedSample`，EKF 标量空速融合（`airspeed_fusion_constrains_horizontal_speed` 测试通过）。
+
+### P2-3：空速计 + EKF 空速融合 ✅ 完成
+- 实现（`flyctrl-core`）：
+  - `vehicle.rs`：`VehicleState` 新增 `airspeed: MeterPerSecond` 字段（与 `zero()`）；新增 `AirspeedSample { speed, timestamp_s }`。
+  - `estimator/trait_def.rs`：`Estimator::step` 签名扩展为 `step(dt, imu, pos, airspeed: Option<AirspeedSample>)`。
+  - `estimator/ekf.rs`：新增 `r_airspeed=0.75` 与 `airspeed_est`；标量测量更新（H=[vx/vh, vy/vh, 0...]，空速=水平速度幅值）`update_airspeed()`；`VehicleState.airspeed` 回填估计值。
+  - `estimator/complementary.rs`：低通跟踪空速并回填。
+  - `hal/sensor.rs`：`AirspeedSensor` 特质 + `MockAirspeed`（`set_speed`/`set_health`）+ `PitotMs4525do` STM32F407 占位。
+  - `hil.rs`：`HilContext::step` 泛型化为 `A: AirspeedSensor`，读 `airspeed.read()` 透传给估计器。
+  - `fly-sim-core/src/controller.rs`：新增 `SimAirspeed`（由 `plant.state_ned()` 水平速度推导真空速），接入 `HilContext::step`；`plant.state_ned()` 回填 `airspeed`。
+- 验证：`cargo test -p flyctrl-core` 与 `cargo test`（fly-simulater）全绿；新增 `airspeed_fusion_constrains_horizontal_speed` / `airspeed_fusion_rejects_none_gracefully` 单测。
+- 待续：真实皮托管噪声模型、空速在控制律（如 TECS）中的消费、VIO/RTK。
 
 ---
 *更新：P0 完成后在本节打勾并补充实测数据。*

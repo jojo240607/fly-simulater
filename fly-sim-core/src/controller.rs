@@ -8,10 +8,10 @@ use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::controller::{Controller, IndiController, LqrController, PidController, Setpoint};
 use flyctrl_core::estimator::EkfEstimator;
 use flyctrl_core::hal::actuator::{MotorActuator, OutputProtocol};
-use flyctrl_core::hal::sensor::{GpsSensor, ImuSensor};
+use flyctrl_core::hal::sensor::{AirspeedSensor, GpsSensor, ImuSensor};
 use flyctrl_core::hil::HilContext;
 use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond, Second};
-use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, PosSample, VehicleState};
+use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, VehicleState};
 
 use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
@@ -72,6 +72,16 @@ impl GpsSensor for SimGps {
     fn healthy(&self) -> bool { self.last.is_some() }
 }
 
+/// 物理引擎提供的空速（真空速，不含风）：由世界真值水平速度幅值换算。
+pub struct SimAirspeed {
+    last: Option<AirspeedSample>,
+}
+
+impl AirspeedSensor for SimAirspeed {
+    fn read(&mut self) -> Option<AirspeedSample> { self.last }
+    fn healthy(&self) -> bool { self.last.is_some() }
+}
+
 // ---- 真实执行器：仅缓存控制输出，由 FlyController.step 显式回写 plant ----
 //
 // 注意：不能用裸指针缓存 `plant` 地址——`FlyController::new` 里 `plant` 构造后会被
@@ -99,6 +109,7 @@ pub struct FlyController<W> {
     plant: QuadrotorPlant<W>,
     imu: SimImu,
     gps: SimGps,
+    air: SimAirspeed,
     motors: SimMotors,
     cfg: VehicleConfig,
     /// 阶段 5：故障注入——每路电机推进效率系数（1.0=正常，0.0=完全停转，
@@ -147,6 +158,7 @@ where
             },
         };
         let gps = SimGps { last: None };
+        let air = SimAirspeed { last: None };
         let motors = SimMotors { last: ActuatorCmd::zero() };
 
         Self {
@@ -154,6 +166,7 @@ where
             plant,
             imu,
             gps,
+            air,
             motors,
             cfg: cfg.clone(),
             fail_mask: [1.0; 4],
@@ -183,12 +196,19 @@ where
         let (imu_sample, pos_sample) = self.plant.read_sensors();
         self.imu.last = imu_sample;
         self.gps.last = pos_sample;
+        // 真空速 = 水平速度幅值（无风假设下，世界速度即相对空气速度）。
+        let st = self.plant.state_ned();
+        let vh = (st.vel[0].0 * st.vel[0].0 + st.vel[1].0 * st.vel[1].0).sqrt();
+        self.air.last = Some(AirspeedSample {
+            speed: flyctrl_core::units::Airspeed(vh as f32),
+            timestamp_s: 0.0,
+        });
 
         // 2) 跑控制律（SIL/HIL 共享闭环）。motors.apply 只记录指令。
         let state = match &mut self.hil {
-            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, setpoint, &mut self.motors, &self.cfg),
-            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, setpoint, &mut self.motors, &self.cfg),
-            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, setpoint, &mut self.motors, &self.cfg),
+            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint, &mut self.motors, &self.cfg),
+            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint, &mut self.motors, &self.cfg),
+            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint, &mut self.motors, &self.cfg),
         };
 
         // 2.5) 阶段 5/8：故障处理。
