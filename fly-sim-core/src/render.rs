@@ -298,6 +298,80 @@ fn draw_textured_tri(
     }
 }
 
+/// 纯色三角形光栅化（模型空间 3 顶点 → 屏幕，重心插值 + 深度测试）。
+fn draw_tri_solid(
+    fb: &mut Framebuffer,
+    vp: &Matrix4<f32>,
+    model: &Matrix4<f32>,
+    pos: [[f32; 3]; 3],
+    color: [u8; 3],
+) {
+    let mut sp = [[0.0f32; 2]; 3];
+    let mut invw = [0.0f32; 3];
+    for i in 0..3 {
+        match project(pos[i], vp, model, fb.width, fb.height) {
+            Some((sx, sy, iw)) => {
+                sp[i] = [sx as f32, sy as f32];
+                invw[i] = iw;
+            }
+            None => return,
+        }
+    }
+    let minx = sp.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min).floor().max(0.0) as i32;
+    let maxx = sp.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max).ceil().min(fb.width as f32) as i32;
+    let miny = sp.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min).floor().max(0.0) as i32;
+    let maxy = sp.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max).ceil().min(fb.height as f32) as i32;
+    let area = edge2(sp[0], sp[1], sp[2]);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    for y in miny..=maxy {
+        for x in minx..=maxx {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let w0 = edge2(sp[1], sp[2], [px, py]) / area;
+            let w1 = edge2(sp[2], sp[0], [px, py]) / area;
+            let w2 = edge2(sp[0], sp[1], [px, py]) / area;
+            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                continue;
+            }
+            let iw = w0 * invw[0] + w1 * invw[1] + w2 * invw[2];
+            if iw <= 1e-6 {
+                continue;
+            }
+            fb.set_depth(x, y, iw, color);
+        }
+    }
+}
+
+/// 画一个世界系圆盘（机体 X-Y 平面的圆，三角扇近似）。
+/// 经透视投影后屏幕上是椭圆——随机体姿态倾斜，保持与机体同一水平面。
+/// `center_body` 与 `radius_body` 均为**机体局部坐标**（米），经 `model` 变换到世界。
+fn fill_world_disc(
+    fb: &mut Framebuffer,
+    vp: &Matrix4<f32>,
+    model: &Matrix4<f32>,
+    center_body: [f32; 3],
+    radius_body: f32,
+    color: [u8; 3],
+    segs: u32,
+) {
+    if radius_body <= 1e-4 {
+        return;
+    }
+    let mut prev = [center_body[0] + radius_body, center_body[1], center_body[2]];
+    for i in 1..=segs {
+        let ang = (i as f32 / segs as f32) * std::f32::consts::TAU;
+        let cur = [
+            center_body[0] + radius_body * ang.cos(),
+            center_body[1] + radius_body * ang.sin(),
+            center_body[2],
+        ];
+        draw_tri_solid(fb, vp, model, [center_body, prev, cur], color);
+        prev = cur;
+    }
+}
+
 /// 画一个贴纹理的四边形（两个三角形）。
 fn draw_textured_quad(
     fb: &mut Framebuffer,
@@ -325,31 +399,6 @@ fn edge2(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
     (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 }
 
-/// 画屏幕空间圆环（Bresenham 式逐点描边），带深度。
-fn draw_circle_outline(fb: &mut Framebuffer, cx: i32, cy: i32, r: i32, depth: f32, color: [u8; 3]) {
-    let r = r.max(1);
-    let mut x = 0;
-    let mut y = r;
-    let mut d = 3 - 2 * r;
-    while x <= y {
-        let pts = [
-            (cx + x, cy + y), (cx - x, cy + y), (cx + x, cy - y), (cx - x, cy - y),
-            (cx + y, cy + x), (cx - y, cy + x), (cx + y, cy - x), (cx - y, cy - x),
-        ];
-        for (px, py) in pts {
-            if px >= 0 && py >= 0 && (px as u32) < fb.width && (py as u32) < fb.height {
-                fb.set_depth(px, py, depth, color);
-            }
-        }
-        if d < 0 {
-            d += 4 * x + 6;
-        } else {
-            d += 4 * (x - y) + 10;
-            y -= 1;
-        }
-        x += 1;
-    }
-}
 
 /// 程序化生成一张"碳纤维 + 警示条"机身纹理（避免依赖外部图片，后端离线可用）。
 /// 用伪随机碳纤维纹路 + 中心警示色块。
@@ -451,19 +500,14 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
         if let (Some(pc), Some(pr)) = (center, pr) {
             // 臂线
             fb.draw_line(pc.0, pc.1, pr.0, pr.1, (pc.2 + pr.2) * 0.5, [96, 108, 128]);
-            // 旋翼盘：高速旋转轨迹画成"圈圈"（淡色实心圆盘 + 外圈）。
-            // 屏幕像素半径（不依赖 3D 投影，保证可见），随推力大小缩放。
+            // 旋翼盘：世界系圆盘（机体 X-Y 平面），透视投影后随姿态倾斜成椭圆——
+            // 与机体保持同一水平面，不再画成屏幕正圆（避免"球体感"）。
             let m = inp.motors[i] as f32;
-            let rad = (5 + (m * 10.0) as i32) as i32;
             let spin_col = if m > 0.05 { [140, 170, 190] } else { [70, 80, 95] };
-            // 淡色圆盘（旋转圈）+ 外圈亮边（更明显的旋转轨迹边界）。
-            // 外圈深度略近于圆盘，否则被深度测试（相等深度不覆盖）挡掉画不上。
-            if rad > 2 {
-                fb.fill_circle(pr.0, pr.1, rad, pr.2, spin_col);
-                draw_circle_outline(fb, pr.0, pr.1, rad, pr.2 - 0.002, [200, 220, 235]);
-            } else {
-                fb.fill_circle(pr.0, pr.1, rad, pr.2, spin_col);
-            }
+            let disc_r = arm * 0.30 * inp.visual_scale; // 米→渲染单位
+            fill_world_disc(fb, vp, &model, rr, disc_r, spin_col, 20);
+            // 内圈略深形成环形"旋转轨迹"
+            fill_world_disc(fb, vp, &model, rr, disc_r * 0.62, [115, 138, 158], 20);
             // 电机座 + 失效/退化高亮
             let eff = inp.eff[i];
             if eff <= 0.02 {
