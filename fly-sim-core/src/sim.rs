@@ -280,6 +280,11 @@ where
         self.ctrl.debug_up()
     }
 
+    /// 阶段 8：动力系统状态（电池端电压 V，4 路电机转速 rad/s）。
+    pub fn powertrain_state(&self) -> (f64, [f64; 4]) {
+        self.ctrl.powertrain_state()
+    }
+
     /// 阶段 3：风环境接入验证场景。
     ///
     /// 注意：当前默认 PID（ctrl_params）抗风能力极弱（>~0.3 m/s 持续风会因姿态环

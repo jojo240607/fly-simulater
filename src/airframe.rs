@@ -28,6 +28,28 @@ pub struct AirframeToml {
     pub hover_thrust: f32,
     pub vmax_xy: f32,
     pub vmax_z: f32,
+    // ---- 阶段 8 动力系统（可选，缺省用默认值）----
+    #[serde(default = "default_battery_v")]
+    pub battery_v_nom: f32,
+    #[serde(default = "default_battery_r")]
+    pub battery_r: f32,
+    #[serde(default = "default_motor_kv")]
+    pub motor_kv: f32,
+    #[serde(default = "default_motor_r")]
+    pub motor_r: f32,
+}
+
+fn default_battery_v() -> f32 {
+    14.8
+}
+fn default_battery_r() -> f32 {
+    0.015
+}
+fn default_motor_kv() -> f32 {
+    102.6
+}
+fn default_motor_r() -> f32 {
+    0.12
 }
 
 impl AirframeToml {
@@ -75,6 +97,10 @@ impl AirframeToml {
             hover_thrust,
             vmax_xy: self.vmax_xy,
             vmax_z: self.vmax_z,
+            battery_v_nom: self.battery_v_nom,
+            battery_r: self.battery_r,
+            motor_kv: self.motor_kv,
+            motor_r: self.motor_r,
         }
     }
 }

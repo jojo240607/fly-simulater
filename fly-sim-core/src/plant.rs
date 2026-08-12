@@ -92,10 +92,18 @@ pub struct QuadrotorPlant<W> {
     dt: f64,
     /// 上一帧世界系线速度（数值微分算加速度）。
     prev_vel_up: [f64; 3],
-    /// 控制器下发的目标油门（4 路归一化，[0,1]），由电机一阶滞后趋近实际推力。
+    /// 控制器下发的目标油门（4 路归一化，[0,1]）。
     cmd_motor: [f64; 4],
-    /// 电机一阶滞后后的实际归一化推力（用于阶段 2 电机动态）。
-    thrust_actual: [f64; 4],
+    /// 阶段 8 动力系统：电机实际转速（rad/s），由油门×电池电压的稳定转速经一阶滞后趋近。
+    motor_speed: [f64; 4],
+    /// 当前电池端电压（V），随总电流（∝ω²）跌落。
+    battery_v: f64,
+    /// 螺旋桨推力系数 k_t（N per (rad/s)²），使满油门/满电压时单电机推力=thrust_coeff。
+    prop_kt: f64,
+    /// 螺旋桨反扭矩系数 k_q（N·m per (rad/s)²）。
+    prop_kq: f64,
+    /// 电机电效率（电气功率→机械功率）。
+    motor_eta: f64,
     /// 当前帧缓存的 4 路实际推力（N），供 step 前注入。
     thrust_n: [f64; 4],
     gravity: f64,
@@ -144,6 +152,17 @@ where
         let body_id = world.add_body(cfg.mass as f64, &pos7, &inertia3);
         assert!(body_id >= 0, "add_body 失败");
 
+        // 阶段 8 动力系统：由配置派生螺旋桨系数。
+        // 满油门+满电池电压 → 电机稳定转速 ω_max = motor_kv·battery_v_nom，
+        // 使此时单电机推力 = thrust_coeff（保持既有满油门推力标定）。
+        let omega_max = (cfg.motor_kv as f64 * cfg.battery_v_nom as f64).max(1e-6);
+        let prop_kt = cfg.thrust_coeff as f64 / (omega_max * omega_max);
+        // 反扭矩：原 torque_coeff 是"每 N 推力"的线性系数；∝ω² 下满油门反扭矩
+        // = torque_coeff·thrust_coeff，故 prop_kq = torque_coeff·thrust_coeff / ω_max²。
+        let prop_kq =
+            cfg.torque_coeff as f64 * cfg.thrust_coeff as f64 / (omega_max * omega_max);
+        let battery_v = cfg.battery_v_nom as f64;
+
         Self {
             world,
             body_id,
@@ -151,7 +170,11 @@ where
             dt,
             prev_vel_up: [0.0; 3],
             cmd_motor: [0.0; 4],
-            thrust_actual: [0.0; 4],
+            motor_speed: [0.0; 4],
+            battery_v,
+            prop_kt,
+            prop_kq,
+            motor_eta: 0.80,
             thrust_n: [0.0; 4],
             gravity: 9.81,
             time: 0.0,
@@ -169,15 +192,43 @@ where
 
     /// 推进一个物理步：先把旋翼力/力矩注入机体，再 step。
     pub fn step(&mut self) {
-        // ---- 阶段 2a：电机一阶滞后 ----
-        // 实际推力指数趋近目标：thrust_actual += (cmd - actual)·(dt/tau)
-        // （motor_tau 已过 airframe 注入 cfg；tau=0 退化为无滞后直接跟随）
+        // ---- 阶段 8 动力系统（油门→电压→转速→推力，∝ω² + 电池掉压）----
+        // 用上一拍电池电压算本拍电流/掉压（一拍延迟，250Hz 足够稳定）。
+        let kv = self.cfg.motor_kv as f64;
         let tau = (self.cfg.motor_tau as f64).max(1e-6);
-        let alpha = (self.dt / tau).min(1.0); // 数值稳定，dt>>tau 时整步跳变
+        let alpha = (self.dt / tau).min(1.0);
+        let v_bat = self.battery_v.max(1e-3);
+        let mut t_n = [0.0f64; 4];
+        let mut q_n = [0.0f64; 4]; // 螺旋桨反扭矩（机体 Z 轴反扭矩）
+        let mut i_bat = 0.0f64;
         for i in 0..4 {
-            let target = self.cmd_motor[i].clamp(0.0, 1.0);
-            self.thrust_actual[i] += (target - self.thrust_actual[i]) * alpha;
+            let u = self.cmd_motor[i].clamp(0.0, 1.0);
+            // 控制器语义：归一化油门 u 表示期望推力 = thrust_coeff·u（线性，与控制律兼容）。
+            // 由 ∝ω² 反解所需转速 ω_req = sqrt(thrust_coeff·u / prop_kt)。
+            let t_req = self.cfg.thrust_coeff as f64 * u;
+            let omega_req = (t_req / self.prop_kt).max(0.0).sqrt();
+            // 电机稳定转速受电池电压限制：最大转速 = kv·V_bat。
+            // 掉压时 omega_ss < omega_req → 推力不足，体现"大机动掉压"。
+            let omega_ss = omega_req.min(kv * v_bat);
+            // 转速一阶滞后
+            self.motor_speed[i] += (omega_ss - self.motor_speed[i]) * alpha;
+            let om = self.motor_speed[i].max(0.0);
+            // 螺旋桨：推力与反扭矩均 ∝ ω²
+            let t = self.prop_kt * om * om;
+            let q = self.prop_kq * om * om;
+            t_n[i] = t;
+            q_n[i] = q;
+            // 电机电流 ≈ 机械功率 Q·ω / (电效率·端电压) + 小空载电流。
+            let v_m = (u * v_bat).max(1e-3);
+            let i_mech = q * om / (self.motor_eta * v_m);
+            i_bat += i_mech + 1.0; // 空载电流 ~1A/电机
         }
+        // 电池电压跌落：目标 V = V_oc - I·R，但用低通平滑趋近（电池电压不能瞬时跳变，
+        // 化学/电容动力学），避免"油门↑→电流↑→掉压↑→转速受限→推力不足→再加油门"的正反馈发散。
+        let v_target = (self.cfg.battery_v_nom as f64 - i_bat * self.cfg.battery_r as f64).max(0.0);
+        let alpha_bat = (self.dt / 0.30).min(1.0); // ~0.3s 时间常数
+        self.battery_v += (v_target - self.battery_v) * alpha_bat;
+        self.thrust_n = t_n;
 
         // ---- 旋翼推进模型（引擎世界系，f64）----
         // 取当前引擎姿态（按 body_id 偏移）用于把机体力/矩旋到世界系。
@@ -188,13 +239,9 @@ where
         // 阶段 2c：地面效应增益（近地推力增强），桨径估为 0.4·臂长。
         let prop_diam = 0.4 * self.cfg.arm_length as f64;
         let ge = ground_effect_gain(h, prop_diam);
-
-        // 4 路实际推力（含地面效应增益与电机滞后）。
-        let mut t_n = [0.0f64; 4];
         for i in 0..4 {
-            t_n[i] = self.cfg.thrust_coeff as f64 * self.thrust_actual[i] * ge;
+            t_n[i] *= ge;
         }
-        self.thrust_n = t_n;
 
         // 机体合力（引擎机体系）：推力沿机体 +Z。
         let sum_t: f64 = t_n.iter().sum();
@@ -219,8 +266,8 @@ where
             // r × (0,0,t) = (ry*t, -rx*t, 0)
             tau_body[0] += ry * t;
             tau_body[1] += -rx * t;
-            // 反扭矩（绕推力轴，机体 Z）：CCW 正转 -> 机体受 CW 反扭矩
-            let tq = spin[i] * self.cfg.torque_coeff as f64 * t;
+            // 反扭矩（绕推力轴，机体 Z）：= 螺旋桨阻力矩 Q（∝ω²），CCW 正转 -> 机体受 CW 反扭矩
+            let tq = spin[i] * q_n[i];
             tau_body[2] += tq;
         }
         // 阶段 3：推进风场，取当前世界系（UP）风速。无风则为 0。
@@ -353,6 +400,11 @@ where
     pub fn debug_up(&self) -> ([f64; 3], [f64; 4]) {
         let tf = self.read_body_tf();
         ([tf[0], tf[1], tf[2]], [tf[3], tf[4], tf[5], tf[6]])
+    }
+
+    /// 阶段 8：取动力系统状态（电池端电压 V，4 路电机转速 rad/s），供测试/日志。
+    pub fn powertrain_state(&self) -> (f64, [f64; 4]) {
+        (self.battery_v, self.motor_speed)
     }
 
     /// 取当前 NED 世界状态（供不变量检查 / 日志）。

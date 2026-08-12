@@ -224,6 +224,11 @@ where
         self.plant.debug_up()
     }
 
+    /// 阶段 8：动力系统状态（电池端电压 V，4 路电机转速 rad/s）。
+    pub fn powertrain_state(&self) -> (f64, [f64; 4]) {
+        self.plant.powertrain_state()
+    }
+
     /// 最近一次控制指令。
     pub fn last_cmd(&self) -> ActuatorCmd {
         self.motors.last
