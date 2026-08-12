@@ -100,19 +100,33 @@ impl WindField {
         self.time += dt;
         let t = self.time;
 
-        // 阵风：各轴正弦脉冲 + 相位偏移（确定性）。
+        // 阵风：各轴多频正弦叠加（P1-3 增强，更丰富频谱）+ 轴间相位差。
+        // 三个频率分量（freq, 2freq, 3freq）以递减幅度叠加，模拟多尺度阵风。
         let mut gust = [0.0f64; 3];
         for i in 0..3 {
             let phase = (i as f64) * 1.7; // 轴间相位差
+            let f = self.cfg.gust_freq;
             gust[i] = self.cfg.gust_amp[i]
-                * ((2.0 * std::f64::consts::PI * self.cfg.gust_freq * t + phase).sin());
+                * (f64::sin(2.0 * std::f64::consts::PI * f * t + phase)
+                    + 0.5 * f64::sin(2.0 * std::f64::consts::PI * 2.0 * f * t + 2.0 * phase)
+                    + 0.25 * f64::sin(2.0 * std::f64::consts::PI * 3.0 * f * t + 3.0 * phase));
         }
 
-        // 湍流：一阶低通白噪声（指数相关），Dryden 简化。
-        let alpha = (dt / self.cfg.turb_tau).min(1.0);
+        // 湍流：一阶低通白噪声（指数相关）。Dryden 尺度差异：纵向（机体 X）尺度大、
+        // 相关时间长；横向/垂直尺度小、时间常数短。各轴独立时间常数。
+        // （纵向时间常数 = turb_tau；横向/垂直 = turb_tau × 0.5，模拟 Dryden 谱的
+        //   纵向谱在低频更强、横向谱在高频衰减更缓。）
+        let tau_x = self.cfg.turb_tau;
+        let tau_yz = self.cfg.turb_tau * 0.5;
         let mut turb = [0.0f64; 3];
         for i in 0..3 {
-            let w = self.cfg.turb_sigma[i] * self.rng.next_gaussian();
+            let tau = if i == 0 { tau_x } else { tau_yz };
+            let alpha = (dt / tau).min(1.0);
+            // 增益补偿：一阶低通 `x+=(w-x)·alpha` 的稳态输出方差 =
+            // alpha/(2-alpha)·σw²。为使输出标准差≈turb_sigma，输入白噪声用
+            // σ·sqrt((2-alpha)/alpha) 补偿，避免时间常数大时湍流被过度平滑。
+            let gain = ((2.0 - alpha) / alpha).sqrt();
+            let w = self.cfg.turb_sigma[i] * gain * self.rng.next_gaussian();
             self.turb_state[i] += (w - self.turb_state[i]) * alpha;
             turb[i] = self.turb_state[i];
         }
