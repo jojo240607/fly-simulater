@@ -113,12 +113,10 @@ pub struct QuadrotorPlant<W> {
     /// 阶段 4：传感器真实化模型（IMU 噪声/偏置/GPS 延迟丢星）。
     sensor: SensorModel,
     /// P1-2：地面接触模型。`None` 表示无地面（真空 / 自由落体能量守恒场景）。
-    /// 仅在 `Some` 时才向物理世界注入静态地面盒，并在每步解算接触冲量。
+    /// `Some` 时每步经 `resolve_ground_contact` 惩罚模型解算接触冲量（不注入原生地面刚体）。
     contact: Option<ContactModel>,
     /// 最近一次接触解算结果（供日志 / 调试；`None` 表示本步未接触）。
     last_contact: Option<ContactInfo>,
-    /// 静态地面盒是否已注入物理世界（惰性注入：仅首次 `step` 且 `contact.is_some()` 时加）。
-    ground_added: bool,
 }
 
 impl<W> QuadrotorPlant<W>
@@ -140,12 +138,10 @@ where
         contact: Option<ContactModel>,
     ) -> Self {
         let mut world = world;
-        // 静态地面盒（质量 0 = 无限质量，不动）。注意：**不在构造时注入**，改为按
-        // 首次 `step()` 时的 `contact` 状态惰性注入（见 `step` 内 `ground_added` 逻辑）。
-        // 这保证了"真空 / 自由落体能量守恒"场景——若构造后、首步前调用
-        // `plant_set_contact(None)`（如 `run_freefall`）——世界永远不含地面盒，机体
-        // 不会被引擎原生碰撞求解器拦截/数值爆裂；而 P1-2 惩罚接触仍由 `resolve_ground_contact`
-        // 单独处理。构造时即使 `contact.is_some()` 也不预先加盒。
+        // 注：P1-2 地面接触完全由 `resolve_ground_contact` 惩罚模型处理（读取机体位姿、
+        // 施加弹簧-阻尼+库仑摩擦冲量），**不向物理世界注入原生地面刚体**。这样：
+        // - 真实引擎与测试替身行为一致（无"原生碰撞求解器"与惩罚模型双重接触）；
+        // - 真空 / 自由落体能量守恒场景（contact=None）天然无地面，机体自由下落不发散。
 
         // 初始位姿：NED (0,0,-5) = 悬停 5m 高 -> 引擎 (0, 5, 0)。
         // 初始姿态：机体"上"轴(+Z, 引擎机体系)对齐世界 +Y(上)，即绕 X 轴 +90°。
@@ -200,14 +196,12 @@ where
             sensor: SensorModel::new(sensor_cfg, dt),
             contact,
             last_contact: None,
-            ground_added: false,
         }
     }
 
-    /// P1-2：设置 / 清除地面接触模型。
+    /// P1-2：设置 / 清除地面接触模型（纯惩罚模型，不涉及世界刚体增删）。
     ///
-    /// - `Some(m)`：启用地面（若当前世界尚无地面盒，本调用不补加——地面盒只在
-    ///   `new` 时按初始 `contact` 注入；运行时切换主要用于从"有接触"切到"无接触"）。
+    /// - `Some(m)`：启用地面接触解算（`resolve_ground_contact` 每步施加冲量）。
     /// - `None`：关闭地面接触解算（真空场景）。
     pub fn set_contact(&mut self, contact: Option<ContactModel>) {
         self.contact = contact;
@@ -227,16 +221,6 @@ where
 
     /// 推进一个物理步：先把旋翼力/力矩注入机体，再 step。
     pub fn step(&mut self) {
-        // ---- 0) 惰性注入静态地面盒 ----
-        // 仅当启用接触且尚未注入（首步）时加盒。真空 / 自由落体场景若已在首步前
-        // 经 `plant_set_contact(None)` 关闭接触（如 `run_freefall`），则永不注入，
-        // 机体保持自由下落，不被引擎原生碰撞求解器拦截而产生 NaN/Inf。
-        if self.contact.is_some() && !self.ground_added {
-            let ground_pos7: [f64; 7] = [0.0, -5.0, 0.0, 1.0, 0.0, 0.0, 0.0];
-            let ground_inertia: [f64; 3] = [1.0, 1.0, 1.0];
-            let _ground = self.world.add_body(0.0 /*mass=0 静态*/, &ground_pos7, &ground_inertia);
-            self.ground_added = true;
-        }
         // ---- 阶段 8 动力系统（油门→电压→转速→推力，∝ω² + 电池掉压）----
         // 用上一拍电池电压算本拍电流/掉压（一拍延迟，250Hz 足够稳定）。
         let kv = self.cfg.motor_kv as f64;

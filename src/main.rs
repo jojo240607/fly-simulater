@@ -14,7 +14,7 @@ use fly_simulater::log::CsvLogger;
 /// CLI 解析结果。
 struct Cli {
     airframe: Option<String>,
-    scenario: String, // "hover" | "wind" | "freefall"
+    scenario: String, // "hover" | "wind" | "freefall" | "landing"
     sensor_noise: bool,
     controller: ControllerKind,
     fail_motor: Option<u8>, // 阶段 5：电机完全失效注入（0..3）
@@ -258,6 +258,16 @@ fn main() {
             println!("[main] running SIL anti-wind hover (15s, dt={}ms)...", dt * 1000.0);
             let r = loop_sim.run_hover_wind(15.0);
             println!("[main] SIL anti-wind {}", if r { "PASS" } else { "FAIL" });
+            r
+        }
+        "landing" => {
+            println!("[main] running P1-2 landing contact (10s, dt={}ms)...", dt * 1000.0);
+            let r = loop_sim.run_drop(10.0);
+            println!(
+                "[main] P1-2 landing {} ({} steps)",
+                if r { "PASS(稳定拦停地面)" } else { "FAIL" },
+                loop_sim.steps()
+            );
             r
         }
         "degraded" => {

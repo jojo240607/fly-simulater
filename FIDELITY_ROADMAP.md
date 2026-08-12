@@ -66,7 +66,7 @@
 | **P0** | 动力系统（油门→电流→电压→转速→推力 + 反扭矩∝ω²） | 最常见失效来源，改动集中、收益大 | 待办 |
 | **P0** | 螺旋桨动量/叶素理论（推力∝ω² + 滑流 + 陀螺效应） | 大机动/前飞真实性的根基 | 待办 |
 | **P1** | 在线控制分配重构（冗余容错） | 直接回应"退化不可恢复"痛点 | 待办 |
-| **P1** | 碰撞/接触（着陆/撞击） | 解锁坠落与地形场景 | 待办 |
+| **P1** | 碰撞/接触（着陆/撞击） | 解锁坠落与地形场景 | ✅ 已完成（平面地面惩罚接触；多刚体/地形待续） |
 | **P1** | Dryden 湍流风场 | 抗风场景真实化，成本低 | 待办 |
 | **P2** | 更多传感器（磁力计+气压计已做；空速/VIO 待续） | 丰富 EKF 融合验证 | 部分完成 |
 | **P2** | 任务级逻辑（mission/路径）✅；MAVLink 待续 | 对标"能跑真机流程" | 部分完成 |
@@ -135,7 +135,23 @@
   阵风周期均值≈0、振幅存在；纵向比横向平滑（Dryden 尺度）。
 - 注：wind.rs 改动因 phy-rigid（他人进行中）编译阻塞，用独立编译验证等价逻辑。
 
-### P1-2：碰撞/接触（待办）
+### P1-2：碰撞/接触（着陆/撞击）✅ 完成
+
+- 实现（`fly-sim-core/src/physics.rs`）：
+  - `ContactModel { ground_y, restitution, friction, penalty_k, contact_half_h }`：惩罚弹簧-阻尼
+    + 库仑摩擦的地面接触模型。恢复系数 `e` 经 `ζ = -ln(e)/(2π)` 推导临界阻尼比（clamp [0,1]），
+    临界阻尼 `c_crit = 2√(k·m)`；法向冲量**仅在接近时**（`v_n < 0`）施加，避免回弹泵能。
+  - `ContactInfo { touching, penetration, normal_force, friction_impulse }` + `resolve_ground_contact(...)`
+    （经 `RigidBodyWorld::get_body_transform(id)` 读取目标刚体位姿，不依赖原生地面刚体）。
+- 接入（`fly-sim-core/src/plant.rs`）：`QuadrotorPlant` 持有 `Option<ContactModel>`，每步 `world.step`
+  后调用 `resolve_ground_contact` 施加接触冲量（**纯惩罚模型，不向物理世界注入原生地面盒**，避免与
+  引擎原生碰撞求解器双重接触）。`set_contact(None)` 即切到真空（自由落体能量守恒场景）。
+- 验证：
+  - `tests/physics_toy.rs` 4 项（ToyWorld 替身）：静止不下陷、按恢复系数回弹、摩擦止滑、plant 拦停下落四旋翼。
+  - `tests/sil.rs` `sil_landing_settles_on_ground`（真实引擎 `PhySdkWorld`）：零推力释放 → 被惩罚接触
+    稳定拦停在地面附近（全程状态有限、末态竖直速度趋零），`run_drop` 场景同步提供。
+  - 全量测试 `--features phy` 与默认构建均通过。
+- **下一步（未做）**：多刚体/凸包碰撞、地形高度图、机体间/障碍物碰撞；当前仅平面地面惩罚接触。
 
 ### P2-2：任务级逻辑（waypoint 路径跟随）✅ 框架完成
 - 实现（`fly-sim-core/src/sim.rs`）：`run_mission(waypoints, cruise_v) -> MissionResult`

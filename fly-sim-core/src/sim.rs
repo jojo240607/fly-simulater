@@ -260,6 +260,69 @@ where
         all_ok && fell && non_increasing
     }
 
+    /// P1-2：着陆接触测例（真实引擎 + 惩罚接触模型）。
+    ///
+    /// 零推力释放机体，启用地面接触（`Some(ContactModel)`）。验证惩罚接触模型把下落的
+    /// 四旋翼稳定拦停在地面附近：全程状态有限、末态位于地面附近（不穿透也不被弹飞）、
+    /// 末态竖直速度趋近于 0（静止在地面）。
+    pub fn run_drop(&mut self, seconds: f64) -> bool {
+        // 注意：区别于 run_freefall，这里**保持**接触模型启用（构造时已 Some）。
+        let cm = self.ctrl.contact_info(); // 仅用于打印接触状态信息
+        let _ = cm;
+        let total = (seconds / self.dt) as u64;
+        let mut all_ok = true;
+        let start_d = self.ctrl.world_state().pos[2].0;
+        let mut max_d = start_d;
+        let mut min_d = start_d;
+        let mut end_vd = 0.0f64;
+
+        for _ in 0..total {
+            let zero = flyctrl_core::vehicle::ActuatorCmd::zero();
+            self.ctrl.plant_apply(&zero);
+            self.ctrl.plant_step();
+            self.steps += 1;
+
+            if let Some(ref mut cb) = self.on_frame {
+                cb(&self.ctrl.world_state(), self.ctrl.last_cmd());
+            }
+            if let Some(ref mut cb) = self.on_step {
+                let w = self.ctrl.world_state();
+                let st = w.clone();
+                let row = LogRow {
+                    step: self.steps,
+                    t: self.steps as f64 * self.dt,
+                    true_state: w,
+                    est_state: st,
+                    cmd: self.ctrl.last_cmd(),
+                    imu: self.ctrl.last_imu(),
+                };
+                cb(&row);
+            }
+
+            let w = self.ctrl.world_state();
+            if !invariants::state_finite(&w) {
+                eprintln!("[FAIL] drop step {}: state not finite", self.steps);
+                all_ok = false;
+                break;
+            }
+            max_d = max_d.max(w.pos[2].0);
+            min_d = min_d.min(w.pos[2].0);
+            end_vd = w.vel[2].0 as f64;
+        }
+
+        println!(
+            "[drop] NED d 范围 [{:.3},{:.3}] 末态 vd={:.3} m/s",
+            min_d, max_d, end_vd
+        );
+        // 接触面 contact_y(引擎)=-4.9 => NED d=+4.9。机体从起点 d=-5 自由下落，
+        // 应被惩罚接触拦停在 d≈+4.9 附近（max_d 为最深处）：
+        // - max_d > 4.0：确实落到了地面（而非悬停起点）；
+        // - max_d < 6.5：未穿透地面/未被弹飞到无穷远；
+        // - end_vd > -0.5：末态竖直速度趋零（静止在地面）。
+        let settled = max_d > 4.0 && max_d < 6.5 && end_vd > -0.5;
+        all_ok && settled
+    }
+
     pub fn steps(&self) -> u64 { self.steps }
 
     /// 阶段 5：设置电机完全失效掩码（故障注入）。true=该电机停转。

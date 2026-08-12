@@ -15,7 +15,7 @@ use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, PosSample, VehicleState};
 
 use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
-use crate::physics::{ContactModel, RigidBodyWorld};
+use crate::physics::{ContactInfo, ContactModel, RigidBodyWorld};
 use crate::wind::WindField;
 use crate::sensor::SensorConfig;
 
@@ -248,6 +248,11 @@ where
     /// P1-2：运行时设置/清除地面接触（自由落体能量守恒场景用 None 关闭地面）。
     pub fn plant_set_contact(&mut self, contact: Option<ContactModel>) {
         self.plant.set_contact(contact);
+    }
+
+    /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。
+    pub fn contact_info(&self) -> Option<ContactInfo> {
+        self.plant.contact_info()
     }
 
     /// 调试：返回引擎世界系真实坐标与四元数。

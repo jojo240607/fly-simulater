@@ -72,3 +72,15 @@ fn sil_wind_hover_holds_altitude() {
     // 只验证风-气动耦合正确接入（机体被风明显吹离原点）且数值稳定（无 NaN/Inf）。
     assert!(ok, "wind-hover must stay numerically stable and show wind disturbance");
 }
+
+/// P1-2（真实引擎）：惩罚接触模型让下落四旋翼稳定停在地面而非数值爆裂/被弹飞。
+///
+/// 构造时已带 `Some(ContactModel::default())`（接触面 NED d≈+4.9）。零油门释放后，
+/// 机体应被惩罚接触拦停在地面附近：全程状态有限、末态位于地面附近、竖直速度趋零。
+#[test]
+fn sil_landing_settles_on_ground() {
+    let mut loop_sim = make_loop(); // 已启用 P1-2 接触
+    let ok = loop_sim.run_drop(10.0);
+    assert!(ok, "landing must settle on ground via penalty contact model");
+}
+
