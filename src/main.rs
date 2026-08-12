@@ -4,12 +4,50 @@
 //! 后续：HIL 模式经 USB CDC 接真实飞控（见 DESIGN.md §9）。
 
 use fly_sim_core::controller::ControllerKind;
+use fly_sim_core::controller::{hover_setpoint, FlyController};
 use fly_sim_core::physics::{TerrainField, ToyWorld};
 use fly_sim_core::sensor;
 use fly_sim_core::sim;
 use fly_sim_core::wind;
 use fly_simulater::airframe;
+use fly_simulater::comm::udp::UdpLink;
 use fly_simulater::log::CsvLogger;
+use flyctrl_core::comm::bridge::{MavCommand, MavlinkBridge, ParamProvider};
+use flyctrl_core::comm::telemetry::Telemetry;
+
+/// 把机载可调参数表暴露给地面站（PARAM_REQUEST_LIST 应答）。
+/// 这里取机体重/推重等关键量，足以演示参数下行回路。
+struct SimParams {
+    mass: f32,
+    thrust_coeff: f32,
+    drag_coeff: f32,
+    slipstream_drag: f32,
+}
+
+impl ParamProvider for SimParams {
+    fn param_count(&self) -> u16 { 4 }
+    fn param_id(&self, idx: u16) -> [u8; 16] {
+        let mut id = [0u8; 16];
+        let s: &[u8] = match idx {
+            0 => b"MASS\0\0\0\0\0\0\0\0\0\0\0\0",
+            1 => b"THR_COEF\0\0\0\0\0\0\0\0",
+            2 => b"DRAG_COEF\0\0\0\0\0\0",
+            3 => b"SLIP_DRAG\0\0\0\0\0\0",
+            _ => b"UNKNOWN\0\0\0\0\0\0\0\0",
+        };
+        id[..s.len()].copy_from_slice(s);
+        id
+    }
+    fn param_value(&self, idx: u16) -> f32 {
+        match idx {
+            0 => self.mass,
+            1 => self.thrust_coeff,
+            2 => self.drag_coeff,
+            3 => self.slipstream_drag,
+            _ => 0.0,
+        }
+    }
+}
 
 /// CLI 解析结果。
 struct Cli {
@@ -37,7 +75,7 @@ impl Cli {
     }
 }
 
-/// 极简 CLI：支持 `--airframe <path>`、`--scenario <hover|wind|freefall>`、
+/// 极简 CLI：支持 `--airframe <path>`、`--scenario <hover|wind|freefall|landing|terrain|degraded|mavlink>`、
 /// `--sensor-noise`、`--controller <pid|indi|lqr>`、`--fail-motor <0..3>`。
 fn parse_args() -> Cli {
     let mut cli = Cli {
@@ -218,6 +256,8 @@ fn main() {
     let world = fly_sim_core::physics::PhySdkWorld::create_empty();
     #[cfg(not(feature = "phy"))]
     let world = ToyWorld::new(9.81);
+    // 为 MAVLink 场景保留一份传感器配置副本（主 loop_sim 会 move 走原值）。
+    let sensor_cfg_mav = sensor_cfg.clone();
     let mut loop_sim = sim::SimLoop::new(
         world,
         &cfg,
@@ -328,6 +368,128 @@ fn main() {
             let r = loop_sim.run_hover_degraded(4.0, 8.0, idx, eff);
             println!("[main] SIL degraded-hover {}", if r { "PASS(可恢复)" } else { "FAIL" });
             r
+        }
+        "mavlink" => {
+            // M6.2：把仿真作为 MAVLink 端点，经 UDP 与地面站通信。
+            // - 周期下发遥测（HEARTBEAT/ATTITUDE/LOCAL_POSITION_NED/SYS_STATUS）
+            // - 解析入站 COMMAND_LONG：ARM/DISARM/SET_MODE/TAKEOFF/LAND/RTL/MISSION_START
+            // - 收到 PARAM_REQUEST_LIST 时回传参数表
+            // 真实地面站连接示例：MAVProxy `--out udp:127.0.0.1:14551` 或 QGC 默认 14550 对端。
+            let listen = "0.0.0.0:14551";
+            let peer = "127.0.0.1:14550";
+            let link = match UdpLink::bind(listen) {
+                Ok(mut l) => {
+                    let _ = l.connect_peer(peer);
+                    l
+                }
+                Err(e) => {
+                    eprintln!("[main] MAVLink UDP 绑定 {} 失败: {}", listen, e);
+                    std::process::exit(2);
+                }
+            };
+            let mut bridge = MavlinkBridge::new(link);
+            let mut tel = Telemetry::new(64);
+            let params = SimParams {
+                mass: cfg.mass,
+                thrust_coeff: cfg.thrust_coeff,
+                drag_coeff: cfg.drag_coeff[0],
+                slipstream_drag: cfg.slipstream_drag_coeff,
+            };
+
+            // 重建 FlyController（与 SimLoop 同构，但需暴露给命令处理）。
+            // 独立的物理世界 + 传感器配置副本，避免与上面已 move 进 loop_sim 的资源冲突。
+            #[cfg(feature = "phy")]
+            let world_mav = fly_sim_core::physics::PhySdkWorld::create_empty();
+            #[cfg(not(feature = "phy"))]
+            let world_mav = ToyWorld::new(9.81);
+            let mut fc = FlyController::new(
+                world_mav,
+                &cfg,
+                dt,
+                None,
+                sensor_cfg_mav,
+                cli.controller,
+                None,
+            );
+            fc.set_motor_eff(eff_mask);
+
+            println!(
+                "[main] MAVLink SIL 已启动：监听 {}，对端 {}（发往 GCS）。等待 ARM/TAKEOFF ...",
+                listen, peer
+            );
+            // MAVLink 端点常驻，便于真实 GCS 连接调试。无限循环持续运行，
+            // 直到用户 Ctrl+C 终止进程（便于 GCS 随时连入并交互，无时间窗口限制）。
+            let mut last_armed = fc.is_armed();
+            let mut step: usize = 0;
+            loop {
+                // 解析地面站命令（ARM/DISARM/SET_MODE/TAKEOFF 等）
+                // 调试：先抓原始帧打印非遥测 msgid，再交给桥接层处理
+                {
+                    let f = bridge.recv_raw();
+                    if f.len > 0 {
+                        let mid = f.data[7] as u32 | ((f.data[8] as u32) << 8) | ((f.data[9] as u32) << 16);
+                        if mid != 0 && mid != 1 && mid != 30 && mid != 32 {
+                            println!("[mavlink][dbg] 收到帧 msgid={} len={}", mid, f.len);
+                        }
+                        if let Some(cmd) = bridge.handle_frame(&f, &params) {
+                            match cmd {
+                        MavCommand::Arm => {
+                            fc.arm();
+                            println!("[mavlink] 收到 ARM");
+                        }
+                        MavCommand::Disarm => {
+                            fc.disarm();
+                            println!("[mavlink] 收到 DISARM");
+                        }
+                        MavCommand::SetMode(m) => {
+                            fc.set_mode(m);
+                            println!("[mavlink] 设置模式 {}", m);
+                        }
+                        MavCommand::Takeoff(alt) => {
+                            let alt = if alt > 0.1 { alt } else { 5.0 };
+                            fc.request_takeoff(alt);
+                            println!("[mavlink] 请求起飞到 {:.1} m", alt);
+                        }
+                        MavCommand::Land => println!("[mavlink] 收到 LAND"),
+                        MavCommand::Rtl => println!("[mavlink] 收到 RTL"),
+                        MavCommand::StartMission => println!("[mavlink] 收到 START_MISSION"),
+                        MavCommand::RequestParamList => {
+                            println!("[mavlink] 收到 PARAM_REQUEST_LIST，回传参数表")
+                        }
+                        MavCommand::Other(c) => println!("[mavlink] 收到未支持命令 {}", c),
+                    }
+                        }
+                    }
+                }
+                if fc.is_armed() != last_armed {
+                    println!("[mavlink] 解锁态 -> {}", fc.is_armed());
+                    last_armed = fc.is_armed();
+                }
+
+                // 设定点：未 ARM 时收油门悬停在地面附近；ARM 后按 takeoff_alt 上升到目标高度。
+                let target_d = if fc.is_armed() && fc.takeoff_alt() > 0.1 {
+                    -fc.takeoff_alt()
+                } else if fc.is_armed() {
+                    -5.0
+                } else {
+                    0.0
+                };
+                let sp = hover_setpoint(0.0, 0.0, target_d);
+
+                let st = fc.step(&sp);
+                step += 1;
+                tel.update(50, &st, fc.is_armed());
+
+                let sent = bridge.drain_telemetry(&mut tel);
+                if sent > 0 && step % 50 == 0 {
+                    println!("[mavlink] 步 {}：下发 {} 帧遥测", step, sent);
+                }
+            }
+            println!(
+                "[main] MAVLink SIL 结束（{} 步，最终解锁={}）",
+                step, fc.is_armed()
+            );
+            true
         }
         _ => {
             println!("[main] running SIL hover (10s, dt={}ms)...", dt * 1000.0);

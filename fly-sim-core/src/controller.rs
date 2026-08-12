@@ -112,6 +112,13 @@ pub struct FlyController<W> {
     air: SimAirspeed,
     motors: SimMotors,
     cfg: VehicleConfig,
+    /// 解锁态：true=电机可转（默认 true，保证既有悬停/任务测试行为不变）；
+    /// MAVLink DISARM 置 false 时停转。MAVLink ARM 置 true。
+    armed: bool,
+    /// 当前飞行模式（MAV custom mode 低字节），由 MAVLink DO_SET_MODE / 内部状态机更新。
+    mode: u8,
+    /// 最近一次 MAVLink 起飞指令请求的高度（m，绝对），0 表示无。
+    takeoff_alt: f32,
     /// 阶段 5：故障注入——每路电机推进效率系数（1.0=正常，0.0=完全停转，
     /// 中间值=部分效率退化）。实测：四旋翼在当前无重构控制律下，单电机推力
     /// 损失（无论完全还是部分）均致姿控发散、不可恢复（见 sim.rs run_hover_degraded）。
@@ -169,6 +176,9 @@ where
             air,
             motors,
             cfg: cfg.clone(),
+            armed: true,
+            mode: 0,
+            takeoff_alt: 0.0,
             fail_mask: [1.0; 4],
         }
     }
@@ -242,13 +252,33 @@ where
         }
 
         // 2.6) 把控制指令显式回写被控对象（注入推力/力矩）。
-        self.plant.apply_actuators(&cmd);
+        // 解锁门控：未解锁（MAVLink DISARM）时强制零推力，模拟电机停转/安全上锁。
+        if self.armed {
+            self.plant.apply_actuators(&cmd);
+        } else {
+            self.plant.apply_actuators(&ActuatorCmd::zero());
+        }
 
         // 3) 推进物理世界（已注入本拍推力）。
         self.plant.step();
 
         state
     }
+
+    /// 解锁（MAVLink ARM）。电机恢复可转。
+    pub fn arm(&mut self) { self.armed = true; }
+    /// 上锁（MAVLink DISARM）。本拍起电机停转（零推力）。
+    pub fn disarm(&mut self) { self.armed = false; }
+    /// 设置飞行模式（MAV custom mode 低字节），由 MAVLink DO_SET_MODE / 内部状态机写入。
+    pub fn set_mode(&mut self, mode: u8) { self.mode = mode; }
+    /// 请求起飞到指定绝对高度（m）。仅记录意图，实际目标由上层任务逻辑消费。
+    pub fn request_takeoff(&mut self, alt_m: f32) { self.takeoff_alt = alt_m; }
+    /// 当前是否解锁。
+    pub fn is_armed(&self) -> bool { self.armed }
+    /// 当前飞行模式码。
+    pub fn mode(&self) -> u8 { self.mode }
+    /// 最近一次请求的起飞高度（m，0=无）。
+    pub fn takeoff_alt(&self) -> f32 { self.takeoff_alt }
 
     /// 取当前世界状态（NED）用于日志/不变量检查。
     pub fn world_state(&self) -> VehicleState {

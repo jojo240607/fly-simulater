@@ -4,6 +4,7 @@
 //! 仿真内核全部来自 `fly-sim-core` 库 crate。
 
 pub mod airframe;
+pub mod comm;
 pub mod log;
 pub mod view;
 
