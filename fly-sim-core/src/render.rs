@@ -9,6 +9,10 @@
 //!
 //! 复用物理引擎 `phy-demo` 的 `Camera`（轨道视角）与 `Framebuffer`（软件光栅化）。
 //! NED 世界系 → 渲染系（右手 Y-up）固定轴映射：render = (N, -D, E)。
+//!
+//! 依赖 `phy` feature（真实渲染原语）；非 `phy` 构建整模块禁用。
+
+#![cfg(feature = "phy")]
 
 use phy_demo::raster::pack;
 use phy_demo::{Camera, Framebuffer};

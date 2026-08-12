@@ -19,7 +19,7 @@ use flyctrl_core::vehicle::{
 };
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 
-use crate::physics::RigidBodyWorld;
+use crate::physics::{ContactInfo, ContactModel, RigidBodyWorld};
 use crate::wind::{WindField, WindVec};
 use crate::sensor::{SensorConfig, SensorModel};
 
@@ -112,6 +112,13 @@ pub struct QuadrotorPlant<W> {
     wind: Option<WindField>,
     /// 阶段 4：传感器真实化模型（IMU 噪声/偏置/GPS 延迟丢星）。
     sensor: SensorModel,
+    /// P1-2：地面接触模型。`None` 表示无地面（真空 / 自由落体能量守恒场景）。
+    /// 仅在 `Some` 时才向物理世界注入静态地面盒，并在每步解算接触冲量。
+    contact: Option<ContactModel>,
+    /// 最近一次接触解算结果（供日志 / 调试；`None` 表示本步未接触）。
+    last_contact: Option<ContactInfo>,
+    /// 静态地面盒是否已注入物理世界（惰性注入：仅首次 `step` 且 `contact.is_some()` 时加）。
+    ground_added: bool,
 }
 
 impl<W> QuadrotorPlant<W>
@@ -122,12 +129,23 @@ where
     /// `world`：实现了 `RigidBodyWorld` 的物理世界（真实引擎或测试替身）。
     /// `wind`：可选风场（阶段 3 抗风/前飞场景）。
     /// `sensor_cfg`：传感器模型配置（阶段 4；默认零噪声保持场景 PASS）。
-    pub fn new(world: W, cfg: &VehicleConfig, dt: f64, wind: Option<WindField>, sensor_cfg: SensorConfig) -> Self {
+    /// `contact`：P1-2 地面接触模型。`Some` 时向世界注入静态地面盒并每步解算接触；
+    ///   `None` 表示无地面（真空 / 能量守恒自由落体场景）。
+    pub fn new(
+        world: W,
+        cfg: &VehicleConfig,
+        dt: f64,
+        wind: Option<WindField>,
+        sensor_cfg: SensorConfig,
+        contact: Option<ContactModel>,
+    ) -> Self {
         let mut world = world;
-        // 静态地面盒（质量 0 = 无限质量，不动）。位于 y=-5，半高 0.5。
-        let ground_pos7: [f64; 7] = [0.0, -5.0, 0.0, 1.0, 0.0, 0.0, 0.0];
-        let ground_inertia: [f64; 3] = [1.0, 1.0, 1.0];
-        let _ground = world.add_body(0.0 /*mass=0 静态*/, &ground_pos7, &ground_inertia);
+        // 静态地面盒（质量 0 = 无限质量，不动）。注意：**不在构造时注入**，改为按
+        // 首次 `step()` 时的 `contact` 状态惰性注入（见 `step` 内 `ground_added` 逻辑）。
+        // 这保证了"真空 / 自由落体能量守恒"场景——若构造后、首步前调用
+        // `plant_set_contact(None)`（如 `run_freefall`）——世界永远不含地面盒，机体
+        // 不会被引擎原生碰撞求解器拦截/数值爆裂；而 P1-2 惩罚接触仍由 `resolve_ground_contact`
+        // 单独处理。构造时即使 `contact.is_some()` 也不预先加盒。
 
         // 初始位姿：NED (0,0,-5) = 悬停 5m 高 -> 引擎 (0, 5, 0)。
         // 初始姿态：机体"上"轴(+Z, 引擎机体系)对齐世界 +Y(上)，即绕 X 轴 +90°。
@@ -180,7 +198,24 @@ where
             time: 0.0,
             wind,
             sensor: SensorModel::new(sensor_cfg, dt),
+            contact,
+            last_contact: None,
+            ground_added: false,
         }
+    }
+
+    /// P1-2：设置 / 清除地面接触模型。
+    ///
+    /// - `Some(m)`：启用地面（若当前世界尚无地面盒，本调用不补加——地面盒只在
+    ///   `new` 时按初始 `contact` 注入；运行时切换主要用于从"有接触"切到"无接触"）。
+    /// - `None`：关闭地面接触解算（真空场景）。
+    pub fn set_contact(&mut self, contact: Option<ContactModel>) {
+        self.contact = contact;
+    }
+
+    /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。
+    pub fn contact_info(&self) -> Option<ContactInfo> {
+        self.last_contact
     }
 
     /// 保存本拍 4 路归一化油门指令（[0,1]），由电机一阶滞后在 step 内趋近实际推力。
@@ -192,6 +227,16 @@ where
 
     /// 推进一个物理步：先把旋翼力/力矩注入机体，再 step。
     pub fn step(&mut self) {
+        // ---- 0) 惰性注入静态地面盒 ----
+        // 仅当启用接触且尚未注入（首步）时加盒。真空 / 自由落体场景若已在首步前
+        // 经 `plant_set_contact(None)` 关闭接触（如 `run_freefall`），则永不注入，
+        // 机体保持自由下落，不被引擎原生碰撞求解器拦截而产生 NaN/Inf。
+        if self.contact.is_some() && !self.ground_added {
+            let ground_pos7: [f64; 7] = [0.0, -5.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+            let ground_inertia: [f64; 3] = [1.0, 1.0, 1.0];
+            let _ground = self.world.add_body(0.0 /*mass=0 静态*/, &ground_pos7, &ground_inertia);
+            self.ground_added = true;
+        }
         // ---- 阶段 8 动力系统（油门→电压→转速→推力，∝ω² + 电池掉压）----
         // 用上一拍电池电压算本拍电流/掉压（一拍延迟，250Hz 足够稳定）。
         let kv = self.cfg.motor_kv as f64;
@@ -313,6 +358,22 @@ where
         let rc = self.world.step(self.dt);
         assert_eq!(rc, 0, "物理引擎 step 检测到 NaN/Inf，世界已损坏");
         self.time += self.dt;
+
+        // ---- P1-2：地面接触解算（惩罚弹簧-阻尼 + 库仑摩擦）----
+        // 仅在启用接触时解算并注入法向/切向冲量；`None` 表示真空（不做接触）。
+        self.last_contact = match &self.contact {
+            Some(m) => {
+                let info = crate::physics::resolve_ground_contact(
+                    &mut self.world,
+                    self.body_id,
+                    self.cfg.mass as f64,
+                    m,
+                    self.dt,
+                );
+                if info.touching { Some(info) } else { None }
+            }
+            None => None,
+        };
     }
 
     /// 阶段 2b：机体坐标系气动阻力（含动量理论诱导阻力）。

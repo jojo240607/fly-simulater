@@ -5,7 +5,9 @@
 //! 2. 电池掉压：大油门电流大 → 电压低于标称；小油门接近标称。
 //! 3. 悬停时电压接近标称（掉压小，不破坏控制律悬停）。
 
-use fly_sim_core::physics::{PhySdkWorld, RigidBodyWorld};
+#![cfg(feature = "phy")]
+
+use fly_sim_core::physics::{ContactModel, PhySdkWorld, RigidBodyWorld};
 use fly_sim_core::plant::{gyro_torque, QuadrotorPlant};
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::vehicle::ActuatorCmd;
@@ -22,6 +24,7 @@ fn plant_at_throttle(u: f64, settle_steps: usize) -> QuadrotorPlant<PhySdkWorld>
         DT,
         None,
         Default::default(),
+        Some(ContactModel::default()),
     );
     let cmd = ActuatorCmd {
         motor: [u as f32; 4],

@@ -10,6 +10,10 @@
 //!
 //! 启动：`cargo run -p fly-sim-server` → 打开 http://127.0.0.1:8080/
 
+// 整个 Web 后端依赖真实物理引擎 + 软件光栅化原语（phy feature）。
+// 非 phy 构建下整模块禁用，仅保留一个提示性 main。
+#![cfg(feature = "phy")]
+
 mod ws;
 
 use std::io::{Read, Write};
@@ -19,7 +23,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fly_sim_core::controller::{hover_setpoint, ControllerKind};
-use fly_sim_core::physics::PhySdkWorld;
+use fly_sim_core::physics::{ContactModel, PhySdkWorld};
 use fly_sim_core::sensor::SensorConfig;
 use fly_sim_core::sim::SimLoop;
 use fly_sim_core::wind::{WindConfig, WindField};
@@ -113,6 +117,7 @@ impl SimDriver {
             wind,
             self.sensor_cfg.clone(),
             kind,
+            Some(ContactModel::default()),
         );
         // 故障注入
         if let Some(m) = c.fail_motor {
@@ -517,4 +522,11 @@ fn main() {
             Err(_) => continue,
         }
     }
+}
+
+#[cfg(not(feature = "phy"))]
+fn main() {
+    eprintln!("[server] 此 Web 后端依赖真实物理引擎渲染（phy feature）。");
+    eprintln!("[server] 请以 `cargo run -p fly-sim-server --features phy` 构建运行。");
+    std::process::exit(2);
 }

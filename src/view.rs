@@ -8,6 +8,10 @@
 //! 物理引擎自身不带"通用渲染器"——`phy-demo` 的 `Scene` 与它的 `World` 绑定，无法直接
 //! 渲染我们的四旋翼世界。因此我们复用其相机/光栅化数学，自己把 `PhySdkWorld` 的机体
 //! 真值投影成线框，核心仿真逻辑零改动。
+//!
+//! 此模块依赖 `phy` feature（真实渲染原语 + 真实物理引擎适配器），非 `phy` 构建中整模块禁用。
+
+#![cfg(feature = "phy")]
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -16,7 +20,7 @@ use phy_demo::Camera;
 use phy_math::na::Point3;
 
 use fly_sim_core::controller::ControllerKind;
-use fly_sim_core::physics::PhySdkWorld;
+use fly_sim_core::physics::{ContactModel, PhySdkWorld};
 use fly_sim_core::sensor;
 use fly_sim_core::sim;
 use fly_sim_core::wind::WindField;
@@ -72,6 +76,7 @@ pub fn run_view(
             wind,
             sensor_cfg,
             kind,
+            Some(ContactModel::default()),
         );
         loop_sim.set_motor_eff(eff_mask);
         loop_sim.set_on_frame(Box::new(move |st: &VehicleState, cmd: ActuatorCmd| {

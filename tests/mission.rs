@@ -9,11 +9,14 @@
 //!   而不是误报成功——这是仿真任务层的核心价值（失败检测）。
 //! - 悬停/极小任务可稳定完成（stable=true）。
 
+#![cfg(feature = "phy")]
+
 use fly_sim_core::controller::ControllerKind;
 use fly_sim_core::physics::PhySdkWorld;
 use fly_sim_core::sensor::SensorConfig;
 use fly_sim_core::sim::SimLoop;
 use fly_simulater::airframe::load_airframe;
+use fly_sim_core::physics::ContactModel;
 
 const DT: f64 = 0.004;
 
@@ -26,6 +29,7 @@ fn make_loop() -> SimLoop<PhySdkWorld> {
         None,
         SensorConfig::default(),
         ControllerKind::Pid,
+        Some(ContactModel::default()),
     )
 }
 

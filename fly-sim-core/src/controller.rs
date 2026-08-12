@@ -15,12 +15,13 @@ use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, PosSample, VehicleState};
 
 use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
-use crate::physics::{RigidBodyWorld, PhySdkWorld};
+use crate::physics::{ContactModel, RigidBodyWorld};
 use crate::wind::WindField;
 use crate::sensor::SensorConfig;
 
 /// 生产路径便捷别名：用真实物理引擎（phy-sdk）的控制器。
-pub type RealFlyController = FlyController<PhySdkWorld>;
+#[cfg(feature = "phy")]
+pub type RealFlyController = FlyController<crate::physics::PhySdkWorld>;
 
 /// 测试/调试便捷：返回四路满油门（归一化 1.0）执行器指令。
 pub fn actuator_full() -> ActuatorCmd {
@@ -117,6 +118,7 @@ where
         wind: Option<WindField>,
         sensor_cfg: SensorConfig,
         kind: ControllerKind,
+        contact: Option<ContactModel>,
     ) -> Self {
         let ekf = EkfEstimator::default_quad();
         let dt_s = Second(dt as f32);
@@ -136,7 +138,7 @@ where
             }
         };
 
-        let plant = QuadrotorPlant::new(world, cfg, dt, wind, sensor_cfg);
+        let plant = QuadrotorPlant::new(world, cfg, dt, wind, sensor_cfg, contact);
 
         let imu = SimImu {
             last: ImuSample {
@@ -241,6 +243,11 @@ where
     /// 阶段 9：直接推进物理世界一步（不跑控制律，供自由落体等无控场景）。
     pub fn plant_step(&mut self) {
         self.plant.step();
+    }
+
+    /// P1-2：运行时设置/清除地面接触（自由落体能量守恒场景用 None 关闭地面）。
+    pub fn plant_set_contact(&mut self, contact: Option<ContactModel>) {
+        self.plant.set_contact(contact);
     }
 
     /// 调试：返回引擎世界系真实坐标与四元数。

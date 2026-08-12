@@ -16,12 +16,19 @@ flyctrl-core = { path = "../../mcu/oop/flyctrl/core" }
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 # 阶段 7：实时 3D 可视化——复用物理引擎的渲染原语（Camera + 软件光栅化 Framebuffer）。
-phy-demo = { path = "../../game/physics/crates/phy-demo" }
+# 这些依赖仅在 phy feature 下启用（phy-rigid 上游当前工具链下编译不过，非 phy 构建用 ToyWorld 替身）。
+phy-demo = { path = "../../game/physics/crates/phy-demo", optional = true }
 # 矩阵/向量数学（与 phy-demo 同一 nalgebra 实例，用于投影矩阵构造）。
-phy-math = { path = "../../game/physics/crates/phy-math" }
+phy-math = { path = "../../game/physics/crates/phy-math", optional = true }
 # 窗口 + 软件后端（无 GPU 依赖，纯 CPU 光栅化，保证 MinGW 工具链可编译运行）。
-winit = "0.30"
-softbuffer = "0.4"
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+
+[features]
+default = []
+# 启用真实物理引擎 + 软件渲染（含 3D 可视化 / Web 后端）。
+# 注意：phy-rigid 上游在当前工具链下编译失败，需先修复上游才能用此 feature。
+phy = ["fly-sim-core/phy", "phy-demo", "phy-math", "winit", "softbuffer"]
 
 [workspace]
 members = ["fly-sim-core", "fly-sim-server"]

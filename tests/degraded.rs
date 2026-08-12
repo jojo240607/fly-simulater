@@ -9,10 +9,13 @@
 //!
 //! 运行：`cargo test --test degraded`
 
+#![cfg(feature = "phy")]
+
 use fly_sim_core::controller::{ControllerKind, FlyController, hover_setpoint};
 use fly_sim_core::physics::PhySdkWorld;
 use fly_sim_core::sensor::SensorConfig;
 use fly_simulater::airframe::load_airframe;
+use fly_sim_core::physics::ContactModel;
 
 const DT: f64 = 0.004;
 
@@ -25,6 +28,7 @@ fn make_ctrl() -> FlyController<PhySdkWorld> {
         None,
         SensorConfig::default(),
         ControllerKind::Pid,
+        Some(ContactModel::default()),
     )
 }
 

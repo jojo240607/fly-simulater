@@ -9,7 +9,11 @@ pub mod view;
 
 // 再导出仿真内核常用类型，方便 runner 与测试直接引用。
 pub use fly_sim_core::{
-    ControllerKind, LogRow, PhySdkWorld, RigidBodyWorld, RigidTransform, SensorConfig, SimLoop,
-    ToyWorld, WindConfig, WindField, WindVec,
+    ControllerKind, LogRow, RigidBodyWorld, RigidTransform, SensorConfig, SimLoop, ToyWorld,
+    WindConfig, WindField, WindVec,
 };
-pub use fly_sim_core::{RealFlyController, QuadrotorPlant, FlyController};
+#[cfg(feature = "phy")]
+pub use fly_sim_core::PhySdkWorld;
+pub use fly_sim_core::{FlyController, QuadrotorPlant};
+#[cfg(feature = "phy")]
+pub use fly_sim_core::RealFlyController;

@@ -6,10 +6,14 @@ edition = "2021"
 [dependencies]
 fly-sim-core = { path = "../fly-sim-core" }
 flyctrl-core = { path = "../../../mcu/oop/flyctrl/core" }
-phy-sdk = { path = "../../../game/physics/crates/phy-sdk" }
-phy-rigid = { path = "../../../game/physics/crates/phy-rigid" }
-phy-math = { path = "../../../game/physics/crates/phy-math" }
-phy-demo = { path = "../../../game/physics/crates/phy-demo" }
+phy-sdk = { path = "../../../game/physics/crates/phy-sdk", optional = true }
+phy-rigid = { path = "../../../game/physics/crates/phy-rigid", optional = true }
+phy-math = { path = "../../../game/physics/crates/phy-math", optional = true }
+phy-demo = { path = "../../../game/physics/crates/phy-demo", optional = true }
+
+[features]
+default = []
+phy = ["fly-sim-core/phy", "phy-sdk", "phy-rigid", "phy-math", "phy-demo"]
 
 [profile.release]
 opt-level = 3

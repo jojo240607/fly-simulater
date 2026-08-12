@@ -4,13 +4,12 @@
 //! 后续：HIL 模式经 USB CDC 接真实飞控（见 DESIGN.md §9）。
 
 use fly_sim_core::controller::ControllerKind;
-use fly_sim_core::physics::PhySdkWorld;
+use fly_sim_core::physics::ToyWorld;
 use fly_sim_core::sensor;
 use fly_sim_core::sim;
 use fly_sim_core::wind;
 use fly_simulater::airframe;
 use fly_simulater::log::CsvLogger;
-use fly_simulater::view;
 
 /// CLI 解析结果。
 struct Cli {
@@ -141,8 +140,11 @@ fn parse_args() -> Cli {
 }
 
 fn main() {
-    // 1. 物理引擎以 Rust 源码级依赖（phy-sdk rlib）接入，无 C-ABI / ABI 版本检查。
+    // 1. 物理引擎接入方式取决于 feature。
+    #[cfg(feature = "phy")]
     println!("[main] 物理引擎: phy-sdk (Rust rlib, 源码级依赖)");
+    #[cfg(not(feature = "phy"))]
+    println!("[main] 物理引擎: ToyWorld 替身（未启用 phy feature，仅验证逻辑；高保真需 --features phy）");
 
     // 2. 解析 CLI + 加载机架（外部 TOML 或内置默认，阶段 0）。
     let cli = parse_args();
@@ -189,9 +191,10 @@ fn main() {
     }
 
     // 阶段 7：实时 3D 可视化（后台快跑仿真 + 采样渲染）。窗口关闭即退出。
+    #[cfg(feature = "phy")]
     if cli.view {
         println!("[main] 启动实时 3D 可视化（后台仿真 + 渲染采样）...");
-        view::run_view(
+        fly_simulater::view::run_view(
             &cfg,
             dt,
             wind,
@@ -203,10 +206,27 @@ fn main() {
         );
         return;
     }
+    #[cfg(not(feature = "phy"))]
+    if cli.view {
+        eprintln!("[main] --view 需要以 phy feature 构建（cargo build --features phy）");
+        std::process::exit(2);
+    }
 
     // 阶段 6：批处理式 SIL（命令行 + 可选 CSV）。
-    let mut loop_sim =
-        sim::SimLoop::new(PhySdkWorld::create_empty(), &cfg, dt, wind, sensor_cfg, cli.controller);
+    // 物理世界：phy feature 用真实引擎，否则用玩具级替身（仅验证仿真逻辑，非高保真）。
+    #[cfg(feature = "phy")]
+    let world = fly_sim_core::physics::PhySdkWorld::create_empty();
+    #[cfg(not(feature = "phy"))]
+    let world = ToyWorld::new(9.81);
+    let mut loop_sim = sim::SimLoop::new(
+        world,
+        &cfg,
+        dt,
+        wind,
+        sensor_cfg,
+        cli.controller,
+        Some(fly_sim_core::physics::ContactModel::default()),
+    );
 
     // 阶段 6：CSV 日志（经 on_step 回调注入；runner 决定如何存储）。
     if let Some(ref p) = cli.log_path {

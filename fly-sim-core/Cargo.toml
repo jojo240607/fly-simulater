@@ -6,12 +6,19 @@ edition = "2021"
 [dependencies]
 # 飞控核心：SIL/HIL 共享控制律（no_std crate，host std 环境可依赖）。
 flyctrl-core = { path = "../../../mcu/oop/flyctrl/core" }
-# 物理引擎（Rust 源码级依赖，rlib）。
-phy-sdk = { path = "../../../game/physics/crates/phy-sdk" }
-phy-rigid = { path = "../../../game/physics/crates/phy-rigid" }
-phy-math = { path = "../../../game/physics/crates/phy-math" }
+# 物理引擎（Rust 源码级依赖，rlib）。可选：仅在启用 `phy` feature（真实引擎 SIL/HIL
+# 路径）时编译；默认关闭后 fly-sim-core 仅靠 ToyWorld 替身即可构建与单测，
+# 避免上游 phy-rigid 工具链不兼容阻断整个 crate 的编译。
+phy-sdk = { path = "../../../game/physics/crates/phy-sdk", optional = true }
+phy-rigid = { path = "../../../game/physics/crates/phy-rigid", optional = true }
+phy-math = { path = "../../../game/physics/crates/phy-math", optional = true }
 # 软件光栅化原语（Camera / Framebuffer），用于 3D 可视化（原生窗口 + Web 后端共用）。
-phy-demo = { path = "../../../game/physics/crates/phy-demo" }
+phy-demo = { path = "../../../game/physics/crates/phy-demo", optional = true }
+
+[features]
+default = []
+# 真实物理引擎路径（P1-2 之外的 SIL/HIL 端到端测试需要）。
+phy = ["phy-sdk", "phy-rigid", "phy-math", "phy-demo"]
 
 [profile.release]
 opt-level = 3

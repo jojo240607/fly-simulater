@@ -11,8 +11,11 @@
 //! - `get_rigid_transforms` 批量读回所有刚体的 `(pos.xyz + quat.wxyz)` 7 元组，
 //!   按 body_id 顺序排列。这是真实引擎 ABI 的接口形态，替身也实现它，保持统一。
 
+#[cfg(feature = "phy")]
 use phy_math::Vec3 as V3;
+#[cfg(feature = "phy")]
 use phy_sdk::rigid::{RigidSubsystem, RigidWorld};
+#[cfg(feature = "phy")]
 use phy_sdk::{get_as, get_as_mut, PhysicsBuilder, World};
 
 /// 刚体 7 元组：(pos_x, pos_y, pos_z, quat_w, quat_x, quat_y, quat_z)。
@@ -50,11 +53,131 @@ pub trait RigidBodyWorld {
     /// 批量读回所有刚体 7 元组到 `buf`（长度需 >= body_count()*7），返回写入个数。
     fn get_rigid_transforms(&self, buf: &mut [f64]) -> usize;
 
+    /// 读回单个刚体 `id` 的 7 元组 (x,y,z, qw,qx,qy,qz) 到 `buf`（长度需 >= 7）。
+    /// 接触解算等需要按 body_id 精准读位姿时使用，避免 `get_rigid_transforms`
+    /// 返回的首元素（body 0）未必是目标 body。
+    fn get_body_transform(&self, id: i64, buf: &mut [f64; 7]);
+
     /// 推进一个时间步，返回状态码（0=OK）。
     fn step(&mut self, dt: f64) -> i32;
 
     /// 世界累计时间（s）。
     fn time(&self) -> f64;
+}
+
+// ============================================================ 接触 / 碰撞模型（P1-2）
+
+/// 地面接触模型参数（惩罚弹簧-阻尼 + 库仑摩擦）。
+///
+/// 采用**惩罚法弹簧-阻尼**（而非逐步恢复系数），从根本上避免"每步施加反弹冲量
+/// 反泵能量"导致机体被弹飞的问题：恢复系数 e 仅用于推导阻尼比 ζ，
+/// 阻尼力只在接近（v_n < 0）时吸收能量。
+#[derive(Clone, Copy, Debug)]
+pub struct ContactModel {
+    /// 地面顶面世界 Y 坐标（引擎系，Y-up）。默认 -5.0。
+    pub ground_y: f64,
+    /// 恢复系数 e ∈ [0,1]：e=0 纯非弹（无反弹），e=1 完全弹性。用于推导阻尼比。
+    pub restitution: f64,
+    /// 库仑摩擦系数 μ（切向力预算 = μ · 法向力）。
+    pub friction: f64,
+    /// 法向惩罚刚度 k_n（N/m）。越大接触越"硬"、穿透越小，但需更小 dt 稳定。
+    pub penalty_k: f64,
+    /// 接触体半高（沿 Y），接触判定面 = ground_y + contact_half_h。
+    pub contact_half_h: f64,
+}
+
+impl Default for ContactModel {
+    fn default() -> Self {
+        // 默认：贴近地面（停机坪）的软接触，低反弹、较强摩擦（落地不打滑）。
+        ContactModel {
+            ground_y: -5.0,
+            restitution: 0.2,
+            friction: 0.8,
+            penalty_k: 8000.0,
+            contact_half_h: 0.1,
+        }
+    }
+}
+
+/// 最近一次接触解算结果（供日志 / 调试）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ContactInfo {
+    /// 本步是否接触地面。
+    pub touching: bool,
+    /// 穿透深度（>0 表示陷入地面）。
+    pub penetration: f64,
+    /// 法向接触力（N，向上为正）。
+    pub normal_force: f64,
+    /// 切向摩擦冲量大小（N·s）。
+    pub friction_impulse: f64,
+}
+
+/// 解算刚体 `id` 与地面的接触，并把冲量经 `world.apply_impulse` 注入。
+///
+/// 返回接触信息。引擎系 Y-up；接触判定面 contact_y = ground_y + contact_half_h。
+/// 当 body 低于 contact_y 时认为穿透，施加弹簧-阻尼法向力 + 库仑摩擦。
+///
+/// 阻尼比由恢复系数推导：ζ = -ln(e) / (2π)，clamp 到 [0,1]；临界阻尼 c_crit = 2√(k_n·m)，
+/// 法向阻尼 c_n = ζ·c_crit。阻尼力只在接近时（v_n < 0）吸收能量，绝不泵能量。
+pub fn resolve_ground_contact<W: RigidBodyWorld>(
+    world: &mut W,
+    id: i64,
+    mass: f64,
+    m: &ContactModel,
+    dt: f64,
+) -> ContactInfo {
+    let contact_y = m.ground_y + m.contact_half_h;
+    let mut tf = [0.0f64; 7];
+    world.get_body_transform(id, &mut tf);
+    let pos = [tf[0], tf[1], tf[2]];
+
+    let pen = contact_y - pos[1]; // >0 即穿透
+    if pen <= 0.0 {
+        return ContactInfo {
+            touching: false,
+            ..Default::default()
+        };
+    }
+
+    let vel = world.get_velocity(id);
+    let vn = vel[1]; // 法向速度（世界 Y）
+
+    // 阻尼比来自恢复系数；e>=1 视为无阻尼（纯弹性，理论上不应泵能量因为只吸接近能量）。
+    let zeta = if m.restitution >= 1.0 {
+        0.0
+    } else {
+        (-m.restitution.ln()) / (2.0 * std::f64::consts::PI)
+    }
+    .clamp(0.0, 1.0);
+    let c_crit = 2.0 * (m.penalty_k * mass).sqrt();
+    let c_n = zeta * c_crit;
+
+    // 法向冲量（弹簧 + 阻尼）。阻尼只在接近时（vn<0）吸收；离开时(vn>0)不额外推。
+    let f_spring = m.penalty_k * pen;
+    let f_damp = -c_n * vn.min(0.0);
+    let jn = (f_spring + f_damp) * dt;
+    let jn = jn.max(0.0); // 接触只能推，不能拉。
+
+    let mut impulse = [0.0f64; 3];
+    impulse[1] = jn;
+
+    // 库仑摩擦：限定切向冲量预算 = μ·法向力冲量，且不超过 m·|v_t|（停下即止）。
+    let speed_t = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
+    if speed_t > 1e-9 {
+        let budget = m.friction * jn; // 可用摩擦冲量上限
+        let scale = (budget / (mass * speed_t)).min(1.0);
+        impulse[0] = -scale * mass * vel[0];
+        impulse[2] = -scale * mass * vel[2];
+    }
+
+    world.apply_impulse(id, &impulse, 0);
+
+    ContactInfo {
+        touching: true,
+        penetration: pen,
+        normal_force: f_spring + f_damp,
+        friction_impulse: (impulse[0] * impulse[0] + impulse[2] * impulse[2]).sqrt(),
+    }
 }
 
 // ============================================================ phy-sdk adapter
@@ -64,12 +187,14 @@ pub trait RigidBodyWorld {
 /// 这是 `RigidBodyWorld` 的生产实现，直接用 safe Rust 调 `phy-sdk` 的强类型 API，
 /// 无需 `unsafe`、无 C-ABI 绑定、无运行时 DLL 依赖。物理引擎以 `rlib` 形态被
 /// cargo 静态链入仿真二进制（`phy-sdk` 的 cdylib 仍保留给非 Rust 宿主，与此无关）。
+#[cfg(feature = "phy")]
 pub struct PhySdkWorld {
     world: World<f64>,
     rigid_idx: usize,
     t: f64,
 }
 
+#[cfg(feature = "phy")]
 impl PhySdkWorld {
     /// 创建空刚体世界（仅启用刚体子系统，无 demo 物体），由仿真层自行添加机体与地面。
     pub fn create_empty() -> Self {
@@ -108,6 +233,7 @@ impl PhySdkWorld {
 }
 
 /// `Body` 的局部逆惯量对角阵（`inv_inertia_local` 为 `Mat3`，这里从主惯量构造）。
+#[cfg(feature = "phy")]
 fn inv_inertia_mat3(ix: f64, iy: f64, iz: f64) -> phy_math::na::Matrix3<f64> {
     let sx = 1.0 / ix.max(1e-9);
     let sy = 1.0 / iy.max(1e-9);
@@ -115,6 +241,7 @@ fn inv_inertia_mat3(ix: f64, iy: f64, iz: f64) -> phy_math::na::Matrix3<f64> {
     phy_math::na::Matrix3::from_diagonal(&V3::new(sx, sy, sz))
 }
 
+#[cfg(feature = "phy")]
 impl RigidBodyWorld for PhySdkWorld {
     fn body_count(&self) -> usize {
         self.rigid().bodies.len()
@@ -176,6 +303,18 @@ impl RigidBodyWorld for PhySdkWorld {
             buf[off + 6] = q.k;
         }
         len
+    }
+
+    fn get_body_transform(&self, id: i64, buf: &mut [f64; 7]) {
+        let b = &self.rigid().bodies[id as usize];
+        let q = b.rot.quaternion(); // (w, i, j, k)
+        buf[0] = b.pos.x;
+        buf[1] = b.pos.y;
+        buf[2] = b.pos.z;
+        buf[3] = q.w;
+        buf[4] = q.i;
+        buf[5] = q.j;
+        buf[6] = q.k;
     }
 
     fn step(&mut self, dt: f64) -> i32 {
@@ -317,6 +456,12 @@ impl RigidBodyWorld for ToyWorld {
             buf[off + 3..off + 7].copy_from_slice(&self.quat[i]);
         }
         len
+    }
+
+    fn get_body_transform(&self, id: i64, buf: &mut [f64; 7]) {
+        let i = id as usize;
+        buf[0..3].copy_from_slice(&self.pos[i]);
+        buf[3..7].copy_from_slice(&self.quat[i]);
     }
 
     fn step(&mut self, dt: f64) -> i32 {

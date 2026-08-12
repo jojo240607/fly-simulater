@@ -22,9 +22,13 @@ pub mod sim;
 pub mod wind;
 
 // 便捷再导出：runner 最常用到的类型。
-pub use controller::{ControllerKind, FlyController, RealFlyController};
+pub use controller::{ControllerKind, FlyController};
+#[cfg(feature = "phy")]
+pub use controller::RealFlyController;
 pub use log::LogRow;
-pub use physics::{PhySdkWorld, RigidBodyWorld, RigidTransform, ToyWorld};
+#[cfg(feature = "phy")]
+pub use physics::PhySdkWorld;
+pub use physics::{ContactInfo, ContactModel, resolve_ground_contact, RigidBodyWorld, RigidTransform, ToyWorld};
 pub use plant::QuadrotorPlant;
 pub use sensor::{SensorConfig, SensorModel};
 pub use sim::{windy_config, SimLoop};
