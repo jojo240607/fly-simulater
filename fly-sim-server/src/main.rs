@@ -448,7 +448,26 @@ fn serve_static(stream: &mut TcpStream, path: &str) -> std::io::Result<()> {
     if clean.contains("..") {
         return write_404(stream);
     }
-    let base = std::env::current_dir().unwrap_or_default().join("web");
+    // 定位 web/ 目录：优先「当前工作目录」（项目根，cargo 运行时的位置），
+    // 回退到「可执行文件所在目录的上两级」（target/debug -> 项目根），
+    // 再回退到「可执行文件所在目录」。无论如何都能找到 web/。
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let exe_parent = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let candidates: Vec<std::path::PathBuf> = vec![
+        cwd.join("web"),
+        exe_parent
+            .as_ref()
+            .and_then(|d| d.parent())
+            .map(|gp| gp.join("web"))
+            .unwrap_or_default(),
+        exe_parent.clone().unwrap_or_default().join("web"),
+    ];
+    let base = candidates
+        .into_iter()
+        .find(|p| p.exists() && p.is_dir())
+        .unwrap_or_else(|| cwd.join("web"));
     let file = base.join(clean);
     if !file.exists() || !file.is_file() {
         return write_404(stream);
