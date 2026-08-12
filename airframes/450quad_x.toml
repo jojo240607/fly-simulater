@@ -13,6 +13,7 @@ motor_tau = 0.05      # 电机一阶响应时间常数 (s)
 drag_coeff = [0.18, 0.18, 0.10]
 induced_drag_coeff = 0.12  # 无量纲，动量理论诱导阻力
 disk_area = 0.19          # 桨盘面积 (m^2)，4× 桨盘
+slipstream_drag_coeff = 0.06  # 无量纲，旋翼下洗冲击机体附加下拉力
 air_density = 1.225       # kg/m^3，标准海平面
 
 gravity = 9.81

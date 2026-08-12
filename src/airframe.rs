@@ -39,10 +39,15 @@ pub struct AirframeToml {
     pub motor_r: f32,
     #[serde(default = "default_rotor_inertia")]
     pub rotor_inertia: f32,
+    #[serde(default = "default_slipstream_drag")]
+    pub slipstream_drag_coeff: f32,
 }
 
 fn default_rotor_inertia() -> f32 {
     1.2e-5
+}
+fn default_slipstream_drag() -> f32 {
+    0.06
 }
 fn default_battery_v() -> f32 {
     14.8
@@ -96,6 +101,7 @@ impl AirframeToml {
             drag_coeff: self.drag_coeff,
             induced_drag_coeff: self.induced_drag_coeff,
             disk_area: self.disk_area,
+            slipstream_drag_coeff: self.slipstream_drag_coeff,
             air_density: self.air_density,
             gravity: self.gravity,
             tilt_max: self.tilt_max,

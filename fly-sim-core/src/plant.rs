@@ -117,6 +117,8 @@ pub struct QuadrotorPlant<W> {
     contact: Option<ContactModel>,
     /// 最近一次接触解算结果（供日志 / 调试；`None` 表示本步未接触）。
     last_contact: Option<ContactInfo>,
+    /// P0-2：动量理论诱导速度（m/s），含垂直气流耦合；每步在 step() 内刷新。
+    induced_vel: f64,
 }
 
 impl<W> QuadrotorPlant<W>
@@ -196,6 +198,7 @@ where
             sensor: SensorModel::new(sensor_cfg, dt),
             contact,
             last_contact: None,
+            induced_vel: 0.0,
         }
     }
 
@@ -277,6 +280,25 @@ where
         let f_body = [0.0, 0.0, sum_t];
         let f_world = rotate_by_quat(q, f_body);
 
+        // ---- P0-2：滑流 / 诱导速度（动量理论）----
+        // 动量理论诱导速度（含垂直气流耦合）：
+        //   vi² + v·vi - T/(2·ρ·A) = 0 ，v = 穿过桨盘的空气速度（机体 Z，上正）。
+        //   机体上升 (vb_z>0) → 穿过桨盘空气上流 (v<0) → vi 增大（爬升更费劲）；
+        //   机体下降 (vb_z<0) → vi 减小（下降更省力，直至涡环）。
+        // 解：vi = (-v + sqrt(v² + 2·T/(ρ·A))) / 2 = (vb_z + sqrt(vb_z² + 2·T/(ρ·A))) / 2。
+        let rho = self.cfg.air_density as f64;
+        let a_disk = (self.cfg.disk_area as f64).max(1e-4);
+        let vb_now = rotate_by_quat_conj(q, self.world.get_velocity(self.body_id));
+        let vz = vb_now[2]; // 机体 Z 速度（上正）
+        let disc_term = 2.0 * sum_t / (rho * a_disk);
+        let vi = (vz + (vz * vz + disc_term).max(0.0).sqrt()) * 0.5;
+        self.induced_vel = vi;
+        // 滑流冲击机体下拉力：下洗气流 vi 作用在等效投影面积 a_disk 上的动量通量，
+        // 按 slipstream_drag_coeff 比例耦合到机身（沿机体 -Z）。
+        let f_slip = self.cfg.slipstream_drag_coeff as f64 * 0.5 * rho * a_disk * vi * vi;
+        // 滑流同时把机体略微"后推"：机身以水平速度 vb_xy 切割下洗，产生小反向阻力分量，
+        // 已包含在 aero_drag_body 的诱导阻力项中，这里只加沿轴的下洗冲击部分。
+
         // 机体合力矩（引擎机体系）：臂力矩 + 反扭矩。
         let l = self.cfg.arm_length as f64;
         // X 布局臂向量（前+X, 右+Y）：m0=前右, m1=后左, m2=前左, m3=后右
@@ -316,11 +338,13 @@ where
         };
         // 阶段 2b：机体气动阻力（含诱导阻力），基于相对风速（v_body - wind），在机体坐标系施加。
         let aero = self.aero_drag_body(q, &wind_up);
-        // 机体合力 = 旋翼推力 + 气动阻力；合力矩 = 旋翼力矩（阻力矩略，量级小）
+        // 机体合力 = 旋翼推力 + 气动阻力 + 滑流冲击（P0-2）；合力矩 = 旋翼力矩（阻力矩略，量级小）
         let mut f_body_tot = [0.0, 0.0, 0.0];
         for k in 0..3 {
             f_body_tot[k] = f_body[k] + aero.fx[k];
         }
+        // 滑流下洗冲击机体的下拉力（机体 -Z）。
+        f_body_tot[2] -= f_slip.min(sum_t * 0.4);
         let f_world_tot = rotate_by_quat(q, f_body_tot);
         let tau_world = rotate_by_quat(q, tau_body);
 
@@ -460,6 +484,11 @@ where
     /// 阶段 8：取动力系统状态（电池端电压 V，4 路电机转速 rad/s），供测试/日志。
     pub fn powertrain_state(&self) -> (f64, [f64; 4]) {
         (self.battery_v, self.motor_speed)
+    }
+
+    /// P0-2：取当前动量理论诱导速度（m/s，含垂直气流耦合），供测试/日志。
+    pub fn induced_velocity(&self) -> f64 {
+        self.induced_vel
     }
 
     /// 取当前 NED 世界状态（供不变量检查 / 日志）。

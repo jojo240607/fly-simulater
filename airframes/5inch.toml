@@ -12,6 +12,7 @@ motor_tau = 0.03      # 更短响应（高 KV 电机）
 drag_coeff = [0.10, 0.10, 0.06]  # 小机身阻力更小
 induced_drag_coeff = 0.08
 disk_area = 0.10
+slipstream_drag_coeff = 0.06
 air_density = 1.225
 
 gravity = 9.81

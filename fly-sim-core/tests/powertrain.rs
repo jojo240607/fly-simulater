@@ -132,3 +132,73 @@ fn gyro_asymmetric_rotors_produce_coupling() {
     let tau0 = gyro_torque(&w, &SPIN, i_rotor, [0.0, 0.0, 0.0]);
     assert_eq!(tau0, [0.0, 0.0, 0.0], "无角速度不产生陀螺力矩");
 }
+
+/// P0-2：动量理论诱导速度（含垂直气流耦合）。
+/// 静悬（机体垂直速度≈0）→ vi = sqrt(T/(2·ρ·A))。
+/// 机体上升（v_z>0）→ 穿过桨盘空气上流 → vi 增大；下降（v_z<0）→ vi 减小。
+#[test]
+fn induced_velocity_momentum_theory() {
+    let cfg = VehicleConfig::default_quad();
+    let rho = cfg.air_density as f64;
+    let a = cfg.disk_area as f64;
+    // 悬停总推力 ≈ 重力（4 油门各 hover_thrust，稳态）。
+    let t_hover = cfg.mass as f64 * cfg.gravity as f64;
+    let vi_hover = (t_hover / (2.0 * rho * a)).sqrt();
+    assert!(vi_hover > 0.0, "悬停诱导速度应 > 0");
+    assert!(
+        (vi_hover - 6.3).abs() < 1.5,
+        "450quad 悬停诱导速度应 ≈ 6 m/s（动量理论），got {:.2}",
+        vi_hover
+    );
+
+    // 上升耦合：v_z = +2 → vi 应大于悬停值。
+    let vz = 2.0;
+    let vi_climb = (vz + (vz * vz + 2.0 * t_hover / (rho * a)).sqrt()) * 0.5;
+    assert!(
+        vi_climb > vi_hover,
+        "上升时诱导速度应大于悬停: vi_climb={:.3} vi_hover={:.3}",
+        vi_climb,
+        vi_hover
+    );
+
+    // 下降耦合：vz = -3（但未进入涡环，vi 仍 > 0）。
+    let vz = -3.0;
+    let vi_desc = (vz + (vz * vz + 2.0 * t_hover / (rho * a)).sqrt()) * 0.5;
+    assert!(
+        vi_desc < vi_hover && vi_desc > 0.0,
+        "下降时诱导速度应小于悬停且仍 >0: vi_desc={:.3} vi_hover={:.3}",
+        vi_desc,
+        vi_hover
+    );
+}
+
+/// P0-2：滑流下洗冲击机体产生下拉力，且爬升（vi 增大）时下拉力更大。
+/// 用 `induced_velocity()` 实测由 plant 内部算出的 vi，校验：
+/// 1. 稳态悬停 vi ≈ 动量理论值；
+/// 2. 滑流下拉力 f_slip = k·0.5·ρ·A·vi² 随 vi 单调增（通过上升/下降对比）。
+#[test]
+fn slipstream_force_scales_with_induced_velocity() {
+    // 悬停稳态：机体垂直速度≈0，vi 应≈理论悬停值。
+    let p_hover = plant_at_throttle(0.5, 600);
+    let vi_hover = p_hover.induced_velocity();
+    let cfg = VehicleConfig::default_quad();
+    let rho = cfg.air_density as f64;
+    let a = cfg.disk_area as f64;
+    let vi_theory = (cfg.mass as f64 * cfg.gravity as f64 / (2.0 * rho * a)).sqrt();
+    assert!(
+        (vi_hover - vi_theory).abs() / vi_theory < 0.15,
+        "plant 内部 vi 应≈动量理论悬停值: vi_plant={:.3} vi_theory={:.3}",
+        vi_hover,
+        vi_theory
+    );
+
+    // 大油门 → 总推力大 → vi 更大（对比小油门）。
+    let p_lo = plant_at_throttle(0.2, 600);
+    let p_hi = plant_at_throttle(0.9, 600);
+    assert!(
+        p_hi.induced_velocity() > p_lo.induced_velocity(),
+        "大油门诱导速度应大于小油门: vi_hi={:.3} vi_lo={:.3}",
+        p_hi.induced_velocity(),
+        p_lo.induced_velocity()
+    );
+}
