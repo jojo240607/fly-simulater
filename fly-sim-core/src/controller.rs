@@ -13,6 +13,7 @@ use flyctrl_core::hil::HilContext;
 use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond, Second};
 use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, PosSample, VehicleState};
 
+use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
 use crate::physics::{RigidBodyWorld, PhySdkWorld};
 use crate::wind::WindField;
@@ -188,11 +189,34 @@ where
             CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, setpoint, &mut self.motors, &self.cfg),
         };
 
-        // 2.5) 阶段 5：故障注入——按效率系数缩放每路电机指令。
-        // 1.0=正常，0.0=停转，中间值=部分效率退化（细粒度故障注入）。
+        // 2.5) 阶段 5/8：故障处理。
+        // - 全有效：按效率系数缩放每路指令（原行为，不变）。
+        // - 存在退化/失效电机：用控制分配器(P1-1)把期望动作(推力/滚转/俯仰/偏航)
+        //   最小二乘重分配到剩余有效电机，实现容错（牺牲偏航等最弱轴）。
+        let has_degraded = self.fail_mask.iter().any(|&e| e < 1.0);
         let mut cmd = self.motors.last;
-        for i in 0..4 {
-            cmd.motor[i] = (cmd.motor[i] as f32) * self.fail_mask[i];
+        if has_degraded {
+            // 由固定混控反解期望动作 des = M⁻¹·cmd。
+            let m: [f64; 4] = [
+                cmd.motor[0] as f64,
+                cmd.motor[1] as f64,
+                cmd.motor[2] as f64,
+                cmd.motor[3] as f64,
+            ];
+            let des = [
+                (m[0] + m[1] + m[2] + m[3]) / 4.0,
+                (m[0] - m[1] - m[2] + m[3]) / 2.0,
+                (m[0] - m[1] + m[2] - m[3]) / 2.0,
+                (m[0] + m[1] - m[2] - m[3]) / 2.0,
+            ];
+            let u = allocate_eff(des, &self.fail_mask);
+            for i in 0..4 {
+                cmd.motor[i] = u[i].clamp(0.0, 1.0) as f32;
+            }
+        } else {
+            for i in 0..4 {
+                cmd.motor[i] = (cmd.motor[i] as f32) * self.fail_mask[i];
+            }
         }
 
         // 2.6) 把控制指令显式回写被控对象（注入推力/力矩）。
