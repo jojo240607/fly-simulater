@@ -11,6 +11,35 @@ build_test.txt
 sim_out.csv
 logs/
 
+# 运行/调试中间产出（历史已跟踪，现统一忽略）
+mav_server_run.log
+mav_sim_run2.log
+axis_out.txt
+diag_out.txt
+env_out.txt
+frame_out.txt
+orient_out.txt
+ring_out.txt
+rotor_out.txt
+server_out.txt
+server_run.log
+t.txt
+test_all.txt
+test_core.txt
+test_orient_full.txt
+test_orient.txt
+tsrv.txt
+view_deg_out.txt
+view_out.txt
+web_check_canvas.png
+web_check_out.txt
+web_check.png
+_dbg_east.txt
+_dbg_out.txt
+_dbg_probe.txt
+_north_out.txt
+_sweep_out.txt
+
 # Web 诊断产物（无头浏览器测试的截图/日志）
 web_check.png
 web_check_canvas.png
