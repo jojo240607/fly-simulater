@@ -28,7 +28,7 @@ pub use controller::RealFlyController;
 pub use log::LogRow;
 #[cfg(feature = "phy")]
 pub use physics::PhySdkWorld;
-pub use physics::{ContactInfo, ContactModel, resolve_ground_contact, RigidBodyWorld, RigidTransform, ToyWorld};
+pub use physics::{ContactInfo, ContactModel, resolve_ground_contact, RigidBodyWorld, RigidTransform, TerrainField, ToyWorld};
 pub use plant::QuadrotorPlant;
 pub use sensor::{SensorConfig, SensorModel};
 pub use sim::{windy_config, SimLoop};

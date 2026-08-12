@@ -72,7 +72,7 @@ pub trait RigidBodyWorld {
 /// 采用**惩罚法弹簧-阻尼**（而非逐步恢复系数），从根本上避免"每步施加反弹冲量
 /// 反泵能量"导致机体被弹飞的问题：恢复系数 e 仅用于推导阻尼比 ζ，
 /// 阻尼力只在接近（v_n < 0）时吸收能量。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ContactModel {
     /// 地面顶面世界 Y 坐标（引擎系，Y-up）。默认 -5.0。
     pub ground_y: f64,
@@ -82,8 +82,11 @@ pub struct ContactModel {
     pub friction: f64,
     /// 法向惩罚刚度 k_n（N/m）。越大接触越"硬"、穿透越小，但需更小 dt 稳定。
     pub penalty_k: f64,
-    /// 接触体半高（沿 Y），接触判定面 = ground_y + contact_half_h。
+    /// 接触体半高（沿 Y），接触判定面 = ground_y + terrain_surface_y(x,z) + contact_half_h。
     pub contact_half_h: f64,
+    /// 地形高度场。`None` = 无限平面（接触面恒为 `ground_y`）；
+    /// `Some(t)` = 接触面随 (x,z) 变化。用于解锁循迹/避障/斜坡着陆场景（P1 扩展）。
+    pub terrain: Option<TerrainField>,
 }
 
 impl Default for ContactModel {
@@ -95,8 +98,82 @@ impl Default for ContactModel {
             friction: 0.8,
             penalty_k: 8000.0,
             contact_half_h: 0.1,
+            terrain: None,
         }
     }
+}
+
+// ============================================================ 地形高度场（P1 扩展：地形）
+
+/// 地形表面高度场（引擎系 Y-up，世界 (x,z) 平面采样）。
+///
+/// 把"接触判定面"从无限平面扩展为随水平位置变化的曲面，使四旋翼能在斜坡/
+/// 丘陵上着陆与滑行，支撑循迹/避障/地形跟随场景。地形只影响**接触判定面**，
+/// 不改变重力/气动（与既有惩罚接触模型正交）。
+#[derive(Clone, Debug)]
+pub enum TerrainField {
+    /// 平坦地面（高度场恒为常数），等价于 `terrain=None` 但显式表达。
+    Flat(f64),
+    /// 规则网格高度图：原点 `(ox,oz)`、网格间距 `dx`、行/列数 `nx`/`nz`，
+    /// `heights[(iz*nx + ix)]` 为网格点高度，块内双线性插值。超出范围用边缘值钳制。
+    HeightMap {
+        origin_x: f64,
+        origin_z: f64,
+        spacing: f64,
+        nx: usize,
+        nz: usize,
+        heights: Vec<f64>,
+    },
+}
+
+impl TerrainField {
+    /// 在水平位置 (x,z) 处采样地形表面高度（引擎系 Y）。
+    pub fn height_at(&self, x: f64, z: f64) -> f64 {
+        match self {
+            TerrainField::Flat(h) => *h,
+            TerrainField::HeightMap {
+                origin_x,
+                origin_z,
+                spacing,
+                nx,
+                nz,
+                heights,
+            } => {
+                if *nx == 0 || *nz == 0 || *spacing <= 0.0 {
+                    return 0.0;
+                }
+                // 网格浮点坐标（可能为负/越界）。
+                let gx = (x - origin_x) / spacing;
+                let gz = (z - origin_z) / spacing;
+                // 钳制到有效网格区间 [0, nx-1] × [0, nz-1]。
+                let gx_c = gx.clamp(0.0, (*nx - 1) as f64);
+                let gz_c = gz.clamp(0.0, (*nz - 1) as f64);
+                let ix0 = gx_c.floor() as usize;
+                let iz0 = gz_c.floor() as usize;
+                let ix1 = (ix0 + 1).min(*nx - 1);
+                let iz1 = (iz0 + 1).min(*nz - 1);
+                let fx = gx_c - ix0 as f64;
+                let fz = gz_c - iz0 as f64;
+                let h00 = heights[iz0 * nx + ix0];
+                let h10 = heights[iz0 * nx + ix1];
+                let h01 = heights[iz1 * nx + ix0];
+                let h11 = heights[iz1 * nx + ix1];
+                // 双线性插值。
+                let hx0 = h00 + (h10 - h00) * fx;
+                let hx1 = h01 + (h11 - h01) * fx;
+                hx0 + (hx1 - hx0) * fz
+            }
+        }
+    }
+}
+
+/// 计算接触判定面的世界 Y 坐标：ground_y + 地形表面高度(x,z) + 半高。
+fn terrain_surface_y(m: &ContactModel, x: f64, z: f64) -> f64 {
+    let th = match &m.terrain {
+        Some(t) => t.height_at(x, z),
+        None => 0.0,
+    };
+    m.ground_y + th + m.contact_half_h
 }
 
 /// 最近一次接触解算结果（供日志 / 调试）。
@@ -112,10 +189,14 @@ pub struct ContactInfo {
     pub friction_impulse: f64,
 }
 
-/// 解算刚体 `id` 与地面的接触，并把冲量经 `world.apply_impulse` 注入。
+/// 解算刚体 `id` 与（可能带地形的）地面的接触，并把冲量经 `world.apply_impulse` 注入。
 ///
-/// 返回接触信息。引擎系 Y-up；接触判定面 contact_y = ground_y + contact_half_h。
+/// 返回接触信息。引擎系 Y-up；接触判定面 `contact_y = terrain_surface_y(m, x, z)`。
 /// 当 body 低于 contact_y 时认为穿透，施加弹簧-阻尼法向力 + 库仑摩擦。
+///
+/// **地形法向**：平地形（无 `terrain` 或 `Flat`）法向为竖直 (0,1,0)；HeightMap 地形
+/// 用法向梯度构造局部法向 `n = normalize(-∂h/∂x, 1, -∂h/∂z)`，使斜坡上重力切向分量
+/// 能驱动机体沿坡下滑、接触法向冲量方向正确。
 ///
 /// 阻尼比由恢复系数推导：ζ = -ln(e) / (2π)，clamp 到 [0,1]；临界阻尼 c_crit = 2√(k_n·m)，
 /// 法向阻尼 c_n = ζ·c_crit。阻尼力只在接近时（v_n < 0）吸收能量，绝不泵能量。
@@ -126,11 +207,11 @@ pub fn resolve_ground_contact<W: RigidBodyWorld>(
     m: &ContactModel,
     dt: f64,
 ) -> ContactInfo {
-    let contact_y = m.ground_y + m.contact_half_h;
     let mut tf = [0.0f64; 7];
     world.get_body_transform(id, &mut tf);
     let pos = [tf[0], tf[1], tf[2]];
 
+    let contact_y = terrain_surface_y(m, pos[0], pos[2]);
     let pen = contact_y - pos[1]; // >0 即穿透
     if pen <= 0.0 {
         return ContactInfo {
@@ -139,8 +220,12 @@ pub fn resolve_ground_contact<W: RigidBodyWorld>(
         };
     }
 
+    // 局部法向：平地 = (0,1,0)；地形 = 梯度法向。
+    let n = terrain_normal(m, pos[0], pos[2]);
+
     let vel = world.get_velocity(id);
-    let vn = vel[1]; // 法向速度（世界 Y）
+    // 法向速度（沿局部法向投影）。
+    let vn = vel[0] * n[0] + vel[1] * n[1] + vel[2] * n[2];
 
     // 阻尼比来自恢复系数；e>=1 视为无阻尼（纯弹性，理论上不应泵能量因为只吸接近能量）。
     let zeta = if m.restitution >= 1.0 {
@@ -152,22 +237,29 @@ pub fn resolve_ground_contact<W: RigidBodyWorld>(
     let c_crit = 2.0 * (m.penalty_k * mass).sqrt();
     let c_n = zeta * c_crit;
 
-    // 法向冲量（弹簧 + 阻尼）。阻尼只在接近时（vn<0）吸收；离开时(vn>0)不额外推。
+    // 法向冲量（弹簧 + 阻尼）沿 n。阻尼只在接近时（vn<0）吸收；离开时(vn>0)不额外推。
     let f_spring = m.penalty_k * pen;
     let f_damp = -c_n * vn.min(0.0);
     let jn = (f_spring + f_damp) * dt;
     let jn = jn.max(0.0); // 接触只能推，不能拉。
 
     let mut impulse = [0.0f64; 3];
-    impulse[1] = jn;
+    impulse[0] = n[0] * jn;
+    impulse[1] = n[1] * jn;
+    impulse[2] = n[2] * jn;
 
-    // 库仑摩擦：限定切向冲量预算 = μ·法向力冲量，且不超过 m·|v_t|（停下即止）。
-    let speed_t = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
+    // 切向（坡面）速度 = 总速度 - 法向分量。
+    let vt_x = vel[0] - vn * n[0];
+    let vt_y = vel[1] - vn * n[1];
+    let vt_z = vel[2] - vn * n[2];
+    let speed_t = (vt_x * vt_x + vt_y * vt_y + vt_z * vt_z).sqrt();
     if speed_t > 1e-9 {
-        let budget = m.friction * jn; // 可用摩擦冲量上限
+        // 库仑摩擦：限定切向冲量预算 = μ·法向力冲量，且不超过 m·|v_t|（停下即止）。
+        let budget = m.friction * jn;
         let scale = (budget / (mass * speed_t)).min(1.0);
-        impulse[0] = -scale * mass * vel[0];
-        impulse[2] = -scale * mass * vel[2];
+        impulse[0] -= scale * mass * vt_x;
+        impulse[1] -= scale * mass * vt_y;
+        impulse[2] -= scale * mass * vt_z;
     }
 
     world.apply_impulse(id, &impulse, 0);
@@ -177,6 +269,47 @@ pub fn resolve_ground_contact<W: RigidBodyWorld>(
         penetration: pen,
         normal_force: f_spring + f_damp,
         friction_impulse: (impulse[0] * impulse[0] + impulse[2] * impulse[2]).sqrt(),
+    }
+}
+
+/// 局部接触法向（单位向量，引擎系 Y-up）。
+/// - 平地形：`(0,1,0)`。
+/// - HeightMap：用中心差分梯度 `(-∂h/∂x, 1, -∂h/∂z)` 归一化。
+fn terrain_normal(m: &ContactModel, x: f64, z: f64) -> [f64; 3] {
+    match &m.terrain {
+        Some(TerrainField::HeightMap { spacing, .. }) if *spacing > 0.0 => {
+            let e = *spacing * 0.5; // 差分步长
+            let hx1 = m
+                .terrain
+                .as_ref()
+                .map(|t| t.height_at(x + e, z))
+                .unwrap_or(0.0);
+            let hx0 = m
+                .terrain
+                .as_ref()
+                .map(|t| t.height_at(x - e, z))
+                .unwrap_or(0.0);
+            let hz1 = m
+                .terrain
+                .as_ref()
+                .map(|t| t.height_at(x, z + e))
+                .unwrap_or(0.0);
+            let hz0 = m
+                .terrain
+                .as_ref()
+                .map(|t| t.height_at(x, z - e))
+                .unwrap_or(0.0);
+            let nx = -(hx1 - hx0) / (2.0 * e);
+            let nz = -(hz1 - hz0) / (2.0 * e);
+            let ny = 1.0;
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if len > 1e-12 {
+                [nx / len, ny / len, nz / len]
+            } else {
+                [0.0, 1.0, 0.0]
+            }
+        }
+        _ => [0.0, 1.0, 0.0],
     }
 }
 

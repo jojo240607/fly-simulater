@@ -335,6 +335,11 @@ where
         self.ctrl.set_motor_eff(eff);
     }
 
+    /// P1 扩展：覆盖接触模型（含地形高度图）。在 `run_*` 之前调用以切换到带地形的接触面。
+    pub fn set_contact(&mut self, c: Option<ContactModel>) {
+        self.ctrl.plant_set_contact(c);
+    }
+
     /// 阶段 7+（Web 后端）：单步推进 + 触发可视化回调，返回当前真值状态与最近控制指令。
     ///
     /// 用于增量驱动仿真（每显示帧推进若干物理步），区别于 `run_*` 的整段阻塞运行。

@@ -4,7 +4,7 @@
 //! 后续：HIL 模式经 USB CDC 接真实飞控（见 DESIGN.md §9）。
 
 use fly_sim_core::controller::ControllerKind;
-use fly_sim_core::physics::ToyWorld;
+use fly_sim_core::physics::{TerrainField, ToyWorld};
 use fly_sim_core::sensor;
 use fly_sim_core::sim;
 use fly_sim_core::wind;
@@ -14,7 +14,7 @@ use fly_simulater::log::CsvLogger;
 /// CLI 解析结果。
 struct Cli {
     airframe: Option<String>,
-    scenario: String, // "hover" | "wind" | "freefall" | "landing"
+    scenario: String, // "hover" | "wind" | "freefall" | "landing" | "terrain"
     sensor_noise: bool,
     controller: ControllerKind,
     fail_motor: Option<u8>, // 阶段 5：电机完全失效注入（0..3）
@@ -65,7 +65,7 @@ fn parse_args() -> Cli {
                 if let Some(s) = args.next() {
                     cli.scenario = s;
                 } else {
-                    eprintln!("[main] --scenario 需要跟 hover|wind|freefall");
+                    eprintln!("[main] --scenario 需要跟 hover|wind|freefall|landing|terrain");
                     std::process::exit(2);
                 }
             }
@@ -266,6 +266,46 @@ fn main() {
             println!(
                 "[main] P1-2 landing {} ({} steps)",
                 if r { "PASS(稳定拦停地面)" } else { "FAIL" },
+                loop_sim.steps()
+            );
+            r
+        }
+        "terrain" => {
+            // P1 扩展：地形高度图接触。构造一个中心隆起的山丘（5×5 网格，中心高 1.5m），
+            // 接触面随 (x,z) 变化。机体从空中释放，应落在山丘顶附近的曲面接触面上（非穿透）。
+            let n = 5usize;
+            let mut heights = vec![0.0f64; n * n];
+            for iz in 0..n {
+                for ix in 0..n {
+                    // 距中心的曼哈顿距离 -> 高度，中心最高 1.5m，边缘 0。
+                    let d = ((ix as i32 - 2).abs() + (iz as i32 - 2).abs()) as f64;
+                    heights[iz * n + ix] = (1.5 - 0.5 * d).max(0.0);
+                }
+            }
+            let terrain = TerrainField::HeightMap {
+                origin_x: -2.0,
+                origin_z: -2.0,
+                spacing: 2.0,
+                nx: n,
+                nz: n,
+                heights,
+            };
+            loop_sim.set_contact(Some(fly_sim_core::physics::ContactModel {
+                ground_y: -5.0,
+                restitution: 0.1,
+                friction: 0.9,
+                penalty_k: 2000.0,
+                contact_half_h: 0.1,
+                terrain: Some(terrain),
+            }));
+            println!(
+                "[main] running P1-ext terrain contact (10s, dt={}ms)...",
+                dt * 1000.0
+            );
+            let r = loop_sim.run_drop(10.0);
+            println!(
+                "[main] P1-ext terrain {} ({} steps)",
+                if r { "PASS(停在地形曲面)" } else { "FAIL" },
                 loop_sim.steps()
             );
             r

@@ -7,7 +7,7 @@
 //!
 //! 运行：`cargo test --test physics_toy`
 
-use fly_sim_core::{ContactModel, RigidBodyWorld, ToyWorld};
+use fly_sim_core::{ContactModel, RigidBodyWorld, TerrainField, ToyWorld};
 use fly_sim_core::physics::resolve_ground_contact;
 use fly_sim_core::controller::actuator_full;
 use fly_sim_core::QuadrotorPlant;
@@ -104,6 +104,7 @@ fn contact_rests_on_ground_no_sink() {
         friction: 0.8,
         penalty_k: 2000.0, // 较软弹簧，平衡穿透合理（m*g/k≈5mm），无弹飞
         contact_half_h: 0.1,
+        terrain: None,
     };
     for _ in 0..200 {
         resolve_ground_contact(&mut world, id, 1.0, &m, DT);
@@ -131,6 +132,7 @@ fn contact_bounces_with_restitution() {
         friction: 0.8,
         penalty_k: 8000.0,
         contact_half_h: 0.1,
+        terrain: None,
     };
     // 先自由下落若干步直到接近接触面，记录入射法向速度。
     let mut v_before = 0.0;
@@ -177,6 +179,7 @@ fn contact_friction_stops_horizontal_slide() {
         friction: 0.9, // 高摩擦
         penalty_k: 8000.0,
         contact_half_h: 0.1,
+        terrain: None,
     };
     for _ in 0..200 {
         resolve_ground_contact(&mut world, id, 1.0, &m, DT);
@@ -206,6 +209,7 @@ fn plant_contact_stops_falling_quad() {
             friction: 0.9,
             penalty_k: 2000.0,
             contact_half_h: 0.05,
+            terrain: None,
         }),
     );
     // 直接驱动 plant（无控制律），机体应被接触面托住在 y≈5.0 附近，不飞出、不穿透。
@@ -217,4 +221,95 @@ fn plant_contact_stops_falling_quad() {
     let (pos, _) = plant.debug_up();
     // 接触面 = 4.95+0.05 = 5.0 = 起始高度。机体应停在附近（平衡穿透极小）。
     assert!(pos[1] > 4.5 && pos[1] < 5.5, "机体应停在接触面附近, y={}", pos[1]);
+}
+
+// ===================== P1 扩展：地形高度图接触 =====================
+
+fn flat_height_map(base: f64) -> TerrainField {
+    // 2×2 全基面网格（纯平，等价于 Flat），用于验证地形路径不影响平面接触。
+    TerrainField::HeightMap {
+        origin_x: 0.0,
+        origin_z: 0.0,
+        spacing: 1.0,
+        nx: 2,
+        nz: 2,
+        heights: vec![base; 4],
+    }
+}
+
+/// 地形（平面 HeightMap）上停机：接触判定面应随地形高度抬升，机体停在地表 + half_h 附近。
+#[test]
+fn terrain_flat_rests_on_surface() {
+    let mut world = ToyWorld::new(9.81);
+    // 地形表面在 (x,z)=(2,2) 处高度 = 3.0；接触面 = ground_y(5.0) + 3.0 + half_h(0.1) = 8.1。
+    // body 起始在 y=8.1（接触面），重力压出微小平衡穿透。远高于 ToyWorld y=0 钳制。
+    let id = world.add_body(1.0, &[2.0, 8.1, 2.0, 1.0, 0.0, 0.0, 0.0], &[0.01, 0.01, 0.01]);
+    let m = ContactModel {
+        ground_y: 5.0,
+        restitution: 0.0,
+        friction: 0.8,
+        penalty_k: 2000.0,
+        contact_half_h: 0.1,
+        terrain: Some(flat_height_map(3.0)),
+    };
+    for _ in 0..200 {
+        resolve_ground_contact(&mut world, id, 1.0, &m, DT);
+        world.step(DT);
+    }
+    let mut tf = [0.0f64; 7];
+    world.get_rigid_transforms(&mut tf);
+    let y = tf[1];
+    assert!(y.is_finite(), "地形接触后 y 应有限, got {}", y);
+    // 接触面 = 8.1；平衡穿透 ~m*g/k≈5mm；停机高度应集中在 8.1 附近。
+    assert!(y > 7.9 && y < 8.2, "应停在地形表面(8.1)附近, y={}", y);
+}
+
+/// 斜坡地形：机体放在斜面上方，重力应产生沿坡切向分量，使机体沿下坡方向滑动。
+#[test]
+fn terrain_slope_slides_downhill() {
+    let mut world = ToyWorld::new(9.81);
+    // 构造沿 +X 下降的斜坡：x=0 处地形高 4.0，x=10 处高 0.0（梯度 ∂h/∂x = -0.4）。
+    // 接触面 = ground_y(5.0) + h(x) + half_h(0.1)。取 x=2 处 h≈3.2，接触面≈8.3。
+    // 局部法向 n ≈ normalize(0.4, 1, 0)，重力切向分量沿 -X → 机体应向 -X 滑动。
+    let nx = 11usize;
+    let nz = 2usize;
+    let mut heights = Vec::with_capacity(nx * nz);
+    for iz in 0..nz {
+        for ix in 0..nx {
+            // h(x) = 4.0 - 0.4*x（斜坡沿 +X 下降）
+            heights.push(4.0 - 0.4 * (ix as f64));
+            let _ = iz;
+        }
+    }
+    let terrain = TerrainField::HeightMap {
+        origin_x: 0.0,
+        origin_z: 0.0,
+        spacing: 1.0,
+        nx,
+        nz,
+        heights,
+    };
+    // 把 body 放在 x=2, z=0, 接触面≈8.3；给极小的初始扰动让其顺坡下滑。
+    let id = world.add_body(1.0, &[2.0, 8.3, 0.0, 1.0, 0.0, 0.0, 0.0], &[0.01, 0.01, 0.01]);
+    let m = ContactModel {
+        ground_y: 5.0,
+        restitution: 0.0, // 非弹，纯沿坡滑
+        friction: 0.1,    // 低摩擦，允许明显滑动
+        penalty_k: 8000.0,
+        contact_half_h: 0.1,
+        terrain: Some(terrain),
+    };
+    let x0 = 2.0;
+    for _ in 0..400 {
+        resolve_ground_contact(&mut world, id, 1.0, &m, DT);
+        world.step(DT);
+    }
+    let mut tf = [0.0f64; 7];
+    world.get_rigid_transforms(&mut tf);
+    let x = tf[0];
+    // 地形 h(x)=4-0.4x 随 +X 降低 → 下坡方向是 +X，机体应沿 +X 滑动。
+    assert!(x > x0 + 0.05, "斜坡上应沿下坡(+X)滑动, x0={} x={}", x0, x);
+    assert!(tf[1].is_finite(), "地形斜坡接触后 y 应有限, got {}", tf[1]);
+    // 不应飞离地表（保持接触，y 维持在地表附近而非无限上升）。
+    assert!(tf[1] > 6.0 && tf[1] < 9.5, "应贴坡滑行未弹飞, y={}", tf[1]);
 }
