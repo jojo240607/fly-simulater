@@ -324,6 +324,25 @@ where
     pub fn last_imu(&self) -> ImuSample {
         self.imu.last
     }
+
+    /// 调试：返回最近一次姿态控制器输出（`(err[3], pqr[3], om[3])`）。
+    pub fn dbg_att(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.ctrl.dbg_last(),
+            CtrlVariant::Indi(h) => h.ctrl.inner().dbg_last(),
+            CtrlVariant::Lqr(_) => ([0.0; 3], [0.0; 3], [0.0; 3]),
+        }
+    }
+
+    /// 调试：取引擎世界系真实角速度 (rad/s)。
+    pub fn debug_ang_world(&self) -> [f64; 3] {
+        self.plant.debug_ang_world()
+    }
+
+    /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系）。
+    pub fn debug_tau_body(&self) -> [f64; 3] {
+        self.plant.debug_tau_body()
+    }
 }
 
 // 辅助：构造悬停设定点。

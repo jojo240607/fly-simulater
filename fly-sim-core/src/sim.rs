@@ -365,6 +365,11 @@ where
         self.ctrl.debug_up()
     }
 
+    /// 调试：取引擎世界系真实角速度 (rad/s)。
+    pub fn debug_ang_world(&self) -> [f64; 3] {
+        self.ctrl.debug_ang_world()
+    }
+
     /// 阶段 8：动力系统状态（电池端电压 V，4 路电机转速 rad/s）。
     pub fn powertrain_state(&self) -> (f64, [f64; 4]) {
         self.ctrl.powertrain_state()

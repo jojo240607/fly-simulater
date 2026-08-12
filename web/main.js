@@ -17,7 +17,7 @@
   const ctl = {
     scenario: "hover",
     controller: "pid",
-    wind: 0.0,
+    wind: 0.5,
     fail_motor: null,   // 整数或 null
     degrade: null,      // [m, e] 或 null
   };

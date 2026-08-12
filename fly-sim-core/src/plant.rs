@@ -15,7 +15,7 @@
 
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::vehicle::{
-    ActuatorCmd, ImuSample, PosSample, Quaternion, VehicleState,
+    rotate_vec_by_quat_inverse, ActuatorCmd, ImuSample, PosSample, Quaternion, VehicleState,
 };
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 
@@ -119,6 +119,8 @@ pub struct QuadrotorPlant<W> {
     last_contact: Option<ContactInfo>,
     /// P0-2：动量理论诱导速度（m/s），含垂直气流耦合；每步在 step() 内刷新。
     induced_vel: f64,
+    /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系）。
+    last_tau_body: [f64; 3],
 }
 
 impl<W> QuadrotorPlant<W>
@@ -199,6 +201,7 @@ where
             contact,
             last_contact: None,
             induced_vel: 0.0,
+            last_tau_body: [0.0; 3],
         }
     }
 
@@ -361,6 +364,7 @@ where
         ];
         self.world.apply_impulse(self.body_id, &f_impulse, 0);
         self.world.apply_torque_impulse(self.body_id, &tau_impulse, 0);
+        self.last_tau_body = tau_body;
 
         // ---- 步进物理引擎 ----
         let rc = self.world.step(self.dt);
@@ -432,8 +436,13 @@ where
         let q_up = [tf[3], tf[4], tf[5], tf[6]];
         let pos_ned = vec_up_to_ned(pos_up); // [n, e, d]
 
-        // 角速度：引擎机体(前-右-上) -> 飞控机体(前-右-下)，Z 轴翻转。
-        let omega_fc = [ang[0] as f32, ang[1] as f32, -ang[2] as f32];
+        // 角速度：Rapier 的 get_angular_velocity 返回【世界系】角速度，必须先旋到
+        // 引擎机体(前-右-上)系，再按飞控混控端 (p,-q,-r) 的约定翻转 Y、Z 得到飞控机体
+        // (前-右-下)系。该翻转必须与 actuator 端的 (p,-q,-r) 互为逆，否则俯仰/偏航轴的
+        // 阻尼项符号反掉，姿态环发散（悬停近水平时世界系≈机体系故无碍，倾斜后炸机）。
+        let q_up_q = Quaternion { w: q_up[0] as f32, x: q_up[1] as f32, y: q_up[2] as f32, z: q_up[3] as f32 };
+        let ang_body = rotate_vec_by_quat_inverse(q_up_q, [ang[0] as f32, ang[1] as f32, ang[2] as f32]);
+        let omega_fc = [ang_body[0], -ang_body[1], -ang_body[2]];
 
         // 比力（机体，不含重力）：数值微分世界速度得 a_world，减重力项后旋到机体。
         let a_world = [
@@ -491,6 +500,16 @@ where
         self.induced_vel
     }
 
+    /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系，[x,y,z]）。
+    pub fn debug_tau_body(&self) -> [f64; 3] {
+        self.last_tau_body
+    }
+
+    /// 调试：取引擎世界系真实角速度 (rad/s)。
+    pub fn debug_ang_world(&self) -> [f64; 3] {
+        self.world.get_angular_velocity(self.body_id)
+    }
+
     /// 取当前 NED 世界状态（供不变量检查 / 日志）。
     pub fn state_ned(&self) -> VehicleState {
         let tf = self.read_body_tf();
@@ -500,7 +519,10 @@ where
         let quat_ned = quat_up_to_ned(q_up);
         let vel = self.world.get_velocity(self.body_id);
         let ang = self.world.get_angular_velocity(self.body_id);
+        let q_up_q = Quaternion { w: q_up[0] as f32, x: q_up[1] as f32, y: q_up[2] as f32, z: q_up[3] as f32 };
+        let ang_body = rotate_vec_by_quat_inverse(q_up_q, [ang[0] as f32, ang[1] as f32, ang[2] as f32]);
         VehicleState {
+            time_boot_ms: (self.time * 1000.0) as i32,
             pos: [Meter(pos_ned[0]), Meter(pos_ned[1]), Meter(pos_ned[2])],
             vel: [
                 MeterPerSecond(vec_up_to_ned(vel)[0]),
@@ -508,7 +530,7 @@ where
                 MeterPerSecond(vec_up_to_ned(vel)[2]),
             ],
             att: quat_ned,
-            omega: [RadianPerSecond(ang[0] as f32), RadianPerSecond(ang[1] as f32), RadianPerSecond(-ang[2] as f32)],
+            omega: [RadianPerSecond(ang_body[0]), RadianPerSecond(-ang_body[1]), RadianPerSecond(-ang_body[2])],
             airspeed: MeterPerSecond((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() as f32),
         }
     }
