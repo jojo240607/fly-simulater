@@ -451,15 +451,16 @@ fn draw_quad(fb: &mut Framebuffer, vp: &Matrix4<f32>, inp: &RenderInput, aspect:
         if let (Some(pc), Some(pr)) = (center, pr) {
             // 臂线
             fb.draw_line(pc.0, pc.1, pr.0, pr.1, (pc.2 + pr.2) * 0.5, [96, 108, 128]);
-            // 旋翼盘：高速旋转轨迹画成"圈圈"（淡色实心圆盘 + 外圈），随推力大小缩放。
+            // 旋翼盘：高速旋转轨迹画成"圈圈"（淡色实心圆盘 + 外圈）。
+            // 屏幕像素半径（不依赖 3D 投影，保证可见），随推力大小缩放。
             let m = inp.motors[i] as f32;
-            let r = arm * 0.34 * (0.6 + m * 0.5); // 转速越高盘越明显
-            let rad = (r * inp.visual_scale) as i32;
+            let rad = (5 + (m * 10.0) as i32) as i32;
             let spin_col = if m > 0.05 { [140, 170, 190] } else { [70, 80, 95] };
-            // 淡色圆盘（旋转圈）+ 外圈亮边（更明显的旋转轨迹边界）
+            // 淡色圆盘（旋转圈）+ 外圈亮边（更明显的旋转轨迹边界）。
+            // 外圈深度略近于圆盘，否则被深度测试（相等深度不覆盖）挡掉画不上。
             if rad > 2 {
                 fb.fill_circle(pr.0, pr.1, rad, pr.2, spin_col);
-                draw_circle_outline(fb, pr.0, pr.1, rad, pr.2, [190, 215, 230]);
+                draw_circle_outline(fb, pr.0, pr.1, rad, pr.2 - 0.002, [200, 220, 235]);
             } else {
                 fb.fill_circle(pr.0, pr.1, rad, pr.2, spin_col);
             }

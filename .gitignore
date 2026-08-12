@@ -27,6 +27,10 @@ tsrv.txt
 t.txt
 test_core.txt
 test_all.txt
+ring_out.txt
+rotor_out.txt
+axis_out.txt
+frame_out.txt
 
 # 临时测试/编译诊断输出
 test_*.txt
