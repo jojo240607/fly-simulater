@@ -11,6 +11,7 @@
 //!
 //! runner（如 `fly-simulater` bin）依赖本 crate，负责 CLI、机型加载、CSV 写出等具体形态。
 
+pub mod alloc;
 pub mod controller;
 pub mod log;
 pub mod physics;

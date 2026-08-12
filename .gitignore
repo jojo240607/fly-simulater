@@ -31,6 +31,8 @@ ring_out.txt
 rotor_out.txt
 axis_out.txt
 frame_out.txt
+alloc_out.txt
+tools/alloc_check.exe
 
 # 临时测试/编译诊断输出
 test_*.txt
