@@ -10,6 +10,22 @@
 use flyctrl_core::units::{Meter, MeterPerSecondSquared, RadianPerSecond};
 use flyctrl_core::vehicle::{ImuSample, PosSample};
 
+/// 磁力计采样（机体系 3 轴，单位化 uT）。仿真侧专用，不与 MCU 共享结构。
+#[derive(Clone, Debug)]
+pub struct MagSample {
+    /// 机体坐标系三轴磁场（uT）。
+    pub field: [f64; 3],
+}
+
+/// 气压计采样（由气压反演的高度，m）。
+#[derive(Clone, Debug)]
+pub struct BaroSample {
+    /// 气压计高度（m），含噪声/漂移。
+    pub altitude: f64,
+    /// 气压计原生气压（hPa）。
+    pub pressure: f64,
+}
+
 /// 确定性 PRNG（与 wind.rs 同款 LCG）。
 struct Lcg {
     state: std::num::Wrapping<u64>,
@@ -52,6 +68,13 @@ pub struct SensorConfig {
     pub gps_pos_noise: f64,       // 位置噪声 std m
     pub gps_vel_noise: f64,       // 速度噪声 std m/s
     pub gps_drop_prob: f64,       // 偶发丢星概率/帧
+    // 磁力计（航向）：机体系硬铁偏置 uT，软铁缩放，白噪声 std uT。
+    pub mag_hard_iron: [f64; 3],  // 硬铁偏置 uT
+    pub mag_soft_iron: [f64; 3],  // 软铁缩放因子
+    pub mag_noise: f64,           // 白噪声 std uT
+    // 气压计（高度）：白噪声 std m，慢漂移 std m/sqrt(s)。
+    pub baro_noise: f64,          // 高度白噪声 std m
+    pub baro_drift: f64,          // 高度慢漂移 std m/sqrt(s)
     pub seed: u64,
 }
 
@@ -71,6 +94,11 @@ impl Default for SensorConfig {
             gps_pos_noise: 0.0,
             gps_vel_noise: 0.0,
             gps_drop_prob: 0.0,
+            mag_hard_iron: [0.0, 0.0, 0.0],
+            mag_soft_iron: [1.0, 1.0, 1.0],
+            mag_noise: 0.0,
+            baro_noise: 0.0,
+            baro_drift: 0.0,
             seed: 0x5EED_1357,
         }
     }
@@ -92,6 +120,11 @@ impl SensorConfig {
             gps_pos_noise: 0.5,
             gps_vel_noise: 0.1,
             gps_drop_prob: 0.0,
+            mag_hard_iron: [0.3, -0.2, 0.4], // uT 硬铁
+            mag_soft_iron: [0.98, 1.03, 0.99], // 软铁缩放
+            mag_noise: 0.05, // uT
+            baro_noise: 0.3, // m
+            baro_drift: 0.05, // m/sqrt(s)
             seed: 0x5EED_1357,
         }
     }
@@ -114,6 +147,8 @@ pub struct SensorModel {
     gps_counter: u64,
     // 振动相位
     vib_phase: f64,
+    // 气压计慢漂移状态
+    baro_bias: f64,
     time: f64,
 }
 
@@ -128,6 +163,7 @@ impl SensorModel {
             gps_delay: GpsDelay { delay_steps, buf: std::collections::VecDeque::new() },
             gps_counter: 0,
             vib_phase: 0.0,
+            baro_bias: 0.0,
             time: 0.0,
         }
     }
@@ -212,4 +248,63 @@ impl SensorModel {
 
         (imu, pos_sample)
     }
+
+    /// 阶段 P2-1：磁力计 + 气压计（航向/高度测量）。
+    ///
+    /// `quat_ned` = 机体→NED 四元数 [w,x,y,z]，`altitude` = NED 高度（-d，m）。
+    /// 磁力计：把 NED 地磁场（磁北水平分量 + 磁倾角）转到机体系，加硬铁/软铁/噪声。
+    /// 气压计：真值高度 + 白噪声 + 慢漂移（随机游走）。
+    pub fn process_attitude(
+        &mut self,
+        dt: f64,
+        quat_ned: [f64; 4],
+        altitude: f64,
+    ) -> (MagSample, BaroSample) {
+        self.time += dt;
+
+        // ---- 磁力计 ----
+        // NED 地磁场（近似）：磁北水平分量 B_h + 磁倾角 dip。
+        // 取磁倾角约 60°（中纬度），B_h≈25uT，B_d≈35uT（近似量级）。
+        let dip = 60.0f64.to_radians();
+        let b_ned = [25.0 * dip.cos(), 0.0, 25.0 * dip.sin()]; // 磁北在 NED 北向 + 向下分量
+        // 转到机体：v_body = R(quat_ned⁻¹)·v_ned
+        let b_body = rotate_by_quat_conj(quat_ned, b_ned);
+        // 硬铁偏置 + 软铁缩放 + 白噪声
+        let mut field = [0.0f64; 3];
+        for i in 0..3 {
+            field[i] = b_body[i] * self.cfg.mag_soft_iron[i]
+                + self.cfg.mag_hard_iron[i]
+                + self.cfg.mag_noise * self.rng.gaussian();
+        }
+        let mag = MagSample { field };
+
+        // ---- 气压计 ----
+        // 慢漂移：随机游走
+        self.baro_bias += self.cfg.baro_drift * self.rng.gaussian() * dt.sqrt();
+        self.baro_bias = self.baro_bias.clamp(-50.0, 50.0);
+        let alt_meas = altitude + self.baro_bias + self.cfg.baro_noise * self.rng.gaussian();
+        // 气压：标准大气近似（每 10m 约 1.2hPa 变化），海平面 1013.25hPa。
+        let pressure = 1013.25 * (-alt_meas / 8434.0).exp();
+        let baro = BaroSample { altitude: alt_meas, pressure };
+
+        (mag, baro)
+    }
+}
+
+/// 用四元数共轭旋转向量（世界→机体）：R(q⁻¹)·v。
+/// q 为机体→NED 四元数，其共轭即 NED→机体。
+fn rotate_by_quat_conj(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
+    let (w, x, y, z) = (q[0], -q[1], -q[2], -q[3]); // 共轭（逆）
+    // 用旋转公式 r = v + 2w(q×v) + 2(q×(q×v))
+    let qv = [y * v[2] - z * v[1], z * v[0] - x * v[2], x * v[1] - y * v[0]];
+    let qqv = [
+        y * qv[2] - z * qv[1],
+        z * qv[0] - x * qv[2],
+        x * qv[1] - y * qv[0],
+    ];
+    [
+        v[0] + 2.0 * w * qv[0] + 2.0 * qqv[0],
+        v[1] + 2.0 * w * qv[1] + 2.0 * qqv[1],
+        v[2] + 2.0 * w * qv[2] + 2.0 * qqv[2],
+    ]
 }
