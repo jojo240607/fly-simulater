@@ -220,7 +220,7 @@
 - 验证（`tests/physics_toy.rs`）：新增 `obstacle_multi_contact_corner_resolves`——
   两堵 AABB 墙间隙(0.3m) < 机体直径(0.4m)，机体被双面法向夹止、停在间隙中心
   (|x|<0.1) 且不深穿透任一侧、水平速度收敛。全量默认 + `--features phy` 构建均通过。
-- **下一步（未做）**：障碍碰撞与避障控制器闭环联动。
+- **下一步（已并入 P1-2 终闭环）**：障碍碰撞与避障控制器闭环联动。
 
 ### P1-2 续续续续：障碍反射到传感器（避障雷达 / 视觉失效） ✅ 完成
 
@@ -250,8 +250,46 @@
     且饱和到 `max_range`（视觉失效，非"无障碍"）。
   - `ranger_no_obstacle_max_range`：前方无障 → `valid=false` 饱和到 `max_range`。
   - `ranger_unequipped_returns_none`：未 `set_ranger` 返回 `None`。
-- **下一步（未做）**：障碍碰撞与避障控制器闭环联动（把 `read_ranger` 读数接入飞控
-  避障逻辑，形成"感知→决策→避障"完整回路）。
+- **下一步（已并入下条闭环）**：障碍碰撞与避障控制器闭环联动（见下）。
+
+### P1-2 终：障碍碰撞与避障控制器闭环联动 ✅ 完成
+
+- 目标：把 `read_ranger()` 读数接入飞控避障逻辑，形成"**感知→决策→规避**"完整
+  闭环——机体朝障碍飞行时，反应式避障在危险距离内制动减速并横向闪避，避免碰撞。
+- 实现（`fly-sim-core/src/sensor.rs`）：
+  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral }`：反应式避障配置。
+  - `AvoidanceConfig::avoidance_velocity(sample, fwd_ned, right_ned) -> ([f64;3], bool)`：
+    根据测距读数计算 NED 避障速度指令并标记是否触发。
+    - **保守失效语义**：读数 `valid=false`（瞬断/近距盲区/量程饱和）一律**不介入**
+      （避免凭空闪避；真实危险时读数有效且距离小，会正常触发）。
+    - 触发条件：`valid && distance < danger_dist`；危险度 `severity=1-dist/danger_dist`。
+    - 制动：沿 `-fwd_ned`，幅度 `severity*brake_gain*danger_dist`（m/s）。
+    - 横向闪避：沿 `+right_ned`，恒定 `evade_lateral`（m/s），仅危险时给出。
+- 实现（`fly-sim-core/src/plant.rs`）：
+  - `QuadrotorPlant::forward_dir_ned()` / `right_dir_ned()`：把机体前/右向（引擎机体系
+    -X/+Y）经姿态四元数旋转 + 引擎系→NED 映射，返回归一化 NED 单位向量，供避障速度
+    指令投影并入 NED 速度设定点。
+- 实现（`fly-sim-core/src/controller.rs`）：
+  - `FlyController::avoidance: Option<AvoidanceConfig>` + `set_avoidance()` / `set_ranger()`
+    / `configure_avoidance()`（便捷组合）。
+  - `FlyController::step`：装备避障时，在控制律前读 `read_ranger()`，触发则把
+    `AvoidanceConfig::avoidance_velocity` 的 NED 速度叠加进**速度设定点**（改 `sp.vel[0/1]`，
+    竖向/偏航不动），实现闭环。无装备则行为完全不变（默认 `None`）。
+- 实现（`fly-sim-core/src/sim.rs`）：
+  - `SimLoop::run_avoidance(seconds, forward_vx_ned, obstacle_n, ranger, avoidance)
+     -> (min_dist, all_ok)`：朝障碍飞行的闭环场景，返回全程最近逼近距离与数值稳定性。
+- 验证：
+  - `tests/avoidance.rs`（单元 3 项）：
+    - `avoid_velocity_triggers_when_close`：近障触发，前向制动=-2.0、横向=+0.5。
+    - `avoid_velocity_silent_when_far`：远障不触发，零指令。
+    - `avoid_velocity_conservative_on_invalid`：失效读数不触发（保守不动作）。
+  - `tests/avoidance.rs`（闭环 2 项）：
+    - `avoidance_keeps_greater_clearance_than_bare`：朝障 1.5 m/s 飞 4s，避障闭环的
+      最近逼近距离**明显大于**裸飞对照（gap_av > gap_bare + 0.5），且不穿透障碍表面。
+    - `avoidance_no_false_trigger_when_no_obstacle`：无障时装备避障不导致发散。
+  - 默认 + `--features phy` 全套测试通过。
+- **P1-2 阶段收尾**：凸包/动态障碍（碰撞）+ 障碍反射传感器（感知）+ 避障闭环（决策/规避）
+  三层全部打通，构成"几何→碰撞→感知→决策→规避"完整障碍处理链路。
 
 ### P1-2 续续续：凸包近似障碍 + 动态（平移）障碍 ✅ 完成
 
@@ -277,8 +315,46 @@
     从左侧扫过停机坪平面上的机体，t≈2s 接触并把机体向右推过原点（终态 x≈3.0，
     `dist > 0.7` 不深穿透）。注意 ToyWorld 自带 y>=0 停机坪钳制，接触场景须放在
     y≈0 平面附近，否则机体自由落体掉到 y=0 与 y=5 处移动的障碍永久错开。
-- **下一步（未做）**：障碍碰撞与避障控制器闭环联动（把 `read_ranger` 读数接入飞控
-  避障逻辑，形成"感知→决策→避障"完整回路）。
+- **下一步（已并入下条闭环）**：障碍碰撞与避障控制器闭环联动（见下）。
+
+### P1-2 终：障碍碰撞与避障控制器闭环联动 ✅ 完成
+
+- 目标：把 `read_ranger()` 读数接入飞控避障逻辑，形成"**感知→决策→规避**"完整
+  闭环——机体朝障碍飞行时，反应式避障在危险距离内制动减速并横向闪避，避免碰撞。
+- 实现（`fly-sim-core/src/sensor.rs`）：
+  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral }`：反应式避障配置。
+  - `AvoidanceConfig::avoidance_velocity(sample, fwd_ned, right_ned) -> ([f64;3], bool)`：
+    根据测距读数计算 NED 避障速度指令并标记是否触发。
+    - **保守失效语义**：读数 `valid=false`（瞬断/近距盲区/量程饱和）一律**不介入**
+      （避免凭空闪避；真实危险时读数有效且距离小，会正常触发）。
+    - 触发条件：`valid && distance < danger_dist`；危险度 `severity=1-dist/danger_dist`。
+    - 制动：沿 `-fwd_ned`，幅度 `severity*brake_gain*danger_dist`（m/s）。
+    - 横向闪避：沿 `+right_ned`，恒定 `evade_lateral`（m/s），仅危险时给出。
+- 实现（`fly-sim-core/src/plant.rs`）：
+  - `QuadrotorPlant::forward_dir_ned()` / `right_dir_ned()`：把机体前/右向（引擎机体系
+    -X/+Y）经姿态四元数旋转 + 引擎系→NED 映射，返回归一化 NED 单位向量，供避障速度
+    指令投影并入 NED 速度设定点。
+- 实现（`fly-sim-core/src/controller.rs`）：
+  - `FlyController::avoidance: Option<AvoidanceConfig>` + `set_avoidance()` / `set_ranger()`
+    / `configure_avoidance()`（便捷组合）。
+  - `FlyController::step`：装备避障时，在控制律前读 `read_ranger()`，触发则把
+    `AvoidanceConfig::avoidance_velocity` 的 NED 速度叠加进**速度设定点**（改 `sp.vel[0/1]`，
+    竖向/偏航不动），实现闭环。无装备则行为完全不变（默认 `None`）。
+- 实现（`fly-sim-core/src/sim.rs`）：
+  - `SimLoop::run_avoidance(seconds, forward_vx_ned, obstacle_n, ranger, avoidance)
+     -> (min_dist, all_ok)`：朝障碍飞行的闭环场景，返回全程最近逼近距离与数值稳定性。
+- 验证：
+  - `tests/avoidance.rs`（单元 3 项）：
+    - `avoid_velocity_triggers_when_close`：近障触发，前向制动=-2.0、横向=+0.5。
+    - `avoid_velocity_silent_when_far`：远障不触发，零指令。
+    - `avoid_velocity_conservative_on_invalid`：失效读数不触发（保守不动作）。
+  - `tests/avoidance.rs`（闭环 2 项）：
+    - `avoidance_keeps_greater_clearance_than_bare`：朝障 1.5 m/s 飞 4s，避障闭环的
+      最近逼近距离**明显大于**裸飞对照（gap_av > gap_bare + 0.5），且不穿透障碍表面。
+    - `avoidance_no_false_trigger_when_no_obstacle`：无障时装备避障不导致发散。
+  - 默认 + `--features phy` 全套测试通过。
+- **P1-2 阶段收尾**：凸包/动态障碍（碰撞）+ 障碍反射传感器（感知）+ 避障闭环（决策/规避）
+  三层全部打通，构成"几何→碰撞→感知→决策→规避"完整障碍处理链路。
 
 ### P1-2 续续续续：障碍反射到传感器（避障雷达 / 视觉失效） ✅ 完成
 
@@ -308,8 +384,46 @@
     且饱和到 `max_range`（视觉失效，非"无障碍"）。
   - `ranger_no_obstacle_max_range`：前方无障 → `valid=false` 饱和到 `max_range`。
   - `ranger_unequipped_returns_none`：未 `set_ranger` 返回 `None`。
-- **下一步（未做）**：障碍碰撞与避障控制器闭环联动（把 `read_ranger` 读数接入飞控
-  避障逻辑，形成"感知→决策→避障"完整回路）。
+- **下一步（已并入下条闭环）**：障碍碰撞与避障控制器闭环联动（见下）。
+
+### P1-2 终：障碍碰撞与避障控制器闭环联动 ✅ 完成
+
+- 目标：把 `read_ranger()` 读数接入飞控避障逻辑，形成"**感知→决策→规避**"完整
+  闭环——机体朝障碍飞行时，反应式避障在危险距离内制动减速并横向闪避，避免碰撞。
+- 实现（`fly-sim-core/src/sensor.rs`）：
+  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral }`：反应式避障配置。
+  - `AvoidanceConfig::avoidance_velocity(sample, fwd_ned, right_ned) -> ([f64;3], bool)`：
+    根据测距读数计算 NED 避障速度指令并标记是否触发。
+    - **保守失效语义**：读数 `valid=false`（瞬断/近距盲区/量程饱和）一律**不介入**
+      （避免凭空闪避；真实危险时读数有效且距离小，会正常触发）。
+    - 触发条件：`valid && distance < danger_dist`；危险度 `severity=1-dist/danger_dist`。
+    - 制动：沿 `-fwd_ned`，幅度 `severity*brake_gain*danger_dist`（m/s）。
+    - 横向闪避：沿 `+right_ned`，恒定 `evade_lateral`（m/s），仅危险时给出。
+- 实现（`fly-sim-core/src/plant.rs`）：
+  - `QuadrotorPlant::forward_dir_ned()` / `right_dir_ned()`：把机体前/右向（引擎机体系
+    -X/+Y）经姿态四元数旋转 + 引擎系→NED 映射，返回归一化 NED 单位向量，供避障速度
+    指令投影并入 NED 速度设定点。
+- 实现（`fly-sim-core/src/controller.rs`）：
+  - `FlyController::avoidance: Option<AvoidanceConfig>` + `set_avoidance()` / `set_ranger()`
+    / `configure_avoidance()`（便捷组合）。
+  - `FlyController::step`：装备避障时，在控制律前读 `read_ranger()`，触发则把
+    `AvoidanceConfig::avoidance_velocity` 的 NED 速度叠加进**速度设定点**（改 `sp.vel[0/1]`，
+    竖向/偏航不动），实现闭环。无装备则行为完全不变（默认 `None`）。
+- 实现（`fly-sim-core/src/sim.rs`）：
+  - `SimLoop::run_avoidance(seconds, forward_vx_ned, obstacle_n, ranger, avoidance)
+     -> (min_dist, all_ok)`：朝障碍飞行的闭环场景，返回全程最近逼近距离与数值稳定性。
+- 验证：
+  - `tests/avoidance.rs`（单元 3 项）：
+    - `avoid_velocity_triggers_when_close`：近障触发，前向制动=-2.0、横向=+0.5。
+    - `avoid_velocity_silent_when_far`：远障不触发，零指令。
+    - `avoid_velocity_conservative_on_invalid`：失效读数不触发（保守不动作）。
+  - `tests/avoidance.rs`（闭环 2 项）：
+    - `avoidance_keeps_greater_clearance_than_bare`：朝障 1.5 m/s 飞 4s，避障闭环的
+      最近逼近距离**明显大于**裸飞对照（gap_av > gap_bare + 0.5），且不穿透障碍表面。
+    - `avoidance_no_false_trigger_when_no_obstacle`：无障时装备避障不导致发散。
+  - 默认 + `--features phy` 全套测试通过。
+- **P1-2 阶段收尾**：凸包/动态障碍（碰撞）+ 障碍反射传感器（感知）+ 避障闭环（决策/规避）
+  三层全部打通，构成"几何→碰撞→感知→决策→规避"完整障碍处理链路。
 
 ### P2-2：任务级逻辑（waypoint 路径跟随）✅ 框架完成
 - 实现（`fly-sim-core/src/sim.rs`）：`run_mission(waypoints, cruise_v) -> MissionResult`

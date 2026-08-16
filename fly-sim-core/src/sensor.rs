@@ -409,3 +409,69 @@ impl RangeFinderModel {
         }
     }
 }
+
+// ============================================================ 避障控制器（P1-2 闭环联动）
+
+/// 反应式避障控制器配置（感知→决策→规避闭环）。
+///
+/// 当前向测距传感器检测到前方障碍进入 `danger_dist` 内时，
+/// 控制器分两层介入（详见 [`AvoidanceConfig::avoidance_velocity`]）：
+/// 1. **制动**：沿机体前向施加与危险度成正比的减速（把前向速度指令压向 0/反向）。
+/// 2. **横向闪避**：沿机体侧向施加一个恒定的横向速度指令，使机体偏离碰撞航线。
+///
+/// `danger_dist` 应小于 `RangeFinderModel::max_range`，否则全量程都触发闪避。
+#[derive(Clone, Debug)]
+pub struct AvoidanceConfig {
+    /// 危险触发距离（m）：前方障碍真值/读数小于此值即进入规避。
+    pub danger_dist: f64,
+    /// 制动强度（m/s 每米）：危险度 = clamp(1 - dist/danger_dist, 0, 1)，
+    /// 前向期望速度 = 原前向速度 - 危险度 * brake_gain * danger_dist。
+    pub brake_gain: f64,
+    /// 横向闪避速度指令（m/s，机体侧向 +Y，即右翼方向），恒定量。
+    pub evade_lateral: f64,
+}
+
+impl AvoidanceConfig {
+    pub fn new(danger_dist: f64, brake_gain: f64, evade_lateral: f64) -> Self {
+        Self { danger_dist, brake_gain, evade_lateral }
+    }
+
+    /// 计算规避速度指令（NED 系，单位 m/s）。
+    ///
+    /// - `sample`：`plant.read_ranger()` 当前读数。读数无效（`valid=false`）时，
+    ///   保守地按**饱和距离**处理（"看不到"≠"无障碍"，采用最危险假设反而安全，
+    ///   这里采用**最安全假设**：无效读数视为未触发，避免凭空闪避导致误动作；
+    ///   但近距盲区/饱和都已把距离错误上拉，故有效且距离已偏大，恰好不触发）。
+    /// - `fwd_ned`：机体前向在世界 NED 系的单位向量（机体 -X → NED）。
+    /// - `right_ned`：机体右向在世界 NED 系的单位向量（机体 +Y → NED）。
+    ///
+    /// 返回 `(v_ned: [f64;3], triggered: bool)`，`triggered` 表示本轮是否真的介入。
+    /// 调用方把返回的速度指令叠加/并入原有速度设定点。
+    pub fn avoidance_velocity(
+        &self,
+        sample: &RangeFinderSample,
+        fwd_ned: [f64; 3],
+        right_ned: [f64; 3],
+    ) -> ([f64; 3], bool) {
+        // 无效读数（瞬断/近距盲区/量程外饱和）一律视为"未确认危险"，不介入，
+        // 避免凭空闪避；真实危险时读数有效且距离小，会正常触发。
+        if !sample.valid {
+            return ([0.0; 3], false);
+        }
+        let dist = sample.distance;
+        if dist >= self.danger_dist {
+            return ([0.0; 3], false);
+        }
+        // 危险度：越近越大（0@danger_dist, 1@0）
+        let severity = (1.0 - dist / self.danger_dist).clamp(0.0, 1.0);
+        // 制动：沿 -前向，幅度 = 危险度 * brake_gain * danger_dist（m/s）
+        let brake = severity * self.brake_gain * self.danger_dist;
+        // 横向闪避：沿 +right（恒定），仅在有危险时给出
+        let evade = self.evade_lateral;
+        let mut v = [0.0f64; 3];
+        for i in 0..3 {
+            v[i] = -brake * fwd_ned[i] + evade * right_ned[i];
+        }
+        (v, true)
+    }
+}

@@ -17,7 +17,7 @@ use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
 use crate::physics::{ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld};
 use crate::wind::WindField;
-use crate::sensor::SensorConfig;
+use crate::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig};
 
 /// 生产路径便捷别名：用真实物理引擎（phy-sdk）的控制器。
 #[cfg(feature = "phy")]
@@ -123,6 +123,9 @@ pub struct FlyController<W> {
     /// 中间值=部分效率退化）。实测：四旋翼在当前无重构控制律下，单电机推力
     /// 损失（无论完全还是部分）均致姿控发散、不可恢复（见 sim.rs run_hover_degraded）。
     fail_mask: [f32; 4],
+    /// P1-2 闭环联动：反应式避障配置。`None`=不装避障（默认，行为同前）。
+    /// 装备后，step 内读前向测距，危险时改写速度设定点（制动+横向闪避）。
+    avoidance: Option<AvoidanceConfig>,
 }
 
 impl<W> FlyController<W>
@@ -181,7 +184,30 @@ where
             mode: 0,
             takeoff_alt: 0.0,
             fail_mask: [1.0; 4],
+            avoidance: None,
         }
+    }
+
+    /// P1-2 闭环联动：装备/卸下反应式避障控制器。
+    ///
+    /// 装备后，[`FlyController::step`] 会在控制律之前读前向测距传感器，
+    /// 当检测到前方障碍进入危险距离时，把避障速度指令（制动+横向闪避）并入
+    /// 速度设定点，实现"感知→决策→规避"闭环。
+    pub fn set_avoidance(&mut self, cfg: Option<AvoidanceConfig>) {
+        self.avoidance = cfg;
+    }
+
+    /// P1-2 闭环联动：装备前向测距传感器（障碍反射来源）。
+    /// 不装备则 [`FlyController::step`] 不会触发避障（即使已装避障配置）。
+    pub fn set_ranger(&mut self, ranger: Option<RangeFinderModel>) {
+        self.plant.set_ranger(ranger);
+    }
+
+    /// P1-2 闭环联动：一次性装备"测距传感器 + 避障控制器"闭环，
+    /// 是 [`FlyController::set_ranger`] 与 [`FlyController::set_avoidance`] 的便捷组合。
+    pub fn configure_avoidance(&mut self, ranger: RangeFinderModel, avoidance: AvoidanceConfig) {
+        self.plant.set_ranger(Some(ranger));
+        self.avoidance = Some(avoidance);
     }
 
     /// 阶段 5：设置电机完全失效掩码（true=该电机效率置 0，停转）。
@@ -216,10 +242,27 @@ where
         });
 
         // 2) 跑控制律（SIL/HIL 共享闭环）。motors.apply 只记录指令。
+        // 2.0) P1-2 闭环联动：装备避障时，先读前向测距并把避障速度并入设定点。
+        //      setpoint 是 immutable 引用，这里构造一个叠加过避障的本地副本。
+        let mut sp = setpoint.clone();
+        if let Some(av_cfg) = &self.avoidance {
+            if let Some(sample) = self.plant.read_ranger() {
+                let fwd = self.plant.forward_dir_ned();
+                let right = self.plant.right_dir_ned();
+                let (av_vel, triggered) = av_cfg.avoidance_velocity(&sample, fwd, right);
+                if triggered {
+                    // 速度设定点（NED，m/s）叠加避障指令。
+                    sp.vel[0].0 += av_vel[0] as f32;
+                    sp.vel[1].0 += av_vel[1] as f32;
+                    // 注意：setpoint 竖向/偏航不动，仅水平速度被规避层接管。
+                }
+            }
+        }
+        let setpoint_ref = &sp;
         let state = match &mut self.hil {
-            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint, &mut self.motors, &self.cfg),
-            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint, &mut self.motors, &self.cfg),
-            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint, &mut self.motors, &self.cfg),
+            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
         };
 
         // 2.5) 阶段 5/8：故障处理。

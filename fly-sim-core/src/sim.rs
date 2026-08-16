@@ -15,7 +15,7 @@ use crate::controller::{hover_setpoint, FlyController};
 use crate::physics::{ContactModel, Obstacle, RigidBodyWorld};
 use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
-use crate::sensor::SensorConfig;
+use crate::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig};
 use crate::controller::ControllerKind;
 use crate::log::LogRow;
 
@@ -184,6 +184,70 @@ where
         );
         let converged = dz < 0.5 && horiz < 0.5;
         all_ok && converged
+    }
+
+    /// P1-2 闭环联动：前向避障场景。
+    ///
+    /// 机体置于 (0,0,-5)，前方（机体 -X，NED 负北向）`wall_dist` 处放置一堵障碍墙
+    /// （由 `obstacle_n` 给出墙的 NED 北向坐标，应为负值 = 机体前方）。
+    /// 设定点命令一个向前的速度 `forward_vx_ned`（直接朝障碍飞）。装备前向测距
+    /// + 反应式避障后，机体应在接近危险距离时**制动减速**（并横向闪避），
+    /// 使最近逼近距离明显大于"无避障直冲"的对照。
+    ///
+    /// 返回 `(min_dist_to_obstacle, all_ok)`：`min_dist_to_obstacle` 为全程机体到
+    /// 障碍墙表面的最小距离（m），供调用方与无避障基线比较。
+    ///
+    /// 注意：本场景假设机体初始朝向正北（前方 = NED -N），与 `run_hover` 一致。
+    pub fn run_avoidance(
+        &mut self,
+        seconds: f64,
+        forward_vx_ned: f64, // NED 北向速度指令（负值=向前/朝障碍飞），单位 m/s
+        obstacle_n: f64,     // 障碍墙 NED 北向坐标（负=机体前方），单位 m
+        ranger: RangeFinderModel,
+        avoidance: AvoidanceConfig,
+    ) -> (f64, bool) {
+        // 装备测距 + 避障闭环。
+        self.ctrl.configure_avoidance(ranger, avoidance);
+        // 设定点：保持高度 -5，给定向前速度指令（朝障碍）。
+        let sp = Setpoint {
+            pos: [Meter(0.0), Meter(0.0), Meter(-5.0)],
+            yaw: Radian(0.0),
+            vel: [MeterPerSecond(forward_vx_ned as f32), MeterPerSecond(0.0), MeterPerSecond(0.0)],
+        };
+        let total = (seconds / self.dt) as u64;
+        let mut all_ok = true;
+        let mut min_dist = f64::INFINITY;
+
+        for _ in 0..total {
+            let _st = self.ctrl.step(&sp);
+            self.steps += 1;
+
+            // 机体到障碍墙（前方 NED 负 N 方向）的最近"前方"距离。
+            // 障碍墙在 n = obstacle_n（前方为负），机体逼近时 n 递减，距离 = obstacle_n - n。
+            let st = self.ctrl.world_state();
+            let dist_ahead = obstacle_n - st.pos[0].0 as f64;
+            if dist_ahead < min_dist {
+                min_dist = dist_ahead;
+            }
+
+            if let Some(ref mut cb) = self.on_frame {
+                cb(&self.ctrl.world_state(), self.ctrl.last_cmd());
+            }
+
+            if !invariants::state_finite(&_st) {
+                eprintln!("[FAIL] avoidance step {}: state not finite", self.steps);
+                all_ok = false;
+                break;
+            }
+            let cmd = self.ctrl.last_cmd();
+            if !invariants::actuator_bounded(&cmd) {
+                eprintln!("[FAIL] avoidance step {}: actuator out of bounds", self.steps);
+                all_ok = false;
+                break;
+            }
+        }
+
+        (min_dist, all_ok)
     }
 
     /// 阶段 9：自由落体能量守恒测例。

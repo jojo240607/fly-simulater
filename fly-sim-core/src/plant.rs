@@ -638,6 +638,40 @@ where
             airspeed: MeterPerSecond((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() as f32),
         }
     }
+
+    /// P1-2 闭环联动：返回机体前向在世界 NED 系的单位向量（引擎机体系 -X → NED）。
+    ///
+    /// 用于把测距传感器的"前方"语义投影到 NED，使避障速度指令能并入
+    /// NED 速度设定点。返回**归一化**向量（即便机体姿态有偏，长度恒为 1）。
+    pub fn forward_dir_ned(&self) -> [f64; 3] {
+        let tf = self.read_body_tf();
+        let q = [tf[3], tf[4], tf[5], tf[6]];
+        // 引擎机体系前方 = -X
+        let fwd_up = rotate_by_quat(q, [-1.0, 0.0, 0.0]);
+        let ned = vec_up_to_ned(fwd_up);
+        normalize3([ned[0] as f64, ned[1] as f64, ned[2] as f64])
+    }
+
+    /// P1-2 闭环联动：返回机体右向（引擎机体系 +Y）在世界 NED 系的单位向量。
+    ///
+    /// 与 [`QuadrotorPlant::forward_dir_ned`] 同款语义，用于横向闪避指令投影。
+    pub fn right_dir_ned(&self) -> [f64; 3] {
+        let tf = self.read_body_tf();
+        let q = [tf[3], tf[4], tf[5], tf[6]];
+        let right_up = rotate_by_quat(q, [0.0, 1.0, 0.0]);
+        let ned = vec_up_to_ned(right_up);
+        normalize3([ned[0] as f64, ned[1] as f64, ned[2] as f64])
+    }
+}
+
+/// 归一化 3 维向量（零向量返回 [0,0,0]）。
+fn normalize3(v: [f64; 3]) -> [f64; 3] {
+    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if n < 1e-9 {
+        [0.0, 0.0, 0.0]
+    } else {
+        [v[0] / n, v[1] / n, v[2] / n]
+    }
 }
 
 // ============================================================ 四元数工具（f64, 引擎系）
