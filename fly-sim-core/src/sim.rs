@@ -12,6 +12,7 @@ use flyctrl_core::units::{Meter, MeterPerSecond, Radian};
 use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
 
 use crate::controller::{hover_setpoint, FlyController};
+use crate::mavlink::MavlinkBridge;
 use crate::physics::{ContactModel, Obstacle, RigidBodyWorld};
 use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
@@ -250,6 +251,58 @@ where
         (min_dist, all_ok)
     }
 
+    /// P2-2 续：MAVLink 遥测下行链路场景。
+    ///
+    /// 跑 `seconds` 秒悬停，逐拍把机体世界状态经 [`MavlinkBridge`] 编码成标准
+    /// MAVLink v2 遥测流（HEARTBEAT/ATTITUDE/LOCAL_POSITION_NED/SYS_STATUS/VFR_HUD/
+    /// GLOBAL_POSITION_INT），累积整段字节流并返回。调用方可交给标准地面站解析，
+    /// 或用 [`crate::mavlink::loopback_telemetry`] 做自验证（CRC_EXTRA 回环）。
+    ///
+    /// 返回 `(stream, n_frames, all_ok)`：`n_frames` 为发出的遥测帧总数（步数×6），
+    /// `all_ok` 为全程数值稳定（无发散）。
+    pub fn run_mavlink_telemetry(
+        &mut self,
+        seconds: f64,
+        sys_id: u8,
+    ) -> (Vec<u8>, usize, bool) {
+        let mut bridge = MavlinkBridge::new(sys_id, 1);
+        let sp = hover_setpoint(0.0, 0.0, -5.0);
+        let total = (seconds / self.dt) as u64;
+        let mut stream = Vec::new();
+        let mut n_frames = 0usize;
+        let mut all_ok = true;
+
+        for _ in 0..total {
+            let _st = self.ctrl.step(&sp);
+            self.steps += 1;
+
+            let st = self.ctrl.world_state();
+            let cmd = self.ctrl.last_cmd();
+            let throttle = ((cmd.motor[0] + cmd.motor[1] + cmd.motor[2] + cmd.motor[3]) / 4.0
+                * 100.0)
+                .max(0.0) as u16;
+            let frame = bridge.emit_telemetry(&st, 0, true, throttle, true);
+            n_frames += 6;
+            stream.extend_from_slice(&frame);
+
+            if let Some(ref mut cb) = self.on_frame {
+                cb(&st, cmd.clone());
+            }
+
+            if !invariants::state_finite(&_st) {
+                eprintln!("[FAIL] mavlink_telemetry step {}: state not finite", self.steps);
+                all_ok = false;
+                break;
+            }
+            if !invariants::actuator_bounded(&cmd) {
+                eprintln!("[FAIL] mavlink_telemetry step {}: actuator out of bounds", self.steps);
+                all_ok = false;
+                break;
+            }
+        }
+
+        (stream, n_frames, all_ok)
+    }
     /// 阶段 9：自由落体能量守恒测例。
     ///
     /// 关闭所有执行器（无推力），仅重力做功，验证物理引擎积分器 +

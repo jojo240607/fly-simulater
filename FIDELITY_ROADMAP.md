@@ -71,7 +71,7 @@
 | **P1** | Dryden 湍流风场 | 抗风场景真实化，成本低 | ✅ 已完成 |
 | **P1** | 地面效应（近地推力增强，标准增益曲线） | 近地悬停/着陆真实化，验证简单 | ✅ 已完成（标准 zhang/Phillips 增益 + 单调性） |
 | **P2** | 更多传感器（磁力计+气压计已做；空速计已做；VIO/RTK 待续） | 丰富 EKF 融合验证 | 部分完成 |
-| **P2** | 任务级逻辑（mission/路径）✅；MAVLink 待续 | 对标"能跑真机流程" | 部分完成 |
+| **P2** | 任务级逻辑（mission/路径）✅；MAVLink 遥测下行 ✅ | 对标"能跑真机流程" | 已完成 |
 | **P2** | 触地翻滚力矩（倾斜撞地产生滚转力矩） | 坠地姿态演化真实化 | ✅ 已完成（翻滚力矩 + 机体-地形接触；凸包/障碍碰撞待续） |
 | **P2** | 空间相关风场 + 阵风突风注入 | 机身不同部位风速不同 + 确定性突风 | ✅ 已完成（风切变廓线 + 空间相关场 + 1-cos 确定性突风） |
 | **P2** | 热气流（thermal）上升气流模型 | 滑翔/长航时场景真实化 | ✅ 已完成（高斯径向衰减 + 高度封顶 + 确定性水平漂移） |
@@ -435,7 +435,30 @@
   `/= cos(tilt)`），移动时机体倾斜 → 垂直推力下降 → 掉高；且 EKF 动态估计误差在
   持续移动目标下使姿态环振荡。故 `run_hover`/`run_hover_wind`（固定/近固定目标）
   稳定，但长距离移动跟随失控。**任务层据此可靠检测失败**（这正是其价值）。
-- 待续：MAVLink 对接；若需真路径跟随，需轨迹跟踪控制器（倾斜补偿 + 速度/加速度前馈）。
+- 待续（已做）：MAVLink 遥测下行见下「P2-2 续」。若需真路径跟随，需轨迹跟踪控制器
+  （倾斜补偿 + 速度/加速度前馈）。
+
+### P2-2 续：MAVLink 遥测下行链路 ✅ 完成
+
+- 目标：把仿真机体的 `VehicleState` 按标准 MAVLink v2 编码成遥测流，可被标准地面站
+  （QGC/PX4）解析——补齐差距清单 #8（"无标准消息协议 MAVLink"），对标"能跑真机流程"。
+- 实现（`fly-sim-core/src/mavlink.rs`）：
+  - `MavlinkBridge { sys_id, comp_id, seq, fb }`：维护帧序号，一拍编码 6 帧标准遥测
+    （HEARTBEAT / ATTITUDE / LOCAL_POSITION_NED / SYS_STATUS / VFR_HUD /
+    GLOBAL_POSITION_INT），字节级复用 `flyctrl-core` 既有 MAVLink v2 编码（CRC_EXTRA 兼容）。
+  - `MavlinkStreamParser`：增量式 v2 组帧器（逐字节喂入，字节流 → `Frame` 列表），
+    用于串口字节流场景，正确性与 `LoopbackLink::recv_frame` 同语义。
+  - `loopback_telemetry(stream)`：经 `LoopbackLink` 回环 + `flyctrl_core::comm::mavlink::decode`
+    （含 CRC_EXTRA 校验）解析回 `(msgid, payload)`，供自验证。
+- 实现（`fly-sim-core/src/sim.rs`）：`SimLoop::run_mavlink_telemetry(seconds, sys_id)
+  -> (stream, n_frames, all_ok)`：跑悬停并把每拍世界状态编码成完整遥测流返回。
+- 验证（`tests/mavlink_telemetry.rs` 2 项）：
+  - `mavlink_telemetry_roundtrips`：已知 `VehicleState` 编码后经标准 MAVLink 解码器回环，
+    6 帧全部解析成功（CRC_EXTRA 字节级兼容），msg_id 集合正确，ATTITUDE 的
+    roll/pitch/yaw、LOCAL_POSITION_NED 的 NED 位置、SYS_STATUS 健康位(0x1F) 与原始态一致。
+  - `mavlink_stream_parser_is_incremental`：逐字节喂入组帧仍得 6 帧（串口字节流语义）。
+- 注：本模块为 **host 侧遥测桥**（仿真/地面站联调）；嵌入式链路实现（UART/USB-CDC）
+  在 `flyctrl-core::comm::link::stm32f407` 占位，落地时接 joc-base HAL。
 
 ### P2-1：更多传感器（磁力计 + 气压计）✅ 部分完成
 - 实现（`fly-sim-core/src/sensor.rs`）：
