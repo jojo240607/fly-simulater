@@ -27,6 +27,7 @@ fn make_loop() -> SimLoop<PhySdkWorld> {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     )
 }
 
@@ -66,6 +67,7 @@ fn sil_wind_hover_holds_altitude() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let ok = loop_sim.run_hover_wind(15.0);
     // 注：默认 PID 抗风上限 ~0.3m/s，强风会饱和翻滚，本测例不验证"抗风位置保持"，

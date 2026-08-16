@@ -19,7 +19,7 @@ use flyctrl_core::vehicle::{
 };
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 
-use crate::physics::{ContactInfo, ContactModel, RigidBodyWorld};
+use crate::physics::{ContactInfo, ContactModel, Obstacle, RigidBodyWorld};
 use crate::wind::{WindField, WindVec};
 use crate::sensor::{SensorConfig, SensorModel};
 
@@ -115,6 +115,9 @@ pub struct QuadrotorPlant<W> {
     /// P1-2：地面接触模型。`None` 表示无地面（真空 / 自由落体能量守恒场景）。
     /// `Some` 时每步经 `resolve_ground_contact` 惩罚模型解算接触冲量（不注入原生地面刚体）。
     contact: Option<ContactModel>,
+    /// P1-2 续：静态障碍列表（碰撞体）。非空时每步经 `resolve_obstacle_contact`
+    /// 惩罚模型解算碰撞冲量。机体碰撞球半径取螺旋桨外周包络（≈1.2×臂长）。
+    obstacles: Vec<Obstacle>,
     /// 最近一次接触解算结果（供日志 / 调试；`None` 表示本步未接触）。
     last_contact: Option<ContactInfo>,
     /// P0-2：动量理论诱导速度（m/s），含垂直气流耦合；每步在 step() 内刷新。
@@ -133,6 +136,7 @@ where
     /// `sensor_cfg`：传感器模型配置（阶段 4；默认零噪声保持场景 PASS）。
     /// `contact`：P1-2 地面接触模型。`Some` 时向世界注入静态地面盒并每步解算接触；
     ///   `None` 表示无地面（真空 / 能量守恒自由落体场景）。
+    /// `obstacles`：P1-2 续静态障碍列表（碰撞体）。非空时每步解算碰撞冲量。
     pub fn new(
         world: W,
         cfg: &VehicleConfig,
@@ -140,6 +144,7 @@ where
         wind: Option<WindField>,
         sensor_cfg: SensorConfig,
         contact: Option<ContactModel>,
+        obstacles: Vec<Obstacle>,
     ) -> Self {
         let mut world = world;
         // 注：P1-2 地面接触完全由 `resolve_ground_contact` 惩罚模型处理（读取机体位姿、
@@ -199,6 +204,7 @@ where
             wind,
             sensor: SensorModel::new(sensor_cfg, dt),
             contact,
+            obstacles,
             last_contact: None,
             induced_vel: 0.0,
             last_tau_body: [0.0; 3],
@@ -211,6 +217,14 @@ where
     /// - `None`：关闭地面接触解算（真空场景）。
     pub fn set_contact(&mut self, contact: Option<ContactModel>) {
         self.contact = contact;
+    }
+
+    /// P1-2 续：设置 / 清除静态障碍列表（纯惩罚模型，不涉及世界刚体增删）。
+    ///
+    /// - `obs` 非空：启用障碍碰撞解算（`resolve_obstacle_contact` 每步施加冲量）。
+    /// - `obs` 空：关闭障碍碰撞解算。
+    pub fn set_obstacles(&mut self, obs: Vec<Obstacle>) {
+        self.obstacles = obs;
     }
 
     /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。
@@ -392,6 +406,27 @@ where
             }
             None => None,
         };
+
+        // ---- P1-2 续：障碍碰撞解算（惩罚模型，与地面接触同源）----
+        // 障碍列表非空时，每步经 `resolve_obstacle_contact` 解算最深穿透障碍并注入冲量。
+        // 仅当本步未触地（避免地面/障碍双接触叠加冲量）且障碍非空时解算。
+        if !self.obstacles.is_empty() {
+            let body_radius = 1.2 * self.cfg.arm_length as f64; // 螺旋桨外周包络
+            let cm = self.contact.clone().unwrap_or_default();
+            let info = crate::physics::resolve_obstacle_contact(
+                &mut self.world,
+                self.body_id,
+                self.cfg.mass as f64,
+                &self.obstacles,
+                body_radius,
+                &cm,
+                self.dt,
+            );
+            // 障碍接触与地面接触取"或"：任一接触即标记 last_contact（优先障碍，更显著）。
+            if info.touching {
+                self.last_contact = Some(info);
+            }
+        }
     }
 
     /// 阶段 2b：机体坐标系气动阻力（含动量理论诱导阻力）。

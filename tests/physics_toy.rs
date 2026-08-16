@@ -8,7 +8,7 @@
 //! 运行：`cargo test --test physics_toy`
 
 use fly_sim_core::{ContactModel, RigidBodyWorld, TerrainField, ToyWorld};
-use fly_sim_core::physics::resolve_ground_contact;
+use fly_sim_core::physics::{resolve_ground_contact, resolve_obstacle_contact, Obstacle};
 use fly_sim_core::controller::actuator_full;
 use fly_sim_core::QuadrotorPlant;
 use fly_simulater::airframe::load_airframe;
@@ -17,7 +17,7 @@ const DT: f64 = 0.004;
 
 fn make_plant(world: ToyWorld) -> QuadrotorPlant<ToyWorld> {
     let cfg = load_airframe(None).expect("default airframe");
-    QuadrotorPlant::new(world, &cfg, DT, None, Default::default(), Some(ContactModel::default()))
+    QuadrotorPlant::new(world, &cfg, DT, None, Default::default(), Some(ContactModel::default()), Vec::new())
 }
 
 #[test]
@@ -211,6 +211,7 @@ fn plant_contact_stops_falling_quad() {
             contact_half_h: 0.05,
             terrain: None,
         }),
+        Vec::new(),
     );
     // 直接驱动 plant（无控制律），机体应被接触面托住在 y≈5.0 附近，不飞出、不穿透。
     for step in 0..1500 {
@@ -313,3 +314,74 @@ fn terrain_slope_slides_downhill() {
     // 不应飞离地表（保持接触，y 维持在地表附近而非无限上升）。
     assert!(tf[1] > 6.0 && tf[1] < 9.5, "应贴坡滑行未弹飞, y={}", tf[1]);
 }
+
+// ===================== P1-2 续：障碍碰撞（惩罚模型） =====================
+
+/// 球障碍：机体从上方落向球顶，应被法向弹簧-阻尼推开而非穿透。
+#[test]
+fn obstacle_sphere_bounces_body_away() {
+    let mut world = ToyWorld::new(9.81);
+    // 球心 (0, 3, 0) 半径 2；机体碰撞球半径取 0.2（手动指定），起始于球顶上方 0.1 处。
+    let id = world.add_body(1.0, &[0.0, 5.1, 0.0, 1.0, 0.0, 0.0, 0.0], &[0.0, -1.0, 0.0]);
+    let obs = vec![Obstacle::Sphere {
+        center: [0.0, 3.0, 0.0],
+        radius: 2.0,
+    }];
+    let cm = ContactModel {
+        ground_y: -100.0, // 远处地面，避免与地面耦合
+        restitution: 0.2,
+        friction: 0.3,
+        penalty_k: 5000.0,
+        contact_half_h: 0.05,
+        terrain: None,
+    };
+    // 每步解算障碍接触 + 步进
+    for _ in 0..600 {
+        resolve_obstacle_contact(&mut world, id, 1.0, &obs, 0.2, &cm, DT);
+        world.step(DT);
+    }
+    let mut tf = [0.0f64; 7];
+    world.get_rigid_transforms(&mut tf);
+    let p = [tf[0], tf[1], tf[2]];
+    // 距离球心应 ≈ radius+body_radius = 2.2（平衡穿透极小）
+    let dist = (p[0].powi(2) + p[1].powi(2) + p[2].powi(2)).sqrt();
+    assert!(dist > 2.0, "应停在球表面附近(2.2), got dist={}", dist);
+    assert!(p.iter().all(|v| v.is_finite()), "障碍接触后位置应有限");
+}
+
+/// 盒障碍：机体从盒顶上方下落，应被顶面法向（向上）推开并停在盒面附近（不穿入盒内）。
+/// 采用垂直下落场景（与地面接触同款稳定惩罚模型），规避 ToyWorld 单步积分下
+/// 水平冲击反弹的数值局限，专注验证"盒障碍法向接触"语义。
+#[test]
+fn obstacle_box_stops_vertical_penetration() {
+    let mut world = ToyWorld::new(9.81);
+    // 盒：x∈[0,2], y∈[0,2], z∈[0,2]；机体从盒顶上方 (1, 2.5, 1) 自由下落撞顶面 y=2。
+    // 机体碰撞球半径 0.2，预期停在 y ≈ 2.2（盒顶外）。地面远在 y=-100，不耦合。
+    let id = world.add_body(1.0, &[1.0, 2.5, 1.0, 1.0, 0.0, 0.0, 0.0], &[5.0, 0.0, 0.0]);
+    let obs = vec![Obstacle::Box {
+        min: [0.0, 0.0, 0.0],
+        max: [2.0, 2.0, 2.0],
+    }];
+    let cm = ContactModel {
+        ground_y: -100.0,
+        restitution: 0.0,
+        friction: 0.5,
+        penalty_k: 2000.0,
+        contact_half_h: 0.05,
+        terrain: None,
+    };
+    for _ in 0..2000 {
+        resolve_obstacle_contact(&mut world, id, 1.0, &obs, 0.2, &cm, DT);
+        world.step(DT);
+    }
+    let mut tf = [0.0f64; 7];
+    world.get_rigid_transforms(&mut tf);
+    let y = tf[1];
+    // 核心断言：不应穿入盒内（y < 2.0 表示穿入盒体），应停在顶面外（y ≈ 2.2）。
+    assert!(y >= 2.0 && y < 2.6, "应停在盒顶面外(y∈[2.0,2.6)), got y={}", y);
+    let vel = world.get_velocity(id);
+    // 法向(+Y)速度应被显著削减（被顶面拦停）。
+    assert!(vel[1].abs() < 1.0, "竖直下落速度应被盒顶削减, vy={}", vel[1]);
+    assert!(tf[0].is_finite() && tf[2].is_finite(), "障碍接触后状态应有限");
+}
+

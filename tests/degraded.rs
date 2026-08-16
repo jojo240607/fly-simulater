@@ -29,6 +29,7 @@ fn make_ctrl() -> FlyController<PhySdkWorld> {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     )
 }
 

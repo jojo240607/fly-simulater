@@ -70,6 +70,7 @@ fn run_pid_with_offset(wind_speed: f64, off_n: f64, off_e: f64) -> (bool, f64, f
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(off_n as f32, off_e as f32, -5.0);
     let total = (10.0 / DT) as u64;
@@ -163,6 +164,7 @@ fn run_pid_gains(
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(off_n as f32, off_e as f32, -5.0);
     let total = (secs / DT) as u64;
@@ -205,6 +207,7 @@ fn trace_north_lowgain() {
             SensorConfig::default(),
             ControllerKind::Pid,
             Some(ContactModel::default()),
+            Vec::new(),
         );
         let sp = hover_setpoint(2.0, 0.0, -5.0);
         let total = (8.0 / DT) as u64;
@@ -258,6 +261,7 @@ fn hover_stability() {
             SensorConfig::default(),
             ControllerKind::Pid,
             Some(ContactModel::default()),
+            Vec::new(),
         );
         let sp = hover_setpoint(0.0, 0.0, -5.0);
         let mut max_t = 0.0f64;
@@ -288,6 +292,7 @@ fn north_step_direction() {    // 无风、设定点北偏 2m（NED north=+2）�
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(2.0, 0.0, -5.0);
     let total = (8.0 / DT) as u64;
@@ -327,6 +332,7 @@ fn east_controller_sign() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(0.0, 2.0, -5.0);
     for i in 0..400 {
@@ -355,6 +361,7 @@ fn north_controller_sign() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(2.0, 0.0, -5.0);
     for i in 0..400 {
@@ -385,6 +392,7 @@ fn east_step_direction() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(0.0, 2.0, -5.0);
     let total = (8.0 / DT) as u64;
@@ -417,6 +425,7 @@ fn probe_tau_direct() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(0.0, 0.0, -5.0);
     for _ in 0..(1.0 / DT) as u64 {
@@ -451,6 +460,7 @@ fn probe_translate_back() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(0.0, 0.0, -5.0);
     for _ in 0..(1.0 / DT) as u64 {
@@ -481,6 +491,7 @@ fn probe_translate_front() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(0.0, 0.0, -5.0);
     for _ in 0..(1.0 / DT) as u64 {
@@ -511,6 +522,7 @@ fn probe_physics_pitch() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(0.0, 0.0, -5.0);
     for _ in 0..(1.0 / DT) as u64 {
@@ -547,6 +559,7 @@ fn probe_physics_roll() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let sp = hover_setpoint(0.0, 0.0, -5.0);
     for _ in 0..(1.0 / DT) as u64 {
@@ -594,6 +607,7 @@ fn probe_physics_torque() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     );
     // 先稳态悬停 1 秒
     let sp = hover_setpoint(0.0, 0.0, -5.0);

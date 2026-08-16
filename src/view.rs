@@ -77,6 +77,7 @@ pub fn run_view(
             sensor_cfg,
             kind,
             Some(ContactModel::default()),
+            Vec::new(),
         );
         loop_sim.set_motor_eff(eff_mask);
         loop_sim.set_on_frame(Box::new(move |st: &VehicleState, cmd: ActuatorCmd| {

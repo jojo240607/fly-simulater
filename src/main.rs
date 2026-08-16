@@ -266,6 +266,7 @@ fn main() {
         sensor_cfg,
         cli.controller,
         Some(fly_sim_core::physics::ContactModel::default()),
+        Vec::new(),
     );
 
     // 阶段 6：CSV 日志（经 on_step 回调注入；runner 决定如何存储）。
@@ -410,6 +411,7 @@ fn main() {
                 sensor_cfg_mav,
                 cli.controller,
                 None,
+                Vec::new(),
             );
             fc.set_motor_eff(eff_mask);
 

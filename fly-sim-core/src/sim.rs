@@ -12,7 +12,7 @@ use flyctrl_core::units::{Meter, MeterPerSecond, Radian};
 use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
 
 use crate::controller::{hover_setpoint, FlyController};
-use crate::physics::{ContactModel, RigidBodyWorld};
+use crate::physics::{ContactModel, Obstacle, RigidBodyWorld};
 use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
 use crate::sensor::SensorConfig;
@@ -58,9 +58,10 @@ where
         sensor_cfg: SensorConfig,
         kind: ControllerKind,
         contact: Option<ContactModel>,
+        obstacles: Vec<Obstacle>,
     ) -> Self {
         Self {
-            ctrl: FlyController::new(world, cfg, dt, wind, sensor_cfg, kind, contact),
+            ctrl: FlyController::new(world, cfg, dt, wind, sensor_cfg, kind, contact, obstacles),
             cfg: cfg.clone(),
             dt,
             steps: 0,

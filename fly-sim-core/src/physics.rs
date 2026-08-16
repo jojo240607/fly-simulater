@@ -179,14 +179,208 @@ fn terrain_surface_y(m: &ContactModel, x: f64, z: f64) -> f64 {
 /// 最近一次接触解算结果（供日志 / 调试）。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContactInfo {
-    /// 本步是否接触地面。
+    /// 本步是否接触地面（或障碍）。
     pub touching: bool,
-    /// 穿透深度（>0 表示陷入地面）。
+    /// 穿透深度（>0 表示陷入）。
     pub penetration: f64,
-    /// 法向接触力（N，向上为正）。
+    /// 法向接触力（N，沿法向离开障碍为正）。
     pub normal_force: f64,
     /// 切向摩擦冲量大小（N·s）。
     pub friction_impulse: f64,
+    /// 接触法向（单位向量，引擎系 Y-up，指向离开障碍）。
+    pub normal: [f64; 3],
+    /// 接触点（引擎系世界坐标）。
+    pub point: [f64; 3],
+    /// 本步注入的接触冲量（世界系 3 向量，N·s）。
+    pub impulse: [f64; 3],
+}
+
+// ============================================================ 障碍物（P1-2 续：障碍碰撞）
+
+/// 静态障碍物（碰撞体）。在引擎世界坐标系（Y-up: x=北, y=上, z=-东）中描述。
+///
+/// 障碍本身静态，碰撞由**惩罚弹簧-阻尼模型**解算（不向物理世界注入原生刚体），
+/// 与 `ContactModel` 地面接触保持一致的"惩罚模型"设计哲学：静态体只在解算时
+/// 读取位姿并施加法向/切向冲量，绝不改变世界刚体拓扑。
+#[derive(Clone, Debug)]
+pub enum Obstacle {
+    /// 球：中心 (引擎世界系) + 半径（m）。
+    Sphere { center: [f64; 3], radius: f64 },
+    /// 轴对齐盒（AABB）：最小角 (x,y,z) + 最大角 (x,y,z)。
+    Box { min: [f64; 3], max: [f64; 3] },
+}
+
+impl Obstacle {
+    /// 返回机体中心 `p` 到障碍的**最近接触点**（引擎世界系）与碰撞法向
+    /// （指向机体、即离开障碍的方向，单位向量）。
+    ///
+    /// - 球：法向即径向 `(p-center)/|p-center|`；接触点取 `p` 本身（球用中心作接触点）。
+    /// - 盒：最近点夹取至盒表面/体内；体外法向指向最近面，体内法向取"最近面"方向以推开。
+    fn closest_point_and_normal(&self, p: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+        match self {
+            Obstacle::Sphere { center, radius: _ } => {
+                let mut d = [p[0] - center[0], p[1] - center[1], p[2] - center[2]];
+                let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let n = if dist > 1e-9 {
+                    [d[0] / dist, d[1] / dist, d[2] / dist]
+                } else {
+                    [0.0, 1.0, 0.0] // 退化：从球心向上推
+                };
+                (p, n)
+            }
+            Obstacle::Box { min, max } => {
+                let cx = p[0].clamp(min[0], max[0]);
+                let cy = p[1].clamp(min[1], max[1]);
+                let cz = p[2].clamp(min[2], max[2]);
+                let cp = [cx, cy, cz];
+                let inside = p[0] >= min[0] && p[0] <= max[0]
+                    && p[1] >= min[1] && p[1] <= max[1]
+                    && p[2] >= min[2] && p[2] <= max[2];
+                let mut n = [0.0f64; 3];
+                if inside {
+                    // 朝最近面方向推：取各面距离最小值
+                    let dpx0 = p[0] - min[0];
+                    let dpx1 = max[0] - p[0];
+                    let dpy0 = p[1] - min[1];
+                    let dpy1 = max[1] - p[1];
+                    let dpz0 = p[2] - min[2];
+                    let dpz1 = max[2] - p[2];
+                    let mut best = (dpx0, 0usize);
+                    if dpx1 < best.0 { best = (dpx1, 1); }
+                    if dpy0 < best.0 { best = (dpy0, 2); }
+                    if dpy1 < best.0 { best = (dpy1, 3); }
+                    if dpz0 < best.0 { best = (dpz0, 4); }
+                    if dpz1 < best.0 { best = (dpz1, 5); }
+                    match best.1 {
+                        0 => n[0] = -1.0,
+                        1 => n[0] = 1.0,
+                        2 => n[1] = -1.0,
+                        3 => n[1] = 1.0,
+                        4 => n[2] = -1.0,
+                        _ => n[2] = 1.0,
+                    }
+                    (cp, n)
+                } else {
+                    let d = [p[0] - cx, p[1] - cy, p[2] - cz];
+                    let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                    if dist > 1e-9 {
+                        n = [d[0] / dist, d[1] / dist, d[2] / dist];
+                    } else {
+                        n = [0.0, 1.0, 0.0];
+                    }
+                    (cp, n)
+                }
+            }
+        }
+    }
+}
+
+/// 解算刚体 `id` 与一组静态障碍的碰撞，把冲量经 `world.apply_impulse` 注入。
+///
+/// 采用与地面接触相同的**惩罚弹簧-阻尼 + 库仑摩擦**模型（复用 `ContactModel` 的
+/// `penalty_k` / `restitution` / `friction` 参数）。`body_radius` 为机体碰撞球半径
+/// （螺旋桨外周包络），用于把"机体中心 vs 障碍"的间隙转换为"表面 vs 表面"接触。
+///
+/// 当存在多个障碍同时穿透时，取**最深穿透**者解算（单点接触近似，够用且稳定）。
+/// 返回接触信息；未碰撞时 `touching=false`。
+pub fn resolve_obstacle_contact<W: RigidBodyWorld>(
+    world: &mut W,
+    id: i64,
+    mass: f64,
+    obstacles: &[Obstacle],
+    body_radius: f64,
+    cm: &ContactModel,
+    dt: f64,
+) -> ContactInfo {
+    let mut tf = [0.0f64; 7];
+    world.get_body_transform(id, &mut tf);
+    let p = [tf[0], tf[1], tf[2]];
+    let vel = world.get_velocity(id);
+
+    let mut best: Option<([f64; 3], [f64; 3], f64)> = None; // (接触点, 法向, 穿透深度)
+    for obs in obstacles {
+        let (cp, n) = obs.closest_point_and_normal(p);
+        // 表面-表面间隙：机体碰撞球中心到障碍"表面点"的距离，减去机体半径。
+        let gap = match obs {
+            Obstacle::Sphere { center, radius } => {
+                let d = [p[0] - center[0], p[1] - center[1], p[2] - center[2]];
+                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - (radius + body_radius)
+            }
+            Obstacle::Box { .. } => {
+                let d = [p[0] - cp[0], p[1] - cp[1], p[2] - cp[2]];
+                let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                dist - body_radius
+            }
+        };
+        let penetration = -gap; // >0 = 穿透
+        if penetration > 0.0 {
+            match best {
+                Some((_, _, best_pen)) if best_pen >= penetration => {}
+                _ => best = Some((cp, n, penetration)),
+            }
+        }
+    }
+
+    match best {
+        Some((cp, n, penetration)) => {
+            // 法向速度（沿 n 正=远离障碍）
+            let vn = vel[0] * n[0] + vel[1] * n[1] + vel[2] * n[2];
+            // 阻尼比来自恢复系数（与地面接触同推导）
+            let zeta = if cm.restitution >= 1.0 {
+                0.0
+            } else {
+                (-cm.restitution.ln()) / (2.0 * std::f64::consts::PI)
+            }
+            .clamp(0.0, 1.0);
+            let c_crit = 2.0 * (cm.penalty_k * mass).sqrt();
+            let c_n = zeta * c_crit;
+            // 法向冲量（弹簧 + 阻尼，只在接近时吸收），只能推不能拉
+            let f_spring = cm.penalty_k * penetration;
+            let f_damp = -c_n * vn.min(0.0);
+            let jn = (f_spring + f_damp) * dt;
+            let jn = jn.max(0.0);
+
+            let mut impulse = [0.0f64; 3];
+            for i in 0..3 {
+                impulse[i] = n[i] * jn;
+            }
+            // 切向摩擦（库仑）：抵消切向速度，预算 = μ·法向力冲量
+            let vn_vec = [n[0] * vn, n[1] * vn, n[2] * vn];
+            let vt = [vel[0] - vn_vec[0], vel[1] - vn_vec[1], vel[2] - vn_vec[2]];
+            let vt_mag = (vt[0] * vt[0] + vt[1] * vt[1] + vt[2] * vt[2]).sqrt();
+            if vt_mag > 1e-6 {
+                let budget = cm.friction * jn;
+                let scale = (budget / (mass * vt_mag)).min(1.0);
+                for i in 0..3 {
+                    impulse[i] -= scale * mass * vt[i];
+                }
+            }
+            world.apply_impulse(id, &impulse, 0);
+
+            let friction_impulse =
+                (impulse[0] * impulse[0] + impulse[1] * impulse[1] + impulse[2] * impulse[2])
+                    .sqrt()
+                    - jn.max(0.0);
+            ContactInfo {
+                touching: true,
+                penetration,
+                normal_force: f_spring + f_damp,
+                friction_impulse: friction_impulse.max(0.0),
+                normal: n,
+                point: cp,
+                impulse,
+            }
+        }
+        None => ContactInfo {
+            touching: false,
+            penetration: 0.0,
+            normal_force: 0.0,
+            friction_impulse: 0.0,
+            normal: [0.0; 3],
+            point: [0.0; 3],
+            impulse: [0.0; 3],
+        },
+    }
 }
 
 /// 解算刚体 `id` 与（可能带地形的）地面的接触，并把冲量经 `world.apply_impulse` 注入。
@@ -269,6 +463,9 @@ pub fn resolve_ground_contact<W: RigidBodyWorld>(
         penetration: pen,
         normal_force: f_spring + f_damp,
         friction_impulse: (impulse[0] * impulse[0] + impulse[2] * impulse[2]).sqrt(),
+        normal: n,
+        point: [pos[0], contact_y, pos[2]],
+        impulse,
     }
 }
 

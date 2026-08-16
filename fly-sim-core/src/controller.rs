@@ -15,7 +15,7 @@ use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, V
 
 use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
-use crate::physics::{ContactInfo, ContactModel, RigidBodyWorld};
+use crate::physics::{ContactInfo, ContactModel, Obstacle, RigidBodyWorld};
 use crate::wind::WindField;
 use crate::sensor::SensorConfig;
 
@@ -137,6 +137,7 @@ where
         sensor_cfg: SensorConfig,
         kind: ControllerKind,
         contact: Option<ContactModel>,
+        obstacles: Vec<Obstacle>,
     ) -> Self {
         let ekf = EkfEstimator::default_quad();
         let dt_s = Second(dt as f32);
@@ -156,7 +157,7 @@ where
             }
         };
 
-        let plant = QuadrotorPlant::new(world, cfg, dt, wind, sensor_cfg, contact);
+        let plant = QuadrotorPlant::new(world, cfg, dt, wind, sensor_cfg, contact, obstacles);
 
         let imu = SimImu {
             last: ImuSample {
@@ -298,6 +299,11 @@ where
     /// P1-2：运行时设置/清除地面接触（自由落体能量守恒场景用 None 关闭地面）。
     pub fn plant_set_contact(&mut self, contact: Option<ContactModel>) {
         self.plant.set_contact(contact);
+    }
+
+    /// P1-2 续：运行时设置/清除静态障碍列表。
+    pub fn plant_set_obstacles(&mut self, obstacles: Vec<Obstacle>) {
+        self.plant.set_obstacles(obstacles);
     }
 
     /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。

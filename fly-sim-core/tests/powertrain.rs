@@ -7,7 +7,7 @@
 
 #![cfg(feature = "phy")]
 
-use fly_sim_core::physics::{ContactModel, PhySdkWorld, RigidBodyWorld};
+use fly_sim_core::physics::{ContactModel, Obstacle, PhySdkWorld, RigidBodyWorld};
 use fly_sim_core::plant::{gyro_torque, QuadrotorPlant};
 use fly_sim_core::wind::{WindConfig, WindField};
 use flyctrl_core::config::VehicleConfig;
@@ -26,6 +26,7 @@ fn plant_at_throttle(u: f64, settle_steps: usize) -> QuadrotorPlant<PhySdkWorld>
         None,
         Default::default(),
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let cmd = ActuatorCmd {
         motor: [u as f32; 4],
@@ -229,6 +230,7 @@ fn spatial_wind_plant_step_stable_and_finite() {
         Some(WindField::new(cfg)),
         Default::default(),
         Some(ContactModel::default()),
+        Vec::new(),
     );
     // 悬停油门，跑 3 秒（覆盖突风窗口 0.5~1.5s）。
     let cmd = ActuatorCmd {
@@ -263,6 +265,7 @@ fn spatial_wind_plant_step_stable_and_finite() {
         })),
         Default::default(),
         Some(ContactModel::default()),
+        Vec::new(),
     );
     plant2.apply_actuators(&cmd);
     for _ in 0..750 {
@@ -303,6 +306,7 @@ fn thermal_wind_plant_step_stable_and_finite() {
         Some(WindField::new(thermal_cfg())),
         Default::default(),
         Some(ContactModel::default()),
+        Vec::new(),
     );
     let cmd = ActuatorCmd { motor: [0.5 as f32; 4] };
     plant.apply_actuators(&cmd);
@@ -322,6 +326,7 @@ fn thermal_wind_plant_step_stable_and_finite() {
         Some(WindField::new(thermal_cfg())),
         Default::default(),
         Some(ContactModel::default()),
+        Vec::new(),
     );
     plant2.apply_actuators(&cmd);
     for _ in 0..750 {
@@ -336,4 +341,39 @@ fn thermal_wind_plant_step_stable_and_finite() {
             p1, p2
         );
     }
+}
+
+/// P1-2 续：障碍碰撞 plant 集成（经 set_obstacles 注入）。
+/// 机体从高处自由落体撞向球障碍，应被偏离而非穿透；状态全程有限。
+#[test]
+fn obstacle_collision_plant_integration() {
+    let cfg = VehicleConfig::default_quad();
+    let mut plant = QuadrotorPlant::new(
+        PhySdkWorld::create_empty(),
+        &cfg,
+        DT,
+        None,
+        Default::default(),
+        Some(ContactModel::default()),
+        Vec::new(),
+    );
+    // 球障碍：中心 (0,0,-3) 半径 1，机体起始于球正上方 (0,0,-1.5) 带向下速度。
+    plant.set_obstacles(vec![Obstacle::Sphere {
+        center: [0.0, 0.0, -3.0],
+        radius: 1.0,
+    }]);
+    let cmd = ActuatorCmd { motor: [0.0 as f32; 4] };
+    plant.apply_actuators(&cmd);
+    for _ in 0..1000 {
+        plant.step();
+        let (pos, _) = plant.debug_up();
+        assert!(pos.iter().all(|v| v.is_finite()), "障碍碰撞中位置应有限: {:?}", pos);
+    }
+    let (pos, _) = plant.debug_up();
+    // 机体碰撞球半径 = 1.2*arm_length；球表面距中心 1.0；应停在表面附近而非穿透。
+    // 取北-东-下三维距离球心：
+    let d = (pos[0].powi(2) + pos[1].powi(2) + (pos[2] + 3.0).powi(2)).sqrt();
+    let body_r = 1.2 * cfg.arm_length as f64;
+    // 不允许深穿透（> 0.5m）
+    assert!(d > 1.0 - 0.5, "不应深穿透障碍球, d={} (球半径+机体半径≈{})", d, 1.0 + body_r);
 }

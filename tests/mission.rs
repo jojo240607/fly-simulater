@@ -30,6 +30,7 @@ fn make_loop() -> SimLoop<PhySdkWorld> {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
+        Vec::new(),
     )
 }
 

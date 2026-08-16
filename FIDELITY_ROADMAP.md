@@ -67,6 +67,7 @@
 | **P0** | 螺旋桨动量/叶素理论（推力∝ω² + 滑流 + 陀螺效应） | 大机动/前飞真实性的根基 | ✅ 已完成 |
 | **P1** | 在线控制分配重构（冗余容错） | 直接回应"退化不可恢复"痛点 | ✅ 已完成（实现+独立验证） |
 | **P1** | 碰撞/接触（着陆/撞击） | 解锁坠落与地形场景 | ✅ 已完成（平面+地形高度图惩罚接触；多刚体待续） |
+| **P1** | 障碍碰撞（静态球/盒） | 解锁避障/撞击场景 | ✅ 已完成（Obstacle 枚举 + resolve_obstacle_contact 惩罚模型；多刚体待续） |
 | **P1** | Dryden 湍流风场 | 抗风场景真实化，成本低 | ✅ 已完成 |
 | **P1** | 地面效应（近地推力增强，标准增益曲线） | 近地悬停/着陆真实化，验证简单 | ✅ 已完成（标准 zhang/Phillips 增益 + 单调性） |
 | **P2** | 更多传感器（磁力计+气压计已做；空速计已做；VIO/RTK 待续） | 丰富 EKF 融合验证 | 部分完成 |
@@ -176,6 +177,36 @@
     稳定拦停在地面附近（全程状态有限、末态竖直速度趋零），`run_drop` 场景同步提供。
   - 全量测试 `--features phy` 与默认构建均通过。
 - **下一步（未做）**：多刚体/凸包碰撞、机体间/障碍物碰撞；地形高度图已完成（见 `TerrainField` + `terrain` 场景）。
+
+### P1-2 续：障碍碰撞（静态球/盒）✅ 完成
+
+- 目标：在 P1-2 地面接触的同款"惩罚模型"哲学下，支持静态障碍物（球/轴对齐盒）碰撞，
+  解锁避障/撞击场景，且**不向物理世界注入原生刚体**（避免与引擎原生碰撞求解器冲突）。
+- 实现（`fly-sim-core/src/physics.rs`）：
+  - `Obstacle` 枚举：`Sphere { center:[f64;3], radius:f64 }` + `Box { min:[f64;3], max:[f64;3] }`
+    （引擎世界系 Y-up：x=北，y=上，z=-东）。`closest_point_and_normal(p)` 返回机体中心 `p`
+    到障碍的最近接触点与碰撞法向（指向机体、离开障碍的单位向量；盒内取最近面方向以推开）。
+  - `resolve_obstacle_contact(world, id, mass, obstacles, body_radius, cm, dt) -> ContactInfo`：
+    - `body_radius` 取螺旋桨外周包络（plant 层默认 `1.2·arm_length`），把"中心 vs 障碍"间隙
+      转为"表面 vs 表面"接触。
+    - 球：间隙 `= |p-center| - (radius+body_radius)`；盒：间隙 `= |p-cp| - body_radius`。
+    - 取**最深穿透**障碍解算（单点接触近似，稳定）。法向冲量用与地面接触同款
+      `ζ=-ln(e)/(2π)` → `c_crit=2√(k·m)` → `jn=(k·pen - c_n·v_n⁺)·dt`（仅在接近时，`vn<0`）。
+    - 切向摩擦（库仑）：预算 `μ·jn`，抵消切向速度（`scale = min(1, budget/(m·|vt|))`）。
+    - 复用 `ContactInfo`（已扩展 `normal`/`point`/`impulse` 字段）返回接触信息。
+- 接入（`fly-sim-core/src/plant.rs`）：`QuadrotorPlant` 持有 `Vec<Obstacle>`，`new` 增加 `obstacles`
+  参数、新增 `set_obstacles(...)`；每步 `world.step` 后、地面接触解算之后调用
+  `resolve_obstacle_contact`（仅当障碍非空）。障碍接触与地面接触取"或"（`last_contact` 优先障碍）。
+  同步 `SimLoop::new` / `FlyController::new` 透传 `obstacles`（默认 `Vec::new()`，零回归）。
+- 验证：
+  - `tests/physics_toy.rs` 2 项（ToyWorld 替身）：`obstacle_sphere_bounces_body_away`
+    （球顶下落被推离，停在球表面附近）、`obstacle_box_stops_horizontal_penetration`
+    （水平冲撞盒面被法向推开、水平速度削减，不穿入盒内）。
+  - `tests/powertrain.rs` 1 项：`obstacle_collision_plant_integration`（经 `set_obstacles`
+    注入球障碍，1000 步自由下落后状态有限且未深穿透）。
+  - 全量 `--features phy` 与默认构建均通过。
+- **下一步（未做）**：多障碍同时深穿透的精确多接触解算；凸包/动态障碍；障碍反射到传感器
+  （如避障雷达/视觉失效）。障碍碰撞与避障控制器尚未闭环联动。
 
 ### P2-2：任务级逻辑（waypoint 路径跟随）✅ 框架完成
 - 实现（`fly-sim-core/src/sim.rs`）：`run_mission(waypoints, cruise_v) -> MissionResult`

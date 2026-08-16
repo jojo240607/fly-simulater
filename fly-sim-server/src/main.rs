@@ -118,6 +118,7 @@ impl SimDriver {
             self.sensor_cfg.clone(),
             kind,
             Some(ContactModel::default()),
+            Vec::new(),
         );
         // 故障注入
         if let Some(m) = c.fail_motor {
