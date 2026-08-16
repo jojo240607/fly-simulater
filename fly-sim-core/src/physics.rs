@@ -355,6 +355,102 @@ impl Obstacle {
             }
         }
     }
+
+    /// 从 `origin` 沿单位方向 `dir` 发射一条射线，返回射中本障碍的最近正向距离（m）。
+    ///
+    /// 只返回 `t>0` 且 `t<=max_range` 的最近命中；未命中返回 `None`。
+    /// - 球：解析射线-球求交（二次方程）。
+    /// - 盒：slab 法（对各轴求进入/退出 t，取最大进入 t）。
+    /// - 凸包：递归取各子部件的最近命中。
+    fn ray_hit(&self, origin: [f64; 3], dir: [f64; 3], max_range: f64) -> Option<f64> {
+        let hit = match self {
+            Obstacle::Sphere { center, radius } => {
+                // |origin + t*dir - center|^2 = r^2
+                let oc = [origin[0] - center[0], origin[1] - center[1], origin[2] - center[2]];
+                let b = oc[0] * dir[0] + oc[1] * dir[1] + oc[2] * dir[2];
+                let c = oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - radius * radius;
+                let disc = b * b - c; // a = dir·dir = 1
+                if disc < 0.0 {
+                    return None;
+                }
+                let sq = disc.sqrt();
+                let t1 = -b - sq;
+                let t2 = -b + sq;
+                if t1 > 1e-6 {
+                    Some(t1)
+                } else if t2 > 1e-6 {
+                    Some(t2) // 起点在球内：从近端出
+                } else {
+                    None
+                }
+            }
+            Obstacle::Box { min, max } => {
+                // slab 法：tmin/tmax 各轴夹取
+                let mut tmin = -f64::INFINITY;
+                let mut tmax = f64::INFINITY;
+                for i in 0..3 {
+                    if dir[i].abs() < 1e-9 {
+                        if origin[i] < min[i] || origin[i] > max[i] {
+                            return None; // 平行且在外侧
+                        }
+                    } else {
+                        let inv = 1.0 / dir[i];
+                        let t1 = (min[i] - origin[i]) * inv;
+                        let t2 = (max[i] - origin[i]) * inv;
+                        let (t_enter, t_exit) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                        if t_enter > tmin {
+                            tmin = t_enter;
+                        }
+                        if t_exit < tmax {
+                            tmax = t_exit;
+                        }
+                        if tmin > tmax {
+                            return None;
+                        }
+                    }
+                }
+                if tmax < 0.0 {
+                    return None; // 盒在身后
+                }
+                let t = if tmin > 1e-6 { tmin } else { tmax };
+                if t > 1e-6 {
+                    Some(t)
+                } else {
+                    None
+                }
+            }
+            Obstacle::ConvexHull { parts } => {
+                let mut best: Option<f64> = None;
+                for part in parts {
+                    if let Some(t) = part.ray_hit(origin, dir, max_range) {
+                        best = Some(best.map_or(t, |b| b.min(t)));
+                    }
+                }
+                best
+            }
+        };
+        hit.filter(|&t| t > 1e-6 && t <= max_range)
+    }
+}
+
+/// 从 `origin` 沿单位方向 `dir` 发射射线，返回一组障碍中最近命中距离（m）。
+///
+/// 障碍列表会被 `flatten_obstacles` 递归展平（凸包 → 子部件并集）。返回 `None`
+/// 表示射程内无命中（量程外或全空）。`max_range` 为传感器最大量程。
+pub fn ray_obstacle_distance(
+    origin: [f64; 3],
+    dir: [f64; 3],
+    max_range: f64,
+    obstacles: &[Obstacle],
+) -> Option<f64> {
+    let flat = flatten_obstacles(obstacles);
+    let mut best: Option<f64> = None;
+    for o in &flat {
+        if let Some(t) = o.ray_hit(origin, dir, max_range) {
+            best = Some(best.map_or(t, |b| b.min(t)));
+        }
+    }
+    best
 }
 
 /// 解算刚体 `id` 与一组静态障碍的碰撞，把冲量经 `world.apply_impulse` 注入。

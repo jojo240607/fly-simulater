@@ -220,7 +220,38 @@
 - 验证（`tests/physics_toy.rs`）：新增 `obstacle_multi_contact_corner_resolves`——
   两堵 AABB 墙间隙(0.3m) < 机体直径(0.4m)，机体被双面法向夹止、停在间隙中心
   (|x|<0.1) 且不深穿透任一侧、水平速度收敛。全量默认 + `--features phy` 构建均通过。
-- **下一步（未做）**：障碍反射到传感器（如避障雷达/视觉失效）；障碍碰撞与避障控制器闭环联动。
+- **下一步（未做）**：障碍碰撞与避障控制器闭环联动。
+
+### P1-2 续续续续：障碍反射到传感器（避障雷达 / 视觉失效） ✅ 完成
+
+- 目标：把障碍信息"反射"到机载传感器——装备避障距离传感器（雷达 / 激光雷达 /
+  深度相机），沿机体前方发射探测射线，读数受近距盲区（视觉失效）/量程饱和/噪声影响，
+  使上层控制器能感知障碍并暴露"太近反而看不到"的失效模式。
+- 实现（`fly-sim-core/src/physics.rs`）：
+  - `Obstacle::ray_hit(origin, dir, max_range)`：射线-障碍求交（球=二次方程，
+    盒=slab 法，`ConvexHull`=递归取最近），返回 `t>0 && t<=max_range` 的最近命中。
+  - `ray_obstacle_distance(origin, dir, max_range, obstacles)`：展平障碍列表求全局
+    最近命中距离（`Option<f64>`，射程内无命中返回 `None`）。
+- 实现（`fly-sim-core/src/sensor.rs`）：
+  - `RangeFinderSample { distance, valid }`：读数 + 有效性（`valid=false` = 量程饱和
+    /近距盲区失效/随机瞬断，上层应视为"该方向不可信"而非"无障碍"）。
+  - `RangeFinderModel`：把真值距离转成读数——加 `bias`+高斯 `noise`，超 `max_range`
+    饱和失效；**近距盲区**：真值 `< blind_min` 时视觉/深度通道糊脸，错误饱和到
+    `max_range` 且 `valid=false`（"障碍太近反而看不到"）；`drop_prob` 每帧随机失效。
+- 集成（`fly-sim-core/src/plant.rs`）：
+  - `QuadrotorPlant::ranger: Option<RangeFinderModel>` + `set_ranger()`。
+  - `read_ranger()`：取机体位置+姿态，沿引擎机体系前方(-X)旋转到世界系发射射线，
+    合并当前静态+动态障碍求最近距离，过 `RangeFinderModel` 返回 `RangeFinderSample`；
+    未装备返回 `None`。
+- 验证（`tests/physics_toy.rs`，ToyWorld 替身，默认 + `--features phy` 均过）：
+  - `ranger_detects_obstacle_ahead`：前方球(中心 -2,5,0 r=1) 真值≈1.0m，`valid=true`
+    且 `distance≈1.0`。
+  - `ranger_near_blind_zone_invalid`：前方球面距 0.2m < `blind_min=0.5` → `valid=false`
+    且饱和到 `max_range`（视觉失效，非"无障碍"）。
+  - `ranger_no_obstacle_max_range`：前方无障 → `valid=false` 饱和到 `max_range`。
+  - `ranger_unequipped_returns_none`：未 `set_ranger` 返回 `None`。
+- **下一步（未做）**：障碍碰撞与避障控制器闭环联动（把 `read_ranger` 读数接入飞控
+  避障逻辑，形成"感知→决策→避障"完整回路）。
 
 ### P1-2 续续续：凸包近似障碍 + 动态（平移）障碍 ✅ 完成
 
@@ -246,7 +277,39 @@
     从左侧扫过停机坪平面上的机体，t≈2s 接触并把机体向右推过原点（终态 x≈3.0，
     `dist > 0.7` 不深穿透）。注意 ToyWorld 自带 y>=0 停机坪钳制，接触场景须放在
     y≈0 平面附近，否则机体自由落体掉到 y=0 与 y=5 处移动的障碍永久错开。
-- **下一步（未做）**：障碍反射到传感器（如避障雷达/视觉失效）；障碍碰撞与避障控制器闭环联动。
+- **下一步（未做）**：障碍碰撞与避障控制器闭环联动（把 `read_ranger` 读数接入飞控
+  避障逻辑，形成"感知→决策→避障"完整回路）。
+
+### P1-2 续续续续：障碍反射到传感器（避障雷达 / 视觉失效） ✅ 完成
+
+- 目标：把障碍信息"反射"到机载传感器——装备避障距离传感器（雷达 / 激光雷达 /
+  深度相机），沿机体前方发射探测射线，读数受近距盲区（视觉失效）/量程饱和/噪声影响，
+  使上层控制器能感知障碍并暴露"太近反而看不到"的失效模式。
+- 实现（`fly-sim-core/src/physics.rs`）：
+  - `Obstacle::ray_hit(origin, dir, max_range)`：射线-障碍求交（球=二次方程，
+    盒=slab 法，`ConvexHull`=递归取最近），返回 `t>0 && t<=max_range` 的最近命中。
+  - `ray_obstacle_distance(origin, dir, max_range, obstacles)`：展平障碍列表求全局
+    最近命中距离（`Option<f64>`，射程内无命中返回 `None`）。
+- 实现（`fly-sim-core/src/sensor.rs`）：
+  - `RangeFinderSample { distance, valid }`：读数 + 有效性（`valid=false` = 量程饱和
+    /近距盲区失效/随机瞬断，上层应视为"该方向不可信"而非"无障碍"）。
+  - `RangeFinderModel`：把真值距离转成读数——加 `bias`+高斯 `noise`，超 `max_range`
+    饱和失效；**近距盲区**：真值 `< blind_min` 时视觉/深度通道糊脸，错误饱和到
+    `max_range` 且 `valid=false`（"障碍太近反而看不到"）；`drop_prob` 每帧随机失效。
+- 集成（`fly-sim-core/src/plant.rs`）：
+  - `QuadrotorPlant::ranger: Option<RangeFinderModel>` + `set_ranger()`。
+  - `read_ranger()`：取机体位置+姿态，沿引擎机体系前方(-X)旋转到世界系发射射线，
+    合并当前静态+动态障碍求最近距离，过 `RangeFinderModel` 返回 `RangeFinderSample`；
+    未装备返回 `None`。
+- 验证（`tests/physics_toy.rs`，ToyWorld 替身，默认 + `--features phy` 均过）：
+  - `ranger_detects_obstacle_ahead`：前方球(中心 -2,5,0 r=1) 真值≈1.0m，`valid=true`
+    且 `distance≈1.0`。
+  - `ranger_near_blind_zone_invalid`：前方球面距 0.2m < `blind_min=0.5` → `valid=false`
+    且饱和到 `max_range`（视觉失效，非"无障碍"）。
+  - `ranger_no_obstacle_max_range`：前方无障 → `valid=false` 饱和到 `max_range`。
+  - `ranger_unequipped_returns_none`：未 `set_ranger` 返回 `None`。
+- **下一步（未做）**：障碍碰撞与避障控制器闭环联动（把 `read_ranger` 读数接入飞控
+  避障逻辑，形成"感知→决策→避障"完整回路）。
 
 ### P2-2：任务级逻辑（waypoint 路径跟随）✅ 框架完成
 - 实现（`fly-sim-core/src/sim.rs`）：`run_mission(waypoints, cruise_v) -> MissionResult`

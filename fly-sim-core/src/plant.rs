@@ -19,9 +19,11 @@ use flyctrl_core::vehicle::{
 };
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 
-use crate::physics::{ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld};
+use crate::physics::{
+    ray_obstacle_distance, ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld,
+};
 use crate::wind::{WindField, WindVec};
-use crate::sensor::{SensorConfig, SensorModel};
+use crate::sensor::{RangeFinderModel, RangeFinderSample, SensorConfig, SensorModel};
 
 // ============================================================ 坐标桥接
 //
@@ -121,6 +123,10 @@ pub struct QuadrotorPlant<W> {
     /// 动态障碍列表：匀速平移障碍（如移动平台 / 拦挡臂）。`step` 内部按 `self.time`
     /// 重新生成当前障碍位置，与静态障碍合并解算。空时忽略。
     dynamic_obstacles: Vec<DynamicObstacle>,
+    /// P1-2 障碍反射：避障距离传感器（雷达/深度相机）。`Some` 时 `read_ranger()`
+    /// 从机体沿前方发射射线探测障碍，其读数受近距盲区（视觉失效）/量程饱和影响。
+    /// `None` 表示不装备该传感器（控制器不会收到避障反馈）。
+    ranger: Option<RangeFinderModel>,
     /// 最近一次接触解算结果（供日志 / 调试；`None` 表示本步未接触）。
     last_contact: Option<ContactInfo>,
     /// P0-2：动量理论诱导速度（m/s），含垂直气流耦合；每步在 step() 内刷新。
@@ -209,6 +215,7 @@ where
             contact,
             obstacles,
             dynamic_obstacles: Vec::new(),
+            ranger: None,
             last_contact: None,
             induced_vel: 0.0,
             last_tau_body: [0.0; 3],
@@ -236,6 +243,44 @@ where
     /// `obs` 空：关闭动态障碍解算。
     pub fn set_dynamic_obstacles(&mut self, obs: Vec<DynamicObstacle>) {
         self.dynamic_obstacles = obs;
+    }
+
+    /// P1-2 障碍反射：注册/清除避障距离传感器（雷达/深度相机）。
+    ///
+    /// `Some(model)`：启用避障射线探测；`None`：关闭（控制器不会收到避障反馈）。
+    /// 模型参数（量程/近距盲区/噪声/失效概率）由调用方经 `RangeFinderModel::new` 配置。
+    pub fn set_ranger(&mut self, ranger: Option<RangeFinderModel>) {
+        self.ranger = ranger;
+    }
+
+    /// P1-2 障碍反射：从机体沿**机体前方**（引擎机体系 -X = 前）发射一条射线，
+    /// 探测最近障碍并生成一次避障传感器读数。
+    ///
+    /// - 射线起点 = 机体当前世界位置；方向 = 机体前方在引擎世界系的单位向量
+    ///   （由刚体四元数把引擎机体 -X 旋转到世界系）。
+    /// - 探测当前生效的所有障碍（当前帧静态 + 按 `self.time` 生成的动态障碍并集）。
+    /// - 真值距离经 `RangeFinderModel` 转成传感器读数（含近距盲区"视觉失效"/
+    ///   量程饱和/噪声/随机瞬断——见 `RangeFinderModel::sample`）。
+    ///
+    /// 未装备传感器（`ranger.is_none()`）返回 `None`。
+    pub fn read_ranger(&mut self) -> Option<RangeFinderSample> {
+        let model = self.ranger.as_mut()?;
+        // 机体世界位置 + 姿态（引擎世界系）
+        let mut tf = [0.0f64; 7];
+        self.world.get_body_transform(self.body_id, &mut tf);
+        let origin = [tf[0], tf[1], tf[2]];
+        let q = [tf[3], tf[4], tf[5], tf[6]];
+        // 引擎机体系前方 = -X，旋转到世界系
+        let fwd_body = [-1.0, 0.0, 0.0];
+        let dir = rotate_by_quat(q, fwd_body);
+        // 合并当前障碍（静态 + 动态按 time 生成）
+        let mut all: Vec<Obstacle> = self.obstacles.clone();
+        for d in &self.dynamic_obstacles {
+            all.push(d.at(self.time));
+        }
+        let max_range = model.max_range;
+        let true_dist = ray_obstacle_distance(origin, dir, max_range, &all);
+        Some(model.sample(true_dist))
     }
 
     /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。

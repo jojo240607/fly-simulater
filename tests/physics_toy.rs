@@ -9,6 +9,7 @@
 
 use fly_sim_core::{ContactModel, RigidBodyWorld, TerrainField, ToyWorld};
 use fly_sim_core::physics::{resolve_ground_contact, resolve_obstacle_contact, DynamicObstacle, Obstacle};
+use fly_sim_core::sensor::RangeFinderModel;
 use fly_sim_core::controller::actuator_full;
 use fly_sim_core::QuadrotorPlant;
 use fly_simulater::airframe::load_airframe;
@@ -518,5 +519,55 @@ fn dynamic_obstacle_translates_and_blocks() {
     let dist = dx.abs();
     assert!(dist > 0.7, "动态球扫过后机体不应深穿透, dist={}", dist);
     assert!(tf[1].is_finite() && tf[2].is_finite(), "动态障碍后状态应有限");
+}
+
+// ============================================================ 障碍反射到传感器（避障雷达/视觉失效）
+
+/// 避障雷达探测到前方障碍：沿机体前方发射射线命中静态球，`valid=true` 且距离接近真值。
+#[test]
+fn ranger_detects_obstacle_ahead() {
+    // 机体在 (0,5,0)（初始姿态前方 = 世界 -X）；障碍球中心 (-2,5,0) r=1.0 → 真值距离 ≈ 2-1 = 1.0m。
+    let world = ToyWorld::new(9.81);
+    let mut plant = make_plant(world);
+    plant.set_obstacles(vec![Obstacle::Sphere { center: [-2.0, 5.0, 0.0], radius: 1.0 }]);
+    // 无噪声、无盲区、无随机失效，量程 10m。
+    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.0, 0.0, 0.0, 0.0, 0xABCD)));
+    let s = plant.read_ranger().expect("应装备传感器");
+    assert!(s.valid, "前方有障碍时读数应有效");
+    assert!((s.distance - 1.0).abs() < 1e-6, "真值距离≈1.0m, got {}", s.distance);
+}
+
+/// 近距盲区（视觉失效）：障碍紧贴机体（< blind_min），雷达回波淹没/相机糊脸 → `valid=false`。
+#[test]
+fn ranger_near_blind_zone_invalid() {
+    // 障碍球中心 (-1.2,5,0) r=1.0 → 表面在 x=-0.2，机体在 x=0，真值距离 ≈ 0.2m < blind_min=0.5m。
+    let world = ToyWorld::new(9.81);
+    let mut plant = make_plant(world);
+    plant.set_obstacles(vec![Obstacle::Sphere { center: [-1.2, 5.0, 0.0], radius: 1.0 }]);
+    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.5, 0.0, 0.0, 0.0, 0x1234)));
+    let s = plant.read_ranger().expect("应装备传感器");
+    assert!(!s.valid, "近距盲区(< blind_min)应判失效");
+    // 失效时给错误饱和读数（把近障碍误报为远处），证明是"视觉失效"而非"无障碍"
+    assert!((s.distance - 10.0).abs() < 1e-9, "失效应饱和到 max_range, got {}", s.distance);
+}
+
+/// 量程外无障碍：`read_ranger` 返回 `valid=false` 饱和（"看不到"≠"无障碍"）。
+#[test]
+fn ranger_no_obstacle_max_range() {
+    let world = ToyWorld::new(9.81);
+    let mut plant = make_plant(world);
+    // 前方无障碍（机体在 (0,5,0)，前方 -X 方向无物体）。
+    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.0, 0.0, 0.0, 0.0, 0x5678)));
+    let s = plant.read_ranger().expect("应装备传感器");
+    assert!(!s.valid, "量程内无障碍时应判失效(饱和)");
+    assert!((s.distance - 10.0).abs() < 1e-9, "量程外饱和到 max_range, got {}", s.distance);
+}
+
+/// 未装备传感器时 `read_ranger` 返回 `None`。
+#[test]
+fn ranger_unequipped_returns_none() {
+    let world = ToyWorld::new(9.81);
+    let mut plant = make_plant(world);
+    assert!(plant.read_ranger().is_none(), "未 set_ranger 应返回 None");
 }
 

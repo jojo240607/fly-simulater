@@ -27,6 +27,7 @@ pub struct BaroSample {
 }
 
 /// 确定性 PRNG（与 wind.rs 同款 LCG）。
+#[derive(Clone, Debug)]
 struct Lcg {
     state: std::num::Wrapping<u64>,
 }
@@ -323,4 +324,88 @@ fn rotate_by_quat_conj(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
         v[1] + 2.0 * w * qv[1] + 2.0 * qqv[1],
         v[2] + 2.0 * w * qv[2] + 2.0 * qqv[2],
     ]
+}
+
+// ============================================================ 避障传感器（P1-2 障碍反射）
+
+/// 距离传感器一次采样读数（避障雷达 / 激光雷达 / 深度相机通用）。
+///
+/// `distance` 为最近障碍距离（m）；`valid` 标记读数是否可用（false = 传感器失效：
+/// 量程饱和、或因障碍太近"糊脸"导致近距盲区的视觉/深度失效）。上层控制器应把
+/// `valid=false` 视为"该方向不可信"而非"无障碍"。
+#[derive(Clone, Debug)]
+pub struct RangeFinderSample {
+    /// 最近障碍距离（m）。`valid=false` 时此值无意义（通常为 `max_range` 饱和值）。
+    pub distance: f64,
+    /// 读数是否有效（true=正常，false=失效/饱和）。
+    pub valid: bool,
+}
+
+/// 避障距离传感器模型（雷达 / 深度相机）。
+///
+/// 把物理引擎射线求交得到的**真值距离**转成传感器读数：
+/// - 加高斯测距噪声（标准差 `noise`）与固定偏置 `bias`；
+/// - 超过 `max_range` 视为量程外（返回 `max_range` 饱和 + `valid=false`）；
+/// - **近距盲区（视觉失效）**：当真值距离 < `blind_min` 时，回波淹没/相机糊脸，
+///   深度/视觉通道给出错误饱和读数（`distance=max_range`、`valid=false`）——典型
+///   "障碍太近反而看不到"的失效模式（雷达近距多路径 / 深度相机近距离退化）；
+/// - 可选随机失效 `drop_prob`：每帧以该概率直接 `valid=false`（模拟瞬断/遮挡）。
+#[derive(Clone, Debug)]
+pub struct RangeFinderModel {
+    pub max_range: f64,   // 最大量程 m（超距饱和）
+    pub blind_min: f64,   // 近距盲区 m（< 此值判失效）
+    pub noise: f64,       // 测距高斯噪声 std m
+    pub bias: f64,        // 固定测距偏置 m
+    pub drop_prob: f64,   // 每帧随机失效概率
+    rng: Lcg,
+}
+
+impl RangeFinderModel {
+    pub fn new(max_range: f64, blind_min: f64, noise: f64, bias: f64, drop_prob: f64, seed: u64) -> Self {
+        Self {
+            max_range,
+            blind_min,
+            noise,
+            bias,
+            drop_prob,
+            rng: Lcg::new(seed ^ 0x5EED_F1D3),
+        }
+    }
+
+    /// 由射线求交真值距离生成一次读数。
+    ///
+    /// `true_distance`：射线命中障碍的真值距离（m）；`None` 表示射程内无命中
+    /// （量程外）。返回 `RangeFinderSample`。
+    pub fn sample(&mut self, true_distance: Option<f64>) -> RangeFinderSample {
+        // 随机瞬断
+        if self.rng.next_f64() < self.drop_prob {
+            return RangeFinderSample {
+                distance: self.max_range,
+                valid: false,
+            };
+        }
+        let d = match true_distance {
+            None => {
+                // 量程外：饱和读数 + 失效标记（"看不到"≠"无障碍"）
+                return RangeFinderSample {
+                    distance: self.max_range,
+                    valid: false,
+                };
+            }
+            Some(d) => d,
+        };
+        // 近距盲区：障碍太近，视觉/深度通道糊脸失效
+        if d < self.blind_min {
+            return RangeFinderSample {
+                distance: self.max_range, // 错误饱和（把近障碍误报为"远处/无障碍"）
+                valid: false,
+            };
+        }
+        // 正常：加偏置 + 噪声，裁剪到 [0, max_range]
+        let measured = (d + self.bias + self.noise * self.rng.gaussian()).clamp(0.0, self.max_range);
+        RangeFinderSample {
+            distance: measured,
+            valid: true,
+        }
+    }
 }
