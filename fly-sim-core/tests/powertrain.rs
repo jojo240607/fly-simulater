@@ -9,6 +9,7 @@
 
 use fly_sim_core::physics::{ContactModel, PhySdkWorld, RigidBodyWorld};
 use fly_sim_core::plant::{gyro_torque, QuadrotorPlant};
+use fly_sim_core::wind::{WindConfig, WindField};
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::vehicle::ActuatorCmd;
 
@@ -201,4 +202,138 @@ fn slipstream_force_scales_with_induced_velocity() {
         p_hi.induced_velocity(),
         p_lo.induced_velocity()
     );
+}
+
+// ---- P2-B：空间相关风场 + 阵风突风闭环接入验证 ----
+
+#[test]
+fn spatial_wind_plant_step_stable_and_finite() {
+    // 接入带风切变 + 空间相关的风场，plant 闭环 step 多步，验证数值有限、可复现。
+    let mut cfg = WindConfig::default();
+    cfg.base = [3.0, 0.0, 0.0]; // 稳定侧风
+    cfg.shear_exponent = 0.15; // 风切变
+    cfg.shear_ref_height = 10.0;
+    cfg.spatial_scale = 5.0; // 空间相关
+    cfg.gust_burst_amp = [4.0, 0.0, 0.0]; // 确定性突风
+    cfg.gust_burst_t0 = 1.0;
+    cfg.gust_burst_hw = 0.5;
+    cfg.turb_sigma = [0.2, 0.2, 0.3];
+    cfg.turb_tau = 0.7;
+    cfg.seed = 0xABCDEF;
+
+    let vc = VehicleConfig::default_quad();
+    let mut plant = QuadrotorPlant::new(
+        PhySdkWorld::create_empty(),
+        &vc,
+        DT,
+        Some(WindField::new(cfg)),
+        Default::default(),
+        Some(ContactModel::default()),
+    );
+    // 悬停油门，跑 3 秒（覆盖突风窗口 0.5~1.5s）。
+    let cmd = ActuatorCmd {
+        motor: [0.5 as f32; 4],
+    };
+    plant.apply_actuators(&cmd);
+    for _ in 0..750 {
+        plant.step();
+        let (pos, _q) = plant.debug_up();
+        for k in 0..3 {
+            assert!(pos[k].is_finite(), "空间风闭环位置应有限: pos={:?}", pos);
+        }
+    }
+    // 确定性：同配置再跑一遍，末位置一致。
+    let vc2 = VehicleConfig::default_quad();
+    let mut plant2 = QuadrotorPlant::new(
+        PhySdkWorld::create_empty(),
+        &vc2,
+        DT,
+        Some(WindField::new(WindConfig {
+            base: [3.0, 0.0, 0.0],
+            shear_exponent: 0.15,
+            shear_ref_height: 10.0,
+            spatial_scale: 5.0,
+            gust_burst_amp: [4.0, 0.0, 0.0],
+            gust_burst_t0: 1.0,
+            gust_burst_hw: 0.5,
+            turb_sigma: [0.2, 0.2, 0.3],
+            turb_tau: 0.7,
+            seed: 0xABCDEF,
+            ..Default::default()
+        })),
+        Default::default(),
+        Some(ContactModel::default()),
+    );
+    plant2.apply_actuators(&cmd);
+    for _ in 0..750 {
+        plant2.step();
+    }
+    let (p1, _) = plant.debug_up();
+    let (p2, _) = plant2.debug_up();
+    for k in 0..3 {
+        assert!(
+            (p1[k] - p2[k]).abs() < 1e-9,
+            "空间风闭环必须确定性: p1={:?} p2={:?}",
+            p1,
+            p2
+        );
+    }
+}
+
+#[test]
+fn thermal_wind_plant_step_stable_and_finite() {
+    // 接入热气流（中心上升 3m/s），plant 闭环 step，验证数值有限 + 确定性可复现。
+    let thermal_cfg = || WindConfig {
+        base: [0.0; 3],
+        thermal_strength: 3.0,
+        thermal_radius: 5.0,
+        thermal_height: 50.0,
+        thermal_pos0: [0.0, 0.0],
+        thermal_drift: [0.5, 0.0],
+        turb_sigma: [0.1, 0.1, 0.1],
+        turb_tau: 0.7,
+        seed: 0x55AA,
+        ..Default::default()
+    };
+    let vc = VehicleConfig::default_quad();
+    let mut plant = QuadrotorPlant::new(
+        PhySdkWorld::create_empty(),
+        &vc,
+        DT,
+        Some(WindField::new(thermal_cfg())),
+        Default::default(),
+        Some(ContactModel::default()),
+    );
+    let cmd = ActuatorCmd { motor: [0.5 as f32; 4] };
+    plant.apply_actuators(&cmd);
+    for _ in 0..750 {
+        plant.step();
+        let (pos, _q) = plant.debug_up();
+        for k in 0..3 {
+            assert!(pos[k].is_finite(), "热气流闭环位置应有限: pos={:?}", pos);
+        }
+    }
+    // 确定性：同配置再跑，末位置一致。
+    let vc2 = VehicleConfig::default_quad();
+    let mut plant2 = QuadrotorPlant::new(
+        PhySdkWorld::create_empty(),
+        &vc2,
+        DT,
+        Some(WindField::new(thermal_cfg())),
+        Default::default(),
+        Some(ContactModel::default()),
+    );
+    plant2.apply_actuators(&cmd);
+    for _ in 0..750 {
+        plant2.step();
+    }
+    let (p1, _) = plant.debug_up();
+    let (p2, _) = plant2.debug_up();
+    for k in 0..3 {
+        assert!(
+            (p1[k] - p2[k]).abs() < 1e-9,
+            "热气流闭环必须确定性: p1={:?} p2={:?}",
+            p1, p2
+        );
+    }
 }

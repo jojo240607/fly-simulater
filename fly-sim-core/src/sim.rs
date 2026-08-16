@@ -523,6 +523,10 @@ where
             while seg < nseg && s > cum_len[seg + 1] {
                 seg += 1;
             }
+            // 边界保护：浮点累积可能导致 s 略超 total，seg 钳到末段。
+            if seg >= nseg {
+                seg = nseg - 1;
+            }
             let local = (s - cum_len[seg]).clamp(0.0, seg_len[seg]);
             let f = local / seg_len[seg];
             let a = waypoints[seg];
@@ -558,9 +562,11 @@ where
                 (wtrue[0].0 * wtrue[0].0 + wtrue[1].0 * wtrue[1].0 + wtrue[2].0 * wtrue[2].0)
                     .sqrt();
             // 发散阈值：起飞/转弯的瞬时角速度可达数 rad/s，属正常机动；
-            // 取 6 rad/s 表示真正失控翻滚。当前 PID 悬停控制器在持续移动目标下
-            // 会掉高/振荡（无倾斜垂直分量补偿），任务层据此可靠检测失败（stable=false）。
-            if rate > 6.0 || !invariants::state_finite(&st) {
+            // 取 6 rad/s 表示真正失控翻滚。
+            // 位置误差发散：持续大幅跟踪误差（>5m）表示控制器无法跟随路径（如 PID
+            // 移动局限导致掉高/振荡），任务层据此检测失败（不误报成功）。
+            const POS_ERR_DIVERGE: f64 = 5.0;
+            if rate > 6.0 || !invariants::state_finite(&st) || err > POS_ERR_DIVERGE {
                 stable = false;
                 break;
             }
@@ -701,5 +707,16 @@ pub fn windy_config() -> WindConfig {
         turb_sigma: [0.1, 0.1, 0.15],
         turb_tau: 0.7,
         seed: 0xCAFE_BEEF,
+        spatial_scale: 0.0,
+        shear_exponent: 0.0,
+        shear_ref_height: 10.0,
+        gust_burst_amp: [0.0, 0.0, 0.0],
+        gust_burst_t0: 1.0,
+        gust_burst_hw: 0.5,
+        thermal_strength: 0.0,
+        thermal_radius: 0.0,
+        thermal_height: 0.0,
+        thermal_pos0: [0.0, 0.0],
+        thermal_drift: [0.0, 0.0],
     }
 }

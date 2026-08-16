@@ -334,10 +334,16 @@ where
         let gyro = gyro_torque(&self.motor_speed, &spin, rotor_i, omega_body);
         tau_body[0] += gyro[0];
         tau_body[1] += gyro[1];
-        // 阶段 3：推进风场，取当前世界系（UP）风速。无风则为 0。
-        let wind_up: WindVec = match &mut self.wind {
-            Some(w) => w.sample(self.dt),
-            None => [0.0; 3],
+        // 阶段 3：推进风场，取当前世界系（UP）风速（P2-B：传入机体位置以启用
+        // 空间相关风场 / 风切变廓线）。无风则为 0。
+        // 先读取机体位置（独立 immutable 借用），再可变借 wind，避免借用冲突。
+        let wind_up: WindVec = if self.wind.is_some() {
+            let tf = self.read_body_tf();
+            let pos = [tf[0], tf[1], tf[2]];
+            let w = self.wind.as_mut().unwrap();
+            w.sample_at(self.dt, &pos)
+        } else {
+            [0.0; 3]
         };
         // 阶段 2b：机体气动阻力（含诱导阻力），基于相对风速（v_body - wind），在机体坐标系施加。
         let aero = self.aero_drag_body(q, &wind_up);

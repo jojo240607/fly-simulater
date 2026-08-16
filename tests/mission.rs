@@ -46,8 +46,9 @@ fn mission_api_returns_valid_structure() {
 
 #[test]
 fn mission_detects_controller_move_limitation() {
-    // 长距离移动巡航：当前 PID 悬停控制器无倾斜垂直分量补偿，移动中掉高/振荡，
-    // 任务层应**可靠检测为失败**（stable=false），不误报成功。
+    // 长距离移动巡航：PID 悬停控制器在持续大幅移动目标下跟踪误差超限（>5m），
+    // 任务层应**可靠检测为失败**（stable=false），不误报成功——这是任务层的核心
+    // 价值（失败检测，而非盲目报成功）。
     let mut loop_sim = make_loop();
     let wp = [(0.0, 0.0, -5.0, 0.0), (10.0, 0.0, -5.0, 0.0)];
     let r = loop_sim.run_mission(&wp, 2.0);

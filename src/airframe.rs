@@ -117,6 +117,12 @@ impl AirframeToml {
             motor_kv: self.motor_kv,
             motor_r: self.motor_r,
             rotor_inertia: self.rotor_inertia,
+            // P1-A/B/C 叶素/滑流/机身气动（默认退化旧行为，与 default_quad 一致）：
+            bemt_blades: 2.0,
+            bemt_thrust_mu2: 0.4,
+            bemt_torque_mu2: 0.6,
+            inter_prop_wake: 0.0,
+            body_aero_area_gain: 0.0,
         }
     }
 }

@@ -61,6 +61,7 @@ pub struct SensorConfig {
     pub gyro_bias: [f64; 3],      // 零偏 rad/s
     pub gyro_noise: f64,          // 白噪声 std rad/s
     pub gyro_walk: f64,           // 随机游走 std rad/s per sqrt(s)
+    pub gyro_bias_inst: f64,      // 陀螺偏置不稳定性 (BI) 强度 rad/s（Allan 低通闪烁近似）
     pub vib_amp: f64,             // 振动耦合幅值 m/s^2（机体高频）
     // GPS
     pub gps_delay: f64,           // 延迟 s
@@ -88,6 +89,7 @@ impl Default for SensorConfig {
             gyro_bias: [0.0, 0.0, 0.0],
             gyro_noise: 0.0,
             gyro_walk: 0.0,
+            gyro_bias_inst: 0.0,
             vib_amp: 0.0,
             gps_delay: 0.0,
             gps_rate: 1000.0,
@@ -114,6 +116,7 @@ impl SensorConfig {
             gyro_bias: [0.001, -0.0005, 0.002],
             gyro_noise: 0.003,
             gyro_walk: 0.0001,
+            gyro_bias_inst: 0.0003,
             vib_amp: 0.1,
             gps_delay: 0.15,
             gps_rate: 5.0,
@@ -142,6 +145,8 @@ pub struct SensorModel {
     rng: Lcg,
     // IMU 随机游走状态（bias drift）
     gyro_bias_walk: [f64; 3],
+    // 陀螺偏置不稳定性 (BI) 慢变状态：一阶低通白噪声（Allan 偏置不稳定性近似）
+    gyro_bias_inst_state: [f64; 3],
     // GPS 延迟缓冲 + 降频计数
     gps_delay: GpsDelay,
     gps_counter: u64,
@@ -160,6 +165,7 @@ impl SensorModel {
             cfg,
             rng: Lcg::new(seed),
             gyro_bias_walk: [0.0; 3],
+            gyro_bias_inst_state: [0.0; 3],
             gps_delay: GpsDelay { delay_steps, buf: std::collections::VecDeque::new() },
             gps_counter: 0,
             vib_phase: 0.0,
@@ -188,14 +194,24 @@ impl SensorModel {
             acc[i] = true_accel[i] as f64 + self.cfg.accel_bias[i] + vib
                 + self.cfg.accel_noise * self.rng.gaussian();
         }
-        // 陀螺：随机游走 bias + 噪声
+        // 陀螺：随机游走 bias + 偏置不稳定性 (BI) + 噪声
+        // BI：一阶低通白噪声近似 Allan 偏置不稳定性（闪烁噪声）。
+        //   稳态 std(bi) ≈ gyro_bias_inst；时间常数 tau 决定慢变速度。
+        let bi_tau = 10.0; // s
+        let bi_alpha = (dt / bi_tau).min(1.0);
         for i in 0..3 {
             self.gyro_bias_walk[i] += self.cfg.gyro_walk * self.rng.gaussian() * (dt.sqrt());
             self.gyro_bias_walk[i] = self.gyro_bias_walk[i].clamp(-0.05, 0.05);
+            // 驱动白噪声幅值使稳态 std 收敛到 gyro_bias_inst：
+            //   w ~ N(0, gyro_bias_inst^2 * 2/bi_alpha)，低通后 std = gyro_bias_inst。
+            let w = self.rng.gaussian() * self.cfg.gyro_bias_inst * (2.0 / bi_alpha).sqrt();
+            self.gyro_bias_inst_state[i] += bi_alpha * (w - self.gyro_bias_inst_state[i]);
+            self.gyro_bias_inst_state[i] = self.gyro_bias_inst_state[i].clamp(-0.05, 0.05);
         }
         let mut gyr = [0.0f64; 3];
         for i in 0..3 {
-            gyr[i] = true_gyro[i] as f64 + self.cfg.gyro_bias[i] + self.gyro_bias_walk[i]
+            gyr[i] = true_gyro[i] as f64 + self.cfg.gyro_bias[i]
+                + self.gyro_bias_walk[i] + self.gyro_bias_inst_state[i]
                 + self.cfg.gyro_noise * self.rng.gaussian();
         }
         self.vib_phase += dt;

@@ -1,0 +1,7 @@
+PASS: imu_deterministic
+PASS: accel_mean_near_truth_plus_bias
+PASS: accel_white_noise_std
+PASS: accel_random_walk_magnitude
+PASS: gyro_bias_instability_bounded
+PASS: gyro_walk_plus_noise_magnitude
+ALL OK (P0-A IMU error tree)
