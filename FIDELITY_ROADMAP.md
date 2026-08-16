@@ -205,8 +205,48 @@
   - `tests/powertrain.rs` 1 项：`obstacle_collision_plant_integration`（经 `set_obstacles`
     注入球障碍，1000 步自由下落后状态有限且未深穿透）。
   - 全量 `--features phy` 与默认构建均通过。
-- **下一步（未做）**：多障碍同时深穿透的精确多接触解算；凸包/动态障碍；障碍反射到传感器
-  （如避障雷达/视觉失效）。障碍碰撞与避障控制器尚未闭环联动。
+
+### P1-2 续续：多障碍同时穿透的精确多接触解算 ✅ 完成
+
+- 目标：消除"取最深穿透单点解算"的偏置——机体卡在两墙夹角 / 同时贴地+障碍时，
+  各接触法向独立推开，不会被单点法向带偏、也不深穿透任一侧。
+- 实现（`fly-sim-core/src/physics.rs` 的 `resolve_obstacle_contact`）：
+  - 由"取最深单点"改为**遍历所有穿透障碍、对每个分别计算并施加法向弹簧-阻尼冲量
+    + 库仑摩擦冲量，再求和经 `world.apply_impulse` 一次批量注入**（多接触叠加）。
+  - 每个障碍独立取最近点法向与穿透深度，用共用阻尼比 ζ（由恢复系数推导）。
+  - 返回**汇总** `ContactInfo`：`penetration`/`point`/`normal`/`impulse` 取最深穿透者，
+    `normal_force`/`friction_impulse` 为各接触之和。未碰撞保持 `touching=false`。
+  - 仍属单点接触近似（每障碍取最近点），但多障碍同时深穿透能正确止推。
+- 验证（`tests/physics_toy.rs`）：新增 `obstacle_multi_contact_corner_resolves`——
+  两堵 AABB 墙间隙(0.3m) < 机体直径(0.4m)，机体被双面法向夹止、停在间隙中心
+  (|x|<0.1) 且不深穿透任一侧、水平速度收敛。全量默认 + `--features phy` 构建均通过。
+- **下一步（未做）**：障碍反射到传感器（如避障雷达/视觉失效）；障碍碰撞与避障控制器闭环联动。
+
+### P1-2 续续续：凸包近似障碍 + 动态（平移）障碍 ✅ 完成
+
+- 目标：支持以"多基本体并集"逼近任意凸体（凸包），以及随时间匀速平移的动态障碍，
+  使障碍碰撞覆盖更复杂几何与运动场景（圆柱≈多球、移动障碍物拦停/推开机体）。
+- 实现（`fly-sim-core/src/physics.rs`）：
+  - `Obstacle::ConvexHull { parts: Vec<Obstacle> }`：凸包由若干基本体（球/盒，
+    亦可嵌套 `ConvexHull`）的并集构成；`flatten_obstacles()` 递归展平成叶子
+    `Sphere`/`Box`，使多接触叠加对每个子部件独立生效（凸包曲面 = 多球接触叠加）。
+  - `closest_point_and_normal` 新增 `ConvexHull` 分支：递归取各子部件最近点中
+    **整体最近**者作为凸包表面最近点（直接调用时亦正确，解算入口已展平则不会命中）。
+  - `DynamicObstacle { base: Obstacle, velocity: [f64;3] }` + `at(t)`：按模拟时间
+    `t` 把基准障碍平移 `velocity * t` 生成当前障碍（支持嵌套 `ConvexHull`）；
+    `translate_obstacle` 递归平移所有子部件。
+  - plant 层（`plant.rs`）：`QuadrotorPlant` 新增 `dynamic_obstacles` 字段 +
+    `set_dynamic_obstacles()`；`step` 内部按 `self.time` 把每个动态障碍生成当前
+    形态并与静态障碍合并解算。controller 层（`controller.rs`）透传
+    `plant_set_dynamic_obstacles()`。
+- 验证（`tests/physics_toy.rs`，ToyWorld 替身，默认 + `--features phy` 均过）：
+  - `obstacle_convex_hull_cylinder_blocks`：5 球（r=1.0）串成竖直圆柱 `ConvexHull`，
+    机体带 -X 初速撞入曲面，全程 `min_x > 0.8`（不深穿透实体），状态有限。
+  - `dynamic_obstacle_translates_and_blocks`：动态球（base (-3,0,0) r=1.3，vel [1.5,0,0]）
+    从左侧扫过停机坪平面上的机体，t≈2s 接触并把机体向右推过原点（终态 x≈3.0，
+    `dist > 0.7` 不深穿透）。注意 ToyWorld 自带 y>=0 停机坪钳制，接触场景须放在
+    y≈0 平面附近，否则机体自由落体掉到 y=0 与 y=5 处移动的障碍永久错开。
+- **下一步（未做）**：障碍反射到传感器（如避障雷达/视觉失效）；障碍碰撞与避障控制器闭环联动。
 
 ### P2-2：任务级逻辑（waypoint 路径跟随）✅ 框架完成
 - 实现（`fly-sim-core/src/sim.rs`）：`run_mission(waypoints, cruise_v) -> MissionResult`

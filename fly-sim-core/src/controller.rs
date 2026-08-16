@@ -15,7 +15,7 @@ use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, V
 
 use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
-use crate::physics::{ContactInfo, ContactModel, Obstacle, RigidBodyWorld};
+use crate::physics::{ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld};
 use crate::wind::WindField;
 use crate::sensor::SensorConfig;
 
@@ -304,6 +304,11 @@ where
     /// P1-2 续：运行时设置/清除静态障碍列表。
     pub fn plant_set_obstacles(&mut self, obstacles: Vec<Obstacle>) {
         self.plant.set_obstacles(obstacles);
+    }
+
+    /// P-动态障碍：运行时设置/清除匀速平移动态障碍。
+    pub fn plant_set_dynamic_obstacles(&mut self, obstacles: Vec<DynamicObstacle>) {
+        self.plant.set_dynamic_obstacles(obstacles);
     }
 
     /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。

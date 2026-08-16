@@ -8,7 +8,7 @@
 //! 运行：`cargo test --test physics_toy`
 
 use fly_sim_core::{ContactModel, RigidBodyWorld, TerrainField, ToyWorld};
-use fly_sim_core::physics::{resolve_ground_contact, resolve_obstacle_contact, Obstacle};
+use fly_sim_core::physics::{resolve_ground_contact, resolve_obstacle_contact, DynamicObstacle, Obstacle};
 use fly_sim_core::controller::actuator_full;
 use fly_sim_core::QuadrotorPlant;
 use fly_simulater::airframe::load_airframe;
@@ -383,5 +383,140 @@ fn obstacle_box_stops_vertical_penetration() {
     // 法向(+Y)速度应被显著削减（被顶面拦停）。
     assert!(vel[1].abs() < 1.0, "竖直下落速度应被盒顶削减, vy={}", vel[1]);
     assert!(tf[0].is_finite() && tf[2].is_finite(), "障碍接触后状态应有限");
+}
+
+/// 多障碍同时穿透：机体被**两面墙**从左右夹住（两个 AABB 间隙 < 机体直径），
+/// 验证多接触叠加——两侧法向独立推开，机体停在间隙中心附近、不被单侧法向带偏、
+/// 也不深穿透任一侧。这是 P1-2 续"多接触解算"的核心回归。
+#[test]
+fn obstacle_multi_contact_corner_resolves() {
+    let mut world = ToyWorld::new(9.81);
+    // 机体碰撞球半径 0.2；两墙间隙 0.3（< 直径 0.4），机体放在中心 (0,5,0)。
+    // 左墙：x∈[-3,-0.15]；右墙：x∈[0.15,3]。机体半径 0.2 → 同时穿透两侧 0.05。
+    let id = world.add_body(1.0, &[0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[1.0, 1.0, 1.0]);
+    let obs = vec![
+        Obstacle::Box {
+            min: [-3.0, 4.0, -1.0],
+            max: [-0.15, 6.0, 1.0],
+        },
+        Obstacle::Box {
+            min: [0.15, 4.0, -1.0],
+            max: [3.0, 6.0, 1.0],
+        },
+    ];
+    let cm = ContactModel {
+        ground_y: -100.0,
+        restitution: 0.0,
+        friction: 0.3,
+        penalty_k: 5000.0,
+        contact_half_h: 0.05,
+        terrain: None,
+    };
+    for step in 0..1500 {
+        resolve_obstacle_contact(&mut world, id, 1.0, &obs, 0.2, &cm, DT);
+        world.step(DT);
+    }
+    let mut tf = [0.0f64; 7];
+    world.get_rigid_transforms(&mut tf);
+    let x = tf[0];
+    // 两侧墙面在 ±0.15；机体半径 0.2 → 平衡时中心应落在间隙中心 x≈0 附近，
+    // 允许微小偏移（数值平衡穿透 + 多接触非对称）。绝不能贴任一侧（|x|>0.1 即偏太远）。
+    assert!(x.abs() < 0.1, "多接触应把机体推向间隙中心(|x|<0.1), got x={}", x);
+    // 不应深穿透任一侧（左墙内沿 -0.15，右墙内沿 0.15；中心穿入任一侧即错）。
+    assert!(x > -0.15 && x < 0.15, "不应深穿透任一侧墙, x={}", x);
+    assert!(tf[1].is_finite() && tf[2].is_finite(), "多接触后状态应有限");
+    let v = world.get_velocity(id);
+    assert!(v[0].abs() < 0.2, "水平速度应被双面夹止, vx={}", v[0]);
+}
+
+/// 凸包障碍：用一串球（`ConvexHull`）近似竖直圆柱，机体从侧面撞入应被圆柱曲面推开、
+/// 不深穿透（验证 ConvexHull 展平后多球接触叠加生效）。
+#[test]
+fn obstacle_convex_hull_cylinder_blocks() {
+    let mut world = ToyWorld::new(9.81);
+    // 圆柱：半径 1.0，轴沿 Y 从 y=0 到 y=4，用 5 个等距球（中心 y=0.4,1.2,2.0,2.8,3.6）
+    // 半径 1.0 近似。机体放在圆柱右侧外 (x=1.6, y=2.0, z=0) 带 -X 初速向左撞入曲面。
+    let id = world.add_body(1.0, &[1.6, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[1.0, 1.0, 1.0]);
+    world.apply_impulse(id, &[-0.8, 0.0, 0.0], 0); // 给 -X 速度约 0.8 m/s 慢撞圆柱
+    let cyl = Obstacle::ConvexHull {
+        parts: (0..5)
+            .map(|i| Obstacle::Sphere {
+                center: [0.0, 0.4 + i as f64 * 0.8, 0.0],
+                radius: 1.0,
+            })
+            .collect(),
+    };
+    let obs = vec![cyl];
+    let cm = ContactModel {
+        ground_y: -100.0,
+        restitution: 0.0,
+        friction: 0.3,
+        penalty_k: 20000.0,
+        contact_half_h: 0.05,
+        terrain: None,
+    };
+    let mut min_x = f64::INFINITY; // 全程机体中心最近 x（圆柱轴在 x=0，穿入实体即 x<0.8）
+    for _ in 0..1500 {
+        resolve_obstacle_contact(&mut world, id, 1.0, &obs, 0.2, &cm, DT);
+        world.step(DT);
+        let mut tf2 = [0.0f64; 7];
+        world.get_rigid_transforms(&mut tf2);
+        if tf2[0] < min_x {
+            min_x = tf2[0];
+        }
+    }
+    let mut tf = [0.0f64; 7];
+    world.get_rigid_transforms(&mut tf);
+    // 圆柱轴在 x=0，球半径 1.0；机体半径 0.2 → 表面外中心 x≈1.2，穿入实体即中心 x<0.8。
+    // 惩罚模型会把接近的机体反弹，但全程不应深穿透实体（min_x 守住表面附近）。
+    assert!(min_x > 0.8, "不应深穿透圆柱实体(球半径1+机体0.2), min_x={}", min_x);
+    assert!(tf[1].is_finite() && tf[2].is_finite(), "凸包接触后状态应有限");
+}
+
+/// 动态障碍：匀速平移的球从左侧扫过机体路径，验证 `DynamicObstacle::at(t)` 与
+/// 接触解算合并——障碍随时间移动并与机体交互、把机体向右(+X)推开。
+///
+/// 注意：ToyWorld 自带 y>=0 停机坪钳制（step 内 pos.y<0 清零），故所有接触场景须放在
+/// y≈0 平面附近（机体自由落体迅速落到 y=0 并停住），否则会像之前那样机体掉到 y=0 而
+/// 障碍在 y=5 永远错开。动态球与机体都在 y=0 平面（z=0 轴线上），球从左侧推来。
+#[test]
+fn dynamic_obstacle_translates_and_blocks() {
+    let mut world = ToyWorld::new(9.81);
+    // 动态球：t=0 时中心 (-3, 0, 0)，速度 [+1.5,0,0] m/s（向右）。机体起始 (0, 0.5, 0)，
+    // 落到停机坪 y≈0 后静止于轴线上；球从左向右扫过，t≈2s 接触并把机体推向右(+X)。
+    let id = world.add_body(1.0, &[0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0], &[1.0, 1.0, 1.0]);
+    let dyn_obs = DynamicObstacle {
+        base: Obstacle::Sphere {
+            center: [-3.0, 0.0, 0.0],
+            radius: 1.3,
+        },
+        velocity: [1.5, 0.0, 0.0],
+    };
+    let cm = ContactModel {
+        ground_y: -100.0,
+        restitution: 0.0,
+        friction: 0.3,
+        penalty_k: 8000.0,
+        contact_half_h: 0.05,
+        terrain: None,
+    };
+    let dt = DT;
+    let mut t = 0.0;
+    // 模拟 3 秒：动态球在 t≈2s 抵达机体（间距 3m，速度 1.5m/s）。
+    for _ in 0..750 {
+        let obs = vec![dyn_obs.at(t)];
+        resolve_obstacle_contact(&mut world, id, 1.0, &obs, 0.2, &cm, dt);
+        world.step(dt);
+        t += dt;
+    }
+    let mut tf = [0.0f64; 7];
+    world.get_rigid_transforms(&mut tf);
+    // 球最终中心 ≈ (-3 + 1.5*3) = (1.5, 0, 0)；机体被推到其右侧表面 x≈3.0（>0.5）。
+    assert!(tf[0] > 0.5, "机体应被动态球向右推过原点, x={}", tf[0]);
+    // 不应深穿透：机体中心到最终球心距离 > 球半径+机体半径 的近似（允许数值穿透）。
+    let dx = tf[0] - 1.5;
+    let dist = dx.abs();
+    assert!(dist > 0.7, "动态球扫过后机体不应深穿透, dist={}", dist);
+    assert!(tf[1].is_finite() && tf[2].is_finite(), "动态障碍后状态应有限");
 }
 

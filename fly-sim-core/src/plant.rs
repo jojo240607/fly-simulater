@@ -19,7 +19,7 @@ use flyctrl_core::vehicle::{
 };
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 
-use crate::physics::{ContactInfo, ContactModel, Obstacle, RigidBodyWorld};
+use crate::physics::{ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld};
 use crate::wind::{WindField, WindVec};
 use crate::sensor::{SensorConfig, SensorModel};
 
@@ -118,6 +118,9 @@ pub struct QuadrotorPlant<W> {
     /// P1-2 续：静态障碍列表（碰撞体）。非空时每步经 `resolve_obstacle_contact`
     /// 惩罚模型解算碰撞冲量。机体碰撞球半径取螺旋桨外周包络（≈1.2×臂长）。
     obstacles: Vec<Obstacle>,
+    /// 动态障碍列表：匀速平移障碍（如移动平台 / 拦挡臂）。`step` 内部按 `self.time`
+    /// 重新生成当前障碍位置，与静态障碍合并解算。空时忽略。
+    dynamic_obstacles: Vec<DynamicObstacle>,
     /// 最近一次接触解算结果（供日志 / 调试；`None` 表示本步未接触）。
     last_contact: Option<ContactInfo>,
     /// P0-2：动量理论诱导速度（m/s），含垂直气流耦合；每步在 step() 内刷新。
@@ -205,6 +208,7 @@ where
             sensor: SensorModel::new(sensor_cfg, dt),
             contact,
             obstacles,
+            dynamic_obstacles: Vec::new(),
             last_contact: None,
             induced_vel: 0.0,
             last_tau_body: [0.0; 3],
@@ -225,6 +229,13 @@ where
     /// - `obs` 空：关闭障碍碰撞解算。
     pub fn set_obstacles(&mut self, obs: Vec<Obstacle>) {
         self.obstacles = obs;
+    }
+
+    /// P-动态障碍：注册匀速平移动态障碍（如移动平台 / 拦挡臂）。
+    /// `step` 内部按 `self.time` 重新生成当前障碍位置，与静态障碍合并解算。
+    /// `obs` 空：关闭动态障碍解算。
+    pub fn set_dynamic_obstacles(&mut self, obs: Vec<DynamicObstacle>) {
+        self.dynamic_obstacles = obs;
     }
 
     /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。
@@ -408,16 +419,23 @@ where
         };
 
         // ---- P1-2 续：障碍碰撞解算（惩罚模型，与地面接触同源）----
-        // 障碍列表非空时，每步经 `resolve_obstacle_contact` 解算最深穿透障碍并注入冲量。
-        // 仅当本步未触地（避免地面/障碍双接触叠加冲量）且障碍非空时解算。
-        if !self.obstacles.is_empty() {
+        // 静态障碍 + 动态障碍（按 self.time 重新生成当前位置）合并解算。
+        // 仅当障碍非空时解算。`resolve_obstacle_contact` 内部展平 ConvexHull 并做多接触叠加。
+        let have_static = !self.obstacles.is_empty();
+        let have_dynamic = !self.dynamic_obstacles.is_empty();
+        if have_static || have_dynamic {
             let body_radius = 1.2 * self.cfg.arm_length as f64; // 螺旋桨外周包络
             let cm = self.contact.clone().unwrap_or_default();
+            // 合并静态 + 动态（动态按 self.time 平移）障碍。
+            let mut all_obs: Vec<Obstacle> = self.obstacles.clone();
+            for d in &self.dynamic_obstacles {
+                all_obs.push(d.at(self.time));
+            }
             let info = crate::physics::resolve_obstacle_contact(
                 &mut self.world,
                 self.body_id,
                 self.cfg.mass as f64,
-                &self.obstacles,
+                &all_obs,
                 body_radius,
                 &cm,
                 self.dt,

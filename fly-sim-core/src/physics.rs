@@ -208,6 +208,69 @@ pub enum Obstacle {
     Sphere { center: [f64; 3], radius: f64 },
     /// 轴对齐盒（AABB）：最小角 (x,y,z) + 最大角 (x,y,z)。
     Box { min: [f64; 3], max: [f64; 3] },
+    /// 凸包（凸体）近似：由若干基本体（球/盒，亦可嵌套 ConvexHull）的**并集**构成，
+    /// 递归展平后作为多个独立碰撞体解算（多接触叠加对每个子部件生效）。
+    ///
+    /// 用于以"多球/多盒"逼近任意凸体（如圆柱≈一串球、长方体角≈盒、胶囊≈两端球+柱）。
+    /// 解算时本变体在 `resolve_obstacle_contact` 入口被 `flatten_obstacles` 递归展平成
+    /// 叶子 `Sphere`/`Box`，故 `closest_point_and_normal` 不会收到 `ConvexHull`。
+    ConvexHull { parts: Vec<Obstacle> },
+}
+
+/// 把障碍列表递归展平：`ConvexHull` 展开为其 `parts`（继续递归），其余原样保留。
+///
+/// 展平后每个元素是基本碰撞体（`Sphere`/`Box`），供 `resolve_obstacle_contact`
+/// 统一做多接触叠加解算。
+pub fn flatten_obstacles(obstacles: &[Obstacle]) -> Vec<Obstacle> {
+    let mut out = Vec::with_capacity(obstacles.len());
+    for o in obstacles {
+        match o {
+            Obstacle::ConvexHull { parts } => {
+                out.extend(flatten_obstacles(parts));
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// 动态障碍：由一个**基准障碍**（t=0 时位置）与匀速平移速度构成。
+///
+/// 解算时按模拟时间 `t` 把基准障碍平移 `vel * t` 得到当前障碍（支持 `ConvexHull`，
+/// 递归平移其所有 `parts`）。旋转/非匀速运动暂不支持（首版聚焦平移动态障碍）。
+///
+/// 用法：在 `QuadrotorPlant` 上通过 `set_dynamic_obstacles` 注册，`step` 内部按
+/// `self.time` 重新生成当前障碍并交给 `resolve_obstacle_contact`。
+#[derive(Clone, Debug)]
+pub struct DynamicObstacle {
+    /// 基准障碍（t=0 时所在位置）。
+    pub base: Obstacle,
+    /// 匀速平移速度 [vx,vy,vz]（m/s，引擎世界系）。
+    pub velocity: [f64; 3],
+}
+
+impl DynamicObstacle {
+    /// 生成 `t` 时刻的障碍（基准障碍平移 `velocity * t`）。
+    pub fn at(&self, t: f64) -> Obstacle {
+        translate_obstacle(&self.base, &self.velocity, t)
+    }
+}
+
+/// 把障碍按平移 `vel * t` 生成新障碍（支持嵌套 `ConvexHull`）。
+fn translate_obstacle(o: &Obstacle, vel: &[f64; 3], t: f64) -> Obstacle {
+    match o {
+        Obstacle::Sphere { center, radius } => Obstacle::Sphere {
+            center: [center[0] + vel[0] * t, center[1] + vel[1] * t, center[2] + vel[2] * t],
+            radius: *radius,
+        },
+        Obstacle::Box { min, max } => Obstacle::Box {
+            min: [min[0] + vel[0] * t, min[1] + vel[1] * t, min[2] + vel[2] * t],
+            max: [max[0] + vel[0] * t, max[1] + vel[1] * t, max[2] + vel[2] * t],
+        },
+        Obstacle::ConvexHull { parts } => Obstacle::ConvexHull {
+            parts: parts.iter().map(|p| translate_obstacle(p, vel, t)).collect(),
+        },
+    }
 }
 
 impl Obstacle {
@@ -271,6 +334,25 @@ impl Obstacle {
                     (cp, n)
                 }
             }
+            Obstacle::ConvexHull { parts } => {
+                // 递归取各子部件最近点中**整体最近**者，作为凸包表面最近点。
+                // 注：`resolve_obstacle_contact` 入口已把 ConvexHull 展平，本分支主要在
+                // 直接调用 `closest_point_and_normal` 时出现。
+                let mut best_cp = p;
+                let mut best_n = [0.0f64, 1.0, 0.0];
+                let mut best_dist = f64::INFINITY;
+                for part in parts {
+                    let (cp, n) = part.closest_point_and_normal(p);
+                    let d = [p[0] - cp[0], p[1] - cp[1], p[2] - cp[2]];
+                    let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best_cp = cp;
+                        best_n = n;
+                    }
+                }
+                (best_cp, best_n)
+            }
         }
     }
 }
@@ -281,8 +363,14 @@ impl Obstacle {
 /// `penalty_k` / `restitution` / `friction` 参数）。`body_radius` 为机体碰撞球半径
 /// （螺旋桨外周包络），用于把"机体中心 vs 障碍"的间隙转换为"表面 vs 表面"接触。
 ///
-/// 当存在多个障碍同时穿透时，取**最深穿透**者解算（单点接触近似，够用且稳定）。
-/// 返回接触信息；未碰撞时 `touching=false`。
+/// **多接触叠加**：当多个障碍同时穿透时，对每一个穿透障碍分别计算并施加"法向弹簧-阻尼
+/// 冲量 + 库仑摩擦冲量"，再求和注入（`world.apply_impulse` 一次批量施加）。这比"取最深
+/// 穿透单点解算"更真实——机体卡在两面墙夹角 / 同时贴地+障碍时，各接触法向独立推开，
+/// 不会被单点法向带偏。仍属单点接触近似（每个障碍只取最近点），但多障碍同时深穿透时
+/// 能正确止推、不穿入。
+///
+/// 返回**汇总**接触信息：最深穿透、`point`/`normal`/`impulse` 取穿透最深的那个障碍、
+/// `normal_force`/`friction_impulse` 为各接触之和。未碰撞时 `touching=false`。
 pub fn resolve_obstacle_contact<W: RigidBodyWorld>(
     world: &mut W,
     id: i64,
@@ -297,81 +385,103 @@ pub fn resolve_obstacle_contact<W: RigidBodyWorld>(
     let p = [tf[0], tf[1], tf[2]];
     let vel = world.get_velocity(id);
 
-    let mut best: Option<([f64; 3], [f64; 3], f64)> = None; // (接触点, 法向, 穿透深度)
+    // 递归展平 ConvexHull，使多接触叠加对每个基本碰撞体（球/盒）独立生效。
+    let obstacles = flatten_obstacles(obstacles);
+
+    // 阻尼比来自恢复系数（与地面接触同推导），所有障碍共用。
+    let zeta = if cm.restitution >= 1.0 {
+        0.0
+    } else {
+        (-cm.restitution.ln()) / (2.0 * std::f64::consts::PI)
+    }
+    .clamp(0.0, 1.0);
+    let c_crit = 2.0 * (cm.penalty_k * mass).sqrt();
+    let c_n = zeta * c_crit;
+
+    // 累计每个穿透障碍的接触（支撑多接触叠加）。
+    let mut total_impulse = [0.0f64; 3];
+    let mut total_normal_force = 0.0;
+    let mut total_friction_impulse = 0.0;
+    // 汇总信息取最深穿透者。
+    let mut deepest: Option<([f64; 3], [f64; 3], f64, f64)> = None; // (点, 法向, 穿透, 法向力)
+
     for obs in obstacles {
         let (cp, n) = obs.closest_point_and_normal(p);
         // 表面-表面间隙：机体碰撞球中心到障碍"表面点"的距离，减去机体半径。
         let gap = match obs {
             Obstacle::Sphere { center, radius } => {
                 let d = [p[0] - center[0], p[1] - center[1], p[2] - center[2]];
-                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - (radius + body_radius)
+                let g = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() - (radius + body_radius);
+                g
             }
             Obstacle::Box { .. } => {
                 let d = [p[0] - cp[0], p[1] - cp[1], p[2] - cp[2]];
                 let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                 dist - body_radius
             }
+            // 入口已 `flatten_obstacles`，循环内不会遇到 ConvexHull。
+            Obstacle::ConvexHull { .. } => unreachable!("ConvexHull already flattened at entry"),
         };
         let penetration = -gap; // >0 = 穿透
-        if penetration > 0.0 {
-            match best {
-                Some((_, _, best_pen)) if best_pen >= penetration => {}
-                _ => best = Some((cp, n, penetration)),
+        if penetration <= 0.0 {
+            continue;
+        }
+
+        // 法向速度（沿 n 正=远离障碍）
+        let vn = vel[0] * n[0] + vel[1] * n[1] + vel[2] * n[2];
+        // 法向冲量（弹簧 + 阻尼，只在接近时吸收），只能推不能拉
+        let f_spring = cm.penalty_k * penetration;
+        let f_damp = -c_n * vn.min(0.0);
+        let jn = (f_spring + f_damp) * dt;
+        let jn = jn.max(0.0);
+
+        let mut impulse = [0.0f64; 3];
+        for i in 0..3 {
+            impulse[i] = n[i] * jn;
+        }
+        // 切向摩擦（库仑）：抵消切向速度，预算 = μ·法向力冲量
+        let vn_vec = [n[0] * vn, n[1] * vn, n[2] * vn];
+        let vt = [vel[0] - vn_vec[0], vel[1] - vn_vec[1], vel[2] - vn_vec[2]];
+        let vt_mag = (vt[0] * vt[0] + vt[1] * vt[1] + vt[2] * vt[2]).sqrt();
+        if vt_mag > 1e-6 {
+            let budget = cm.friction * jn;
+            let scale = (budget / (mass * vt_mag)).min(1.0);
+            for i in 0..3 {
+                impulse[i] -= scale * mass * vt[i];
             }
+        }
+
+        // 累计到总冲量（多接触叠加）。
+        for i in 0..3 {
+            total_impulse[i] += impulse[i];
+        }
+        let fric_partial =
+            (impulse[0] * impulse[0] + impulse[1] * impulse[1] + impulse[2] * impulse[2])
+                .sqrt()
+                - jn.max(0.0);
+        total_normal_force += f_spring + f_damp;
+        total_friction_impulse += fric_partial.max(0.0);
+
+        // 记录最深穿透者作为汇总信息来源。
+        match deepest {
+            Some((_, _, best_pen, _)) if best_pen >= penetration => {}
+            _ => deepest = Some((cp, n, penetration, f_spring + f_damp)),
         }
     }
 
-    match best {
-        Some((cp, n, penetration)) => {
-            // 法向速度（沿 n 正=远离障碍）
-            let vn = vel[0] * n[0] + vel[1] * n[1] + vel[2] * n[2];
-            // 阻尼比来自恢复系数（与地面接触同推导）
-            let zeta = if cm.restitution >= 1.0 {
-                0.0
-            } else {
-                (-cm.restitution.ln()) / (2.0 * std::f64::consts::PI)
-            }
-            .clamp(0.0, 1.0);
-            let c_crit = 2.0 * (cm.penalty_k * mass).sqrt();
-            let c_n = zeta * c_crit;
-            // 法向冲量（弹簧 + 阻尼，只在接近时吸收），只能推不能拉
-            let f_spring = cm.penalty_k * penetration;
-            let f_damp = -c_n * vn.min(0.0);
-            let jn = (f_spring + f_damp) * dt;
-            let jn = jn.max(0.0);
-
-            let mut impulse = [0.0f64; 3];
-            for i in 0..3 {
-                impulse[i] = n[i] * jn;
-            }
-            // 切向摩擦（库仑）：抵消切向速度，预算 = μ·法向力冲量
-            let vn_vec = [n[0] * vn, n[1] * vn, n[2] * vn];
-            let vt = [vel[0] - vn_vec[0], vel[1] - vn_vec[1], vel[2] - vn_vec[2]];
-            let vt_mag = (vt[0] * vt[0] + vt[1] * vt[1] + vt[2] * vt[2]).sqrt();
-            if vt_mag > 1e-6 {
-                let budget = cm.friction * jn;
-                let scale = (budget / (mass * vt_mag)).min(1.0);
-                for i in 0..3 {
-                    impulse[i] -= scale * mass * vt[i];
-                }
-            }
-            world.apply_impulse(id, &impulse, 0);
-
-            let friction_impulse =
-                (impulse[0] * impulse[0] + impulse[1] * impulse[1] + impulse[2] * impulse[2])
-                    .sqrt()
-                    - jn.max(0.0);
-            ContactInfo {
-                touching: true,
-                penetration,
-                normal_force: f_spring + f_damp,
-                friction_impulse: friction_impulse.max(0.0),
-                normal: n,
-                point: cp,
-                impulse,
-            }
+    if let Some((cp, n, penetration, _)) = deepest {
+        world.apply_impulse(id, &total_impulse, 0);
+        ContactInfo {
+            touching: true,
+            penetration,
+            normal_force: total_normal_force,
+            friction_impulse: total_friction_impulse,
+            normal: n,
+            point: cp,
+            impulse: total_impulse,
         }
-        None => ContactInfo {
+    } else {
+        ContactInfo {
             touching: false,
             penetration: 0.0,
             normal_force: 0.0,
@@ -379,7 +489,7 @@ pub fn resolve_obstacle_contact<W: RigidBodyWorld>(
             normal: [0.0; 3],
             point: [0.0; 3],
             impulse: [0.0; 3],
-        },
+        }
     }
 }
 
