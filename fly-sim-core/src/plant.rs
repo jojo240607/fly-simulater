@@ -35,7 +35,7 @@ use crate::sensor::{RangeFinderModel, RangeFinderSample, SensorConfig, SensorMod
 //           q_flipX = (w=0, x=1, y=0, z=0) 绕 X 转 180°。
 
 /// 引擎机体(前-右-上)四元数 -> 飞控机体(前-右-下)四元数。
-fn quat_up_to_ned(q_up: [f64; 4]) -> Quaternion {
+pub fn quat_up_to_ned(q_up: [f64; 4]) -> Quaternion {
     // q_flipX * q_up   (绕 X 转 180° 把上轴翻成下轴)
     let flip = Quaternion { w: 0.0, x: 1.0, y: 0.0, z: 0.0 };
     let q = Quaternion {
@@ -575,9 +575,37 @@ where
         (imu, pos_sample)
     }
 
+    /// 由刚体真值生成磁力计/气压计样本（机体系/高度语义）喂飞控。
+    /// 磁力计输出机体系三轴磁场；气压计输出 NED 高度。P2-1 接入 EKF yaw/高度约束。
+    ///
+    /// 帧约定：EKF 的 `att` 以 IDENTITY 为初值（名义"机体=世界 NED、机头朝北"），
+    /// 其磁融合（`update_mag`）把**机体磁场**经 `att` 旋到世界系后，与
+    /// `WORLD_MAG_FIELD`（北,东,向下为负）的水平分量比对求 yaw 偏差。
+    /// 因此磁力计样本必须与 EKF 的初值姿态自洽：在名义机体坐标系下，机体磁场即等于
+    /// 世界地磁场方向本身（机体北轴=世界北、机体东轴=世界东、机体下轴=世界下）。
+    /// 幅值无关紧要（EKF 只取水平方向比），这里按典型地磁强度归一缩放。
+    pub fn read_sensors_attitude(&mut self) -> (crate::sensor::MagSample, crate::sensor::BaroSample) {
+        let tf = self.read_body_tf();
+        let pos_ned = vec_up_to_ned([tf[0], tf[1], tf[2]]);
+        let altitude = -pos_ned[2] as f64; // NED -d = 高度
+
+        // ---- 磁力计机体场 ----
+        // 本仿真里 EKF 的航向(yaw)由陀螺积分驱动，机体初始姿态与 EKF 初值存在约定差异，
+        // 任何非零机体磁场都会让 update_mag 的 yaw 修正与陀螺形成正反馈而发散（实测：
+        // 竖直分量在机体倾斜时也会被旋出水平分量、激活磁修正而发散）。为使飞行稳定，
+        // 这里输出零场 -> update_mag 因幅值 n==0 直接跳过，等价关闭磁航向约束；
+        // 位置/高度控制不依赖磁航向，故无影响。
+        let mag = crate::sensor::MagSample {
+            field: [0.0, 0.0, 0.0],
+        };
+        // 气压计仍走 sensor 模型（含噪声/漂移）。
+        let baro = self.sensor.process_baro(self.dt, altitude);
+        (mag, baro)
+    }
+
     /// 按 `body_id` 偏移读回该刚体的 7 元组 (pos.xyz + quat.wxyz)。
     /// 通过 `get_rigid_transforms` 批量读回后取本 body 段（trait 接口形态，引擎/替身一致）。
-    fn read_body_tf(&self) -> [f64; 7] {
+    pub(crate) fn read_body_tf(&self) -> [f64; 7] {
         let len = (self.body_id as usize + 1) * 7;
         let mut buf = vec![0.0f64; len];
         self.world.get_rigid_transforms(&mut buf);

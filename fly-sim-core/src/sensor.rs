@@ -268,43 +268,16 @@ impl SensorModel {
 
     /// 阶段 P2-1：磁力计 + 气压计（航向/高度测量）。
     ///
-    /// `quat_ned` = 机体→NED 四元数 [w,x,y,z]，`altitude` = NED 高度（-d，m）。
-    /// 磁力计：把 NED 地磁场（磁北水平分量 + 磁倾角）转到机体系，加硬铁/软铁/噪声。
-    /// 气压计：真值高度 + 白噪声 + 慢漂移（随机游走）。
-    pub fn process_attitude(
-        &mut self,
-        dt: f64,
-        quat_ned: [f64; 4],
-        altitude: f64,
-    ) -> (MagSample, BaroSample) {
+    /// 气压计：真值高度 + 白噪声 + 慢漂移（随机游走）。`altitude` = NED 高度（-d，m）。
+    pub fn process_baro(&mut self, dt: f64, altitude: f64) -> BaroSample {
         self.time += dt;
-
-        // ---- 磁力计 ----
-        // NED 地磁场（近似）：磁北水平分量 B_h + 磁倾角 dip。
-        // 取磁倾角约 60°（中纬度），B_h≈25uT，B_d≈35uT（近似量级）。
-        let dip = 60.0f64.to_radians();
-        let b_ned = [25.0 * dip.cos(), 0.0, 25.0 * dip.sin()]; // 磁北在 NED 北向 + 向下分量
-        // 转到机体：v_body = R(quat_ned⁻¹)·v_ned
-        let b_body = rotate_by_quat_conj(quat_ned, b_ned);
-        // 硬铁偏置 + 软铁缩放 + 白噪声
-        let mut field = [0.0f64; 3];
-        for i in 0..3 {
-            field[i] = b_body[i] * self.cfg.mag_soft_iron[i]
-                + self.cfg.mag_hard_iron[i]
-                + self.cfg.mag_noise * self.rng.gaussian();
-        }
-        let mag = MagSample { field };
-
-        // ---- 气压计 ----
         // 慢漂移：随机游走
         self.baro_bias += self.cfg.baro_drift * self.rng.gaussian() * dt.sqrt();
         self.baro_bias = self.baro_bias.clamp(-50.0, 50.0);
         let alt_meas = altitude + self.baro_bias + self.cfg.baro_noise * self.rng.gaussian();
         // 气压：标准大气近似（每 10m 约 1.2hPa 变化），海平面 1013.25hPa。
         let pressure = 1013.25 * (-alt_meas / 8434.0).exp();
-        let baro = BaroSample { altitude: alt_meas, pressure };
-
-        (mag, baro)
+        BaroSample { altitude: alt_meas, pressure }
     }
 }
 

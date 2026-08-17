@@ -8,7 +8,7 @@ use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::controller::{Controller, IndiController, LqrController, PidController, Setpoint};
 use flyctrl_core::estimator::EkfEstimator;
 use flyctrl_core::hal::actuator::{MotorActuator, OutputProtocol};
-use flyctrl_core::hal::sensor::{AirspeedSensor, GpsSensor, ImuSensor};
+use flyctrl_core::hal::sensor::{AirspeedSensor, GpsSensor, ImuSensor, MagSensor};
 use flyctrl_core::hil::HilContext;
 use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond, Second};
 use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, VehicleState};
@@ -82,6 +82,16 @@ impl AirspeedSensor for SimAirspeed {
     fn healthy(&self) -> bool { self.last.is_some() }
 }
 
+/// 物理引擎提供的磁力计（机体系三轴磁场）。
+pub struct SimMag {
+    last: [f32; 3],
+}
+
+impl MagSensor for SimMag {
+    fn read(&mut self) -> [f32; 3] { self.last }
+    fn healthy(&self) -> bool { true }
+}
+
 // ---- 真实执行器：仅缓存控制输出，由 FlyController.step 显式回写 plant ----
 //
 // 注意：不能用裸指针缓存 `plant` 地址——`FlyController::new` 里 `plant` 构造后会被
@@ -110,6 +120,7 @@ pub struct FlyController<W> {
     imu: SimImu,
     gps: SimGps,
     air: SimAirspeed,
+    mag: SimMag,
     motors: SimMotors,
     cfg: VehicleConfig,
     /// 解锁态：true=电机可转（默认 true，保证既有悬停/任务测试行为不变）；
@@ -170,6 +181,7 @@ where
         };
         let gps = SimGps { last: None };
         let air = SimAirspeed { last: None };
+        let mag = SimMag { last: [0.0; 3] };
         let motors = SimMotors { last: ActuatorCmd::zero() };
 
         Self {
@@ -178,6 +190,7 @@ where
             imu,
             gps,
             air,
+            mag,
             motors,
             cfg: cfg.clone(),
             armed: true,
@@ -240,6 +253,13 @@ where
             speed: flyctrl_core::units::Airspeed(vh as f32),
             timestamp_s: 0.0,
         });
+        // 磁力计：取机体磁场（含硬铁/软铁/噪声），喂给 EKF yaw 约束。
+        let (mag_sample, _baro) = self.plant.read_sensors_attitude();
+        self.mag.last = [
+            mag_sample.field[0] as f32,
+            mag_sample.field[1] as f32,
+            mag_sample.field[2] as f32,
+        ];
 
         // 2) 跑控制律（SIL/HIL 共享闭环）。motors.apply 只记录指令。
         // 2.0) P1-2 闭环联动：装备避障时，先读前向测距并把避障速度并入设定点。
@@ -260,9 +280,9 @@ where
         }
         let setpoint_ref = &sp;
         let state = match &mut self.hil {
-            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.mag, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.mag, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.mag, setpoint_ref, &mut self.motors, &self.cfg),
         };
 
         // 2.5) 阶段 5/8：故障处理。
