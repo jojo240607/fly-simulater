@@ -262,3 +262,35 @@ allocation）重排剩余 3 路电机推力/力矩，属未来工作（见 PLAN 
 **验证**：三个控制律（pid/indi/lqr）悬停日志均 2500 行 × 38 列完整；
 `cmp_controllers.py` 给出对比表（三者 RMS_dz≈0.116m，收敛一致）；`replay.py` 正常产出 PNG；
 `cargo test` 4/4 PASS。
+
+---
+
+## 阶段 11 — `--sensor-noise` 鲁棒性根因校正 + 噪声下控制律稳定 ⏳ 进行中
+
+**背景（对 PLAN §4/§5 结论的重要校正）**：阶段 4/5 把 `--sensor-noise` 发散归因为
+"EKF 测量噪声协方差 R 疑似为 0，估计器缺陷"。**实测证明该归因错误**——正确根因如下。
+
+**诊断（实测，`tests/_noise_probe2.rs`）**：
+- `--sensor-noise` + `ContactModel::None`：40s 真实高度 `TRU alt=534m`、水平 60m，且
+  **`EST alt=535m` ≈ TRU**（EKF 估计与真值几乎一致）→ EKF 没有发散，**是物理真值在飞走**。
+- `--sensor-noise` + `ContactModel::Some(default)`（默认 `ground_y=-5` 地面约束）：
+  40s 稳定 `TRU alt=4.9m`、EST 5.08m → 地面把偶尔被噪声压到 -5 以下的机体弹回，意外"托住"了轨迹。
+- 零噪声（默认 `SensorConfig`）下 `ContactModel::None` 也稳定（-4.95m/0 horiz）。
+
+**结论**：
+1. `--sensor-noise` 发散**不是 EKF bug**，而是 **PID 控制律在真实传感器噪声（IMU 抖动 +
+   5Hz/0.15s 延迟 GPS + 丢星）下不稳定**，控制抖动 → 真实轨迹正反馈发散。
+   `ContactModel` 地面约束只是掩盖（把发散机体挡在地面之上），非修复。
+2. 收敛判据不能只看"EST 跟 TRU 一致"——那只能证明 EKF 跟踪正常，不能证明系统稳定。
+   必须同时断言 **TRU 自身有界**（如 `|TRU alt - setpoint| < 容差`）。PLAN §4 旧判据只看 dz 是误导。
+
+**下一步（待做，低风险优先）**：
+- A. **控制律噪声鲁棒性**：在 `flyctrl-core` 调 PID 参数/前馈或加 EKF 输出低通，
+  使 realistic 噪声下悬停 TRU 有界（先确认是 IMU 姿态抖动还是 GPS 位置外环主导）。
+- B. **回归测试锁定**：新增 `tests/sensor_noise.rs`，断言 `--sensor-noise` 下 TRU 有界
+  （目前已知发散，作为 `ignore` 待修复项 + `#[should_panic]` 边界），避免回归掩盖。
+- C. **仿真默认安全网**：`ToyWorld::new` 默认 `ContactModel` 建议 `Some(default())`
+  （与 PhySdkWorld 一致），避免无地面时噪声发散被误判为"估计器缺陷"。
+
+**当前状态**：根因已定位（控制律，非 EKF）；临时探针 `tests/_noise_probe.rs` / `_noise_probe2.rs`
+用于诊断，确认后应删除。

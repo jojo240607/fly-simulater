@@ -109,7 +109,9 @@ impl Default for SensorConfig {
 
 impl SensorConfig {
     /// 真实消费级 IMU/GPS 噪声配置（开启 --sensor-noise 用）。
-    /// 注：当前 EKF 测量噪声协方差 R 疑似为 0，开此配置会暴露发散（阶段5 修复）。
+    /// 注：实测（PLAN 阶段11）开启后发散的根因是 **PID 控制律对噪声不耐受**，
+    /// 而非 EKF（EKF 估计仍贴合真值，发散的是物理真值本身）。`ContactModel` 地面约束
+    /// 会掩盖该发散。`realistic` 用于暴露控制律噪声鲁棒性缺陷。
     pub fn realistic() -> Self {
         Self {
             accel_bias: [0.02, -0.01, 0.05],
