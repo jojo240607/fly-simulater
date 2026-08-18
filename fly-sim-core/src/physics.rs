@@ -927,6 +927,44 @@ impl ToyWorld {
             }
         }
     }
+
+    /// 用单位四元数 `q`（w,x,y,z）把**机体**向量旋到**世界**系（与 `plant.rs::rotate_by_quat` 同义）。
+    fn quat_rot_vec(q: &[f64; 4], v: &[f64; 3]) -> [f64; 3] {
+        let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
+        let r00 = 1.0 - 2.0 * (y * y + z * z);
+        let r01 = 2.0 * (x * y - w * z);
+        let r02 = 2.0 * (x * z + w * y);
+        let r10 = 2.0 * (x * y + w * z);
+        let r11 = 1.0 - 2.0 * (x * x + z * z);
+        let r12 = 2.0 * (y * z - w * x);
+        let r20 = 2.0 * (x * z - w * y);
+        let r21 = 2.0 * (y * z + w * x);
+        let r22 = 1.0 - 2.0 * (x * x + y * y);
+        [
+            r00 * v[0] + r01 * v[1] + r02 * v[2],
+            r10 * v[0] + r11 * v[1] + r12 * v[2],
+            r20 * v[0] + r21 * v[1] + r22 * v[2],
+        ]
+    }
+
+    /// 用单位四元数 `q`（w,x,y,z）把**世界**向量旋到**机体**系（与 `plant.rs::rotate_by_quat_conj` 同义）。
+    fn quat_rot_vec_conj(q: &[f64; 4], v: &[f64; 3]) -> [f64; 3] {
+        let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
+        let r00 = 1.0 - 2.0 * (y * y + z * z);
+        let r01 = 2.0 * (x * y + w * z);
+        let r02 = 2.0 * (x * z - w * y);
+        let r10 = 2.0 * (x * y - w * z);
+        let r11 = 1.0 - 2.0 * (x * x + z * z);
+        let r12 = 2.0 * (y * z + w * x);
+        let r20 = 2.0 * (x * z + w * y);
+        let r21 = 2.0 * (y * z - w * x);
+        let r22 = 1.0 - 2.0 * (x * x + y * y);
+        [
+            r00 * v[0] + r01 * v[1] + r02 * v[2],
+            r10 * v[0] + r11 * v[1] + r12 * v[2],
+            r20 * v[0] + r21 * v[1] + r22 * v[2],
+        ]
+    }
 }
 
 impl RigidBodyWorld for ToyWorld {
@@ -963,14 +1001,19 @@ impl RigidBodyWorld for ToyWorld {
         if m <= 0.0 {
             return;
         }
-        // 角冲量 = I⁻¹ · k。
+        // 世界系刚体动力学约定（与 PhySdkWorld 一致）：`ang` 存储【世界系】角速度，
+        // 角增量 = I_world⁻¹ · k_world。对对角机体惯量 I_body，世界系逆惯量作用为：
+        //   先把世界力矩 k_world 旋到机体系 -> 乘以机体逆惯量 -> 再旋回世界系。
         let inv_i = [
             1.0 / self.inertia[i][0].max(1e-9),
             1.0 / self.inertia[i][1].max(1e-9),
             1.0 / self.inertia[i][2].max(1e-9),
         ];
+        let k_body = Self::quat_rot_vec_conj(&self.quat[i], k3);
+        let dw_body = [k_body[0] * inv_i[0], k_body[1] * inv_i[1], k_body[2] * inv_i[2]];
+        let dw_world = Self::quat_rot_vec(&self.quat[i], &dw_body);
         for k in 0..3 {
-            self.ang[i][k] += k3[k] * inv_i[k];
+            self.ang[i][k] += dw_world[k];
         }
     }
 
@@ -1012,17 +1055,17 @@ impl RigidBodyWorld for ToyWorld {
             for k in 0..3 {
                 self.pos[i][k] += self.vel[i][k] * dt;
             }
-            // 地面碰撞：钳制 y>=0（停机坪，无反弹）。
-            if self.pos[i][1] < 0.0 {
-                self.pos[i][1] = 0.0;
-                if self.vel[i][1] < 0.0 {
-                    self.vel[i][1] = 0.0;
-                }
-            }
 
-            // ---- 姿态积分：q += 0.5·(0,ω)⊗q·dt，后归一化 ----
-            let omega_q = [0.0, self.ang[i][0], self.ang[i][1], self.ang[i][2]];
-            let dq = Self::quat_mul(&omega_q, &self.quat[i]);
+            // 注：地面接触统一由 `plant.rs::resolve_ground_contact`（contact=Some 时）处理，
+            // 此处不再硬编码 y>=0 地板。这样与 PhySdkWorld（仅依赖接触模型、contact=None
+            // 即真空无地板）行为一致；否则 contact=None 场景下 ToyWorld 多一块地板会导致
+            // 两引擎在坠落/触地表现上不一致。
+
+            // ---- 姿态积分（世界系约定，与 PhySdkWorld 一致）----
+            // `ang` 为【世界系】角速度 ω。世界系四元数导数：q̇ = 0.5 · (0,ω) ⊗ q。
+            // 稳态悬停时控制器力矩 ≈ 0，ω ≈ 0，姿态保持初始 90° 翻转（推力竖直向上）。
+            let omega = self.ang[i];
+            let dq = Self::quat_mul(&[0.0, omega[0], omega[1], omega[2]], &self.quat[i]);
             for k in 0..4 {
                 self.quat[i][k] += 0.5 * dq[k] * dt;
             }

@@ -7,7 +7,7 @@
 //!
 //! 全部确定性（种子化 PRNG），保证可复现。
 
-use flyctrl_core::units::{Meter, MeterPerSecondSquared, RadianPerSecond};
+use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 use flyctrl_core::vehicle::{ImuSample, PosSample};
 
 /// 磁力计采样（机体系 3 轴，单位化 uT）。仿真侧专用，不与 MCU 共享结构。
@@ -257,9 +257,10 @@ impl SensorModel {
             let (n, e, d, vn, ve, vd) = *self.gps_delay.buf.front().unwrap();
             // 丢星帧（NaN）-> 返回 None，EKF 退化为纯惯性。
             if !n.is_nan() {
-                pos_sample = Some(PosSample {
-                    pos: [Meter(n as f32), Meter(e as f32), Meter(d as f32)],
-                });
+                pos_sample = Some(PosSample::with_vel(
+                    [Meter(n as f32), Meter(e as f32), Meter(d as f32)],
+                    [MeterPerSecond(vn as f32), MeterPerSecond(ve as f32), MeterPerSecond(vd as f32)],
+                ));
             }
         }
 

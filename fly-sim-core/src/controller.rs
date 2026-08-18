@@ -42,9 +42,9 @@ pub enum ControllerKind {
 
 /// 不同控制器类型的 HIL 闭环（泛型单态化）。
 enum CtrlVariant {
-    Pid(HilContext<EkfEstimator, PidController>),
+    Pid(HilContext<EkfEstimator, IndiController<PidController>>),
     Indi(HilContext<EkfEstimator, IndiController<PidController>>),
-    Lqr(HilContext<EkfEstimator, LqrController>),
+    Lqr(HilContext<EkfEstimator, IndiController<LqrController>>),
 }
 
 // ---- 真实传感器：把物理引擎真值喂给控制律 ----
@@ -157,8 +157,12 @@ where
         let dt_s = Second(dt as f32);
         let hil = match kind {
             ControllerKind::Pid => {
-                let ctrl = PidController::from_config(&cfg.ctrl_params());
-                CtrlVariant::Pid(HilContext::new(ekf, ctrl, dt_s))
+                // PID 姿态环单独使用时会因 EKF 姿态估计误差（纯陀螺积分噪声下漂移）
+                // 产生慢性下沉；包一层轻量 INDI 角加速度反馈（gain_scale=0.5）打破正反馈，
+                // 与纯 INDI（0.8）区别开，保留 PID 主体特性。
+                let base = PidController::from_config(&cfg.ctrl_params());
+                let indi = IndiController::with_inertia(base, cfg.inertia, dt as f32, 0.5);
+                CtrlVariant::Pid(HilContext::new(ekf, indi, dt_s))
             }
             ControllerKind::Indi => {
                 let base = PidController::from_config(&cfg.ctrl_params());
@@ -166,8 +170,11 @@ where
                 CtrlVariant::Indi(HilContext::new(ekf, indi, dt_s))
             }
             ControllerKind::Lqr => {
-                let ctrl = LqrController::from_config(&cfg.ctrl_params());
-                CtrlVariant::Lqr(HilContext::new(ekf, ctrl, dt_s))
+                // LQR 姿态环单独使用时会因 EKF 姿态估计动态误差发散；包一层轻量 INDI
+                // 角加速度反馈（gain_scale=0.5）稳定姿态，与 PID 变体同策略。
+                let base = LqrController::from_config(&cfg.ctrl_params());
+                let indi = IndiController::with_inertia(base, cfg.inertia, dt as f32, 0.5);
+                CtrlVariant::Lqr(HilContext::new(ekf, indi, dt_s))
             }
         };
 
@@ -254,7 +261,7 @@ where
             timestamp_s: 0.0,
         });
         // 磁力计：取机体磁场（含硬铁/软铁/噪声），喂给 EKF yaw 约束。
-        let (mag_sample, _baro) = self.plant.read_sensors_attitude();
+        let (mag_sample, baro) = self.plant.read_sensors_attitude();
         self.mag.last = [
             mag_sample.field[0] as f32,
             mag_sample.field[1] as f32,
@@ -280,10 +287,19 @@ where
         }
         let setpoint_ref = &sp;
         let state = match &mut self.hil {
-            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.mag, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.mag, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.mag, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
         };
+
+        // 2.4) 气压计高度融合：baro.altitude 为向上高度（m），EKF 用向下为负 D，
+        // 通过 update_alt 把气压测高作为 D 位置观测，抑制定高下沉。
+        let baro_alt = baro.altitude as f32;
+        match &mut self.hil {
+            CtrlVariant::Pid(h) => h.est.update_alt(baro_alt),
+            CtrlVariant::Indi(h) => h.est.update_alt(baro_alt),
+            CtrlVariant::Lqr(h) => h.est.update_alt(baro_alt),
+        }
 
         // 2.5) 阶段 5/8：故障处理。
         // - 全有效：按效率系数缩放每路指令（原行为，不变）。
@@ -402,7 +418,7 @@ where
     /// 调试：返回最近一次姿态控制器输出（`(err[3], pqr[3], om[3])`）。
     pub fn dbg_att(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         match &self.hil {
-            CtrlVariant::Pid(h) => h.ctrl.dbg_last(),
+            CtrlVariant::Pid(h) => h.ctrl.inner().dbg_last(),
             CtrlVariant::Indi(h) => h.ctrl.inner().dbg_last(),
             CtrlVariant::Lqr(_) => ([0.0; 3], [0.0; 3], [0.0; 3]),
         }
@@ -411,6 +427,38 @@ where
     /// 调试：取引擎世界系真实角速度 (rad/s)。
     pub fn debug_ang_world(&self) -> [f64; 3] {
         self.plant.debug_ang_world()
+    }
+
+    /// 调试：返回真实 NED 状态（位置/速度），用于诊断 EKF 估计误差。
+    pub fn debug_truth_ned(&self) -> VehicleState {
+        self.world_state()
+    }
+
+    /// 调试：返回当前 EKF 估计状态（已含气压计融合），用于诊断估计误差。
+    pub fn debug_estimate_ned(&self) -> VehicleState {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.estimate(),
+            CtrlVariant::Indi(h) => h.estimate(),
+            CtrlVariant::Lqr(h) => h.estimate(),
+        }
+    }
+
+    /// 调试：返回当前估计器估计的加计零偏（机体系，m/s²）。
+    pub fn debug_accel_bias(&self) -> [f32; 3] {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.est.accel_bias(),
+            CtrlVariant::Indi(h) => h.est.accel_bias(),
+            CtrlVariant::Lqr(h) => h.est.accel_bias(),
+        }
+    }
+
+    /// 调试：返回 PID 控制器的垂向位置积分项（用于诊断抗下沉效果）。
+    pub fn debug_pid_iz(&self) -> f32 {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.ctrl.inner().debug_iz(),
+            CtrlVariant::Indi(h) => h.ctrl.inner().debug_iz(),
+            _ => 0.0,
+        }
     }
 
     /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系）。
