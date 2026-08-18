@@ -292,8 +292,11 @@ where
             CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
         };
 
-        // 2.4) 气压计高度融合：baro.altitude 为向上高度（m），EKF 用向下为负 D，
-        // 通过 update_alt 把气压测高作为 D 位置观测，抑制定高下沉。
+        // 2.4) 气压计高度融合：锚定 EKF 垂直通道，抑制开环加计积分导致的高度漂移
+        // （真实掉高/控制抖动的根因之一）。baro.altitude 为向上高度（m），EKF 用向下为负 D，
+        // 通过 update_alt 把气压测高作为 D 位置观测（见 ekf::update_alt：y = -alt - x[2]）。
+        // baro 含噪声/漂移（见 SensorModel::process_baro），经独立 r_alt 观测约束 D 位置。
+        // 三种控制律底层都是 EkfEstimator，逐一调用。
         let baro_alt = baro.altitude as f32;
         match &mut self.hil {
             CtrlVariant::Pid(h) => h.est.update_alt(baro_alt),
@@ -400,6 +403,11 @@ where
         self.plant.debug_up()
     }
 
+    /// 调试：返回最近一次测距采样（避障诊断用）。
+    pub fn dbg_ranger(&mut self) -> Option<crate::sensor::RangeFinderSample> {
+        self.plant.read_ranger()
+    }
+
     /// 阶段 8：动力系统状态（电池端电压 V，4 路电机转速 rad/s）。
     pub fn powertrain_state(&self) -> (f64, [f64; 4]) {
         self.plant.powertrain_state()
@@ -430,10 +438,6 @@ where
     }
 
     /// 调试：返回真实 NED 状态（位置/速度），用于诊断 EKF 估计误差。
-    pub fn debug_truth_ned(&self) -> VehicleState {
-        self.world_state()
-    }
-
     /// 调试：返回当前 EKF 估计状态（已含气压计融合），用于诊断估计误差。
     pub fn debug_estimate_ned(&self) -> VehicleState {
         match &self.hil {
@@ -464,6 +468,11 @@ where
     /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系）。
     pub fn debug_tau_body(&self) -> [f64; 3] {
         self.plant.debug_tau_body()
+    }
+
+    /// 调试：返回引擎世界系真实状态（NED），供传感器噪声鲁棒性诊断对比 EKF 估计。
+    pub fn debug_truth_ned(&self) -> VehicleState {
+        self.plant.state_ned()
     }
 }
 

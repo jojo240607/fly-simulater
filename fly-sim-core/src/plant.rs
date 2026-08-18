@@ -139,6 +139,13 @@ impl<W> QuadrotorPlant<W>
 where
     W: RigidBodyWorld,
 {
+    /// 引擎系(前-右-上)初始机体姿态常量：绕 X 轴 -90° 使上轴(+Z)对齐世界 +Y(上)，物理水平。
+    pub fn initial_attitude() -> [f64; 4] {
+        let c = (std::f64::consts::FRAC_PI_4).cos();
+        let s = (std::f64::consts::FRAC_PI_4).sin();
+        [c, -s, 0.0, 0.0]
+    }
+
     /// 在世界中创建机体刚体。mass / 转动惯量来自机型配置。
     /// `world`：实现了 `RigidBodyWorld` 的物理世界（真实引擎或测试替身）。
     /// `wind`：可选风场（阶段 3 抗风/前飞场景）。

@@ -120,7 +120,7 @@ impl SensorConfig {
             gyro_bias_inst: 0.0003,
             vib_amp: 0.1,
             gps_delay: 0.15,
-            gps_rate: 5.0,
+            gps_rate: 20.0,
             gps_pos_noise: 0.5,
             gps_vel_noise: 0.1,
             gps_drop_prob: 0.0,

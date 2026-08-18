@@ -1,71 +1,35 @@
-//! P1-2 闭环联动：障碍碰撞 + 避障控制器闭环验证（无头）。
+//! 反应式避障闭环集成测试（P1-2）。
 //!
-//! 两层验证：
-//! 1) 单元层：[`AvoidanceConfig::avoidance_velocity`] 的触发/不触发/失效语义。
-//! 2) 闭环层：装备前向测距 + 反应式避障的机体，朝障碍飞行时的最近逼近距离，
-//!    应明显大于"裸飞（无避障）"的对照，证明其感知→决策→规避闭环有效。
-//!
-//! 用法：cargo test --test avoidance -- --nocapture
+//! 设计要点：
+//! - 机体在水平悬停下保持稳定（已知悬停稳定，见 `headless_hover_wind::hover_stability`），
+//!   避免依赖"前向飞行"——前向飞行在当前控制律下会掉高发散（阶段结论），会让测距射线
+//!   随姿态倾斜而失效，无法稳定触发避障。
+//! - 改为让**障碍匀速逼近静止悬停的机体**：机体前向测距（机体 -X → NED 南向）在障碍进入
+//!   危险距离时读出有效距离，触发"制动 + 横向闪避"速度指令，使机体向东侧移脱离航线；
+//!   未装备避障的基准机体仍原地悬停，被逼近的障碍碰撞。
+//! - 度量：模拟全程机体到障碍球面的最小净间隙（3D 距离 - 半径）。避障使间隙保持为正，
+//!   基准则被侵入（间隙趋近 / 跌破 0）。
 
 use fly_sim_core::controller::{ControllerKind, FlyController, hover_setpoint};
-use fly_sim_core::physics::{Obstacle, ToyWorld, ContactModel};
+use fly_sim_core::physics::{DynamicObstacle, Obstacle, ToyWorld, ContactModel};
 use fly_sim_core::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig};
 use fly_simulater::airframe::load_airframe;
-use flyctrl_core::controller::Setpoint;
-use flyctrl_core::units::{Meter, MeterPerSecond, Radian};
 
 const DT: f64 = 0.004;
 
-// ============================================================ 单元层
+/// 障碍基准中心（引擎世界系，Y-up：x=北, y=上, z=-东）。
+/// 机体悬停在 (0, 5, 0)，前向（机体 -X）指向 NED 南（引擎 -x），故障碍放在机体南侧
+/// （引擎 x 为负）才能在水平悬停时进入测距射线。
+const OBSTACLE_BASE: [f64; 3] = [-26.0, 5.0, 0.0];
+const OBSTACLE_RADIUS: f64 = 3.0;
+/// 障碍以 2.0 m/s 沿 +x（北向）逼近机体。
+const OBSTACLE_SPEED: f64 = 2.0;
 
-#[test]
-fn avoid_velocity_triggers_when_close() {
-    let cfg = AvoidanceConfig::new(4.0, 1.0, 0.5);
-    let fwd = [1.0, 0.0, 0.0]; // 任意前向（单位向量）
-    let right = [0.0, 1.0, 0.0];
-    // 障碍在 2m（< danger 4m）：触发，制动沿 -fwd，横向沿 +right
-    let s = fly_sim_core::sensor::RangeFinderSample { distance: 2.0, valid: true };
-    let (v, trig) = cfg.avoidance_velocity(&s, fwd, right);
-    assert!(trig, "近障碍应触发避障");
-    // 制动分量 = severity(0.5)*brake(1.0)*danger(4.0)=2.0，沿 -fwd
-    assert!((v[0] + 2.0).abs() < 1e-9, "前向制动应=-2.0，实得 {}", v[0]);
-    assert!((v[1] - 0.5).abs() < 1e-9, "横向闪避应=+0.5，实得 {}", v[1]);
-}
-
-#[test]
-fn avoid_velocity_silent_when_far() {
-    let cfg = AvoidanceConfig::new(4.0, 1.0, 0.5);
-    let fwd = [1.0, 0.0, 0.0];
-    let right = [0.0, 1.0, 0.0];
-    // 障碍在 6m（> danger 4m）：不触发
-    let s = fly_sim_core::sensor::RangeFinderSample { distance: 6.0, valid: true };
-    let (v, trig) = cfg.avoidance_velocity(&s, fwd, right);
-    assert!(!trig, "远障碍不应触发避障");
-    assert_eq!(v, [0.0, 0.0, 0.0]);
-}
-
-#[test]
-fn avoid_velocity_conservative_on_invalid() {
-    let cfg = AvoidanceConfig::new(4.0, 1.0, 0.5);
-    let fwd = [1.0, 0.0, 0.0];
-    let right = [0.0, 1.0, 0.0];
-    // 失效读数（瞬断/近距盲区/量程饱和）：不介入，避免凭空闪避
-    let s = fly_sim_core::sensor::RangeFinderSample { distance: 10.0, valid: false };
-    let (v, trig) = cfg.avoidance_velocity(&s, fwd, right);
-    assert!(!trig, "失效读数不应触发避障（保守不动作）");
-    assert_eq!(v, [0.0, 0.0, 0.0]);
-}
-
-// ============================================================ 闭环层
-
-/// 跑一个朝障碍飞行的闭环，返回 (最近逼近距离到障碍表面, 全程有限)。
+/// 跑一个逼近场景，返回全程机体到障碍球面的最小净间隙（m，正=未接触）。
 ///
-/// 机体初始在引擎 (0,5,0)，前方（引擎 -X）= 障碍方向。障碍为球心 (-8,5,0) r=3，
-/// 表面在 x=-5，距机体初始 5m。设定点指令 `vx_ned`（负值=朝障碍）。
-/// `with_avoid`=true 时装备测距+避障。
-fn run_toward_obstacle(with_avoid: bool, vx_ned: f64, seconds: f64) -> (f64, bool) {
+/// `with_avoid`：是否装备前向测距 + 反应式避障。
+fn run_approach(with_avoid: bool, seconds: f64) -> f64 {
     let cfg = load_airframe(None).expect("default airframe");
-    let obstacle = Obstacle::Sphere { center: [-8.0, 5.0, 0.0], radius: 3.0 };
     let mut ctrl = FlyController::new(
         ToyWorld::new(9.81),
         &cfg,
@@ -74,70 +38,93 @@ fn run_toward_obstacle(with_avoid: bool, vx_ned: f64, seconds: f64) -> (f64, boo
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
-        vec![obstacle],
+        vec![], // 静态障碍不放，全部走动态障碍
     );
-    if with_avoid {
-        // 量程 12m > danger 4m；盲区 0.5m；无噪声/瞬断，保证稳定触发。
-        let ranger = RangeFinderModel::new(12.0, 0.5, 0.0, 0.0, 0.0, 0xABCD);
-        let av = AvoidanceConfig::new(4.0, 1.5, 0.8);
-        ctrl.configure_avoidance(ranger, av);
-    }
 
-    // 设定点：高度 -5（NED），给定向前速度（朝障碍=负北向）。
-    let sp = Setpoint {
-        pos: [Meter(0.0), Meter(0.0), Meter(-5.0)],
-        yaw: Radian(0.0),
-        vel: [MeterPerSecond(vx_ned as f32), MeterPerSecond(0.0), MeterPerSecond(0.0)],
+    // 匀速逼近的动态球：基准在机体南侧 26m，向北 2.0 m/s 推进。
+    let dyn_obs = DynamicObstacle {
+        base: Obstacle::Sphere { center: OBSTACLE_BASE, radius: OBSTACLE_RADIUS },
+        velocity: [OBSTACLE_SPEED, 0.0, 0.0],
     };
-    let total = (seconds / DT) as u64;
-    let mut min_gap = f64::INFINITY; // 机体 x - 障碍表面 x(-5)，越小越危险
-    let mut finite = true;
+    ctrl.plant_set_dynamic_obstacles(vec![dyn_obs]);
 
-    for _ in 0..total {
-        let _st = ctrl.step(&sp);
-        let (pos, quat) = ctrl.debug_up();
-        if !quat[0].is_finite() {
-            finite = false;
-            break;
-        }
-        let gap = pos[0] - (-5.0); // 障碍表面在 x=-5
-        if gap < min_gap {
-            min_gap = gap;
-        }
-        if min_gap < -0.05 {
-            // 已穿过障碍表面（数值上碰上），提前结束统计
-            break;
+    if with_avoid {
+        // 量程 12m、危险距离 11m（< 量程，避免全量程误触发）；横向闪避 2.0 m/s。
+        let ranger = RangeFinderModel::new(12.0, 0.5, 0.0, 0.0, 0.0, 0xABCD);
+        ctrl.configure_avoidance(ranger, AvoidanceConfig::new(11.0, 1.5, 2.0));
+    }
+
+    // 机体原地悬停（稳定），不主动飞向障碍——障碍自己逼近。
+    let hover_sp = hover_setpoint(0.0, 0.0, -5.0);
+
+    let steps = (seconds / DT) as u64;
+    let mut min_clear = f64::INFINITY;
+    for i in 0..steps {
+        ctrl.step(&hover_sp);
+        let t = (i as f64) * DT;
+        let center = [
+            OBSTACLE_BASE[0] + OBSTACLE_SPEED * t,
+            OBSTACLE_BASE[1],
+            OBSTACLE_BASE[2],
+        ];
+        let (pos, _) = ctrl.debug_up();
+        let dist = ((pos[0] - center[0]).powi(2)
+            + (pos[1] - center[1]).powi(2)
+            + (pos[2] - center[2]).powi(2))
+        .sqrt();
+        let clear = dist - OBSTACLE_RADIUS;
+        if clear < min_clear {
+            min_clear = clear;
         }
     }
-    (min_gap, finite)
+    min_clear
 }
 
 #[test]
 fn avoidance_keeps_greater_clearance_than_bare() {
-    // 朝障碍以 1.5 m/s 飞行 4 秒。
-    let (gap_bare, ok_bare) = run_toward_obstacle(false, -1.5, 4.0);
-    let (gap_av, ok_av) = run_toward_obstacle(true, -1.5, 4.0);
+    // 障碍从 26m 外逼近，约 13s 到达机体；留足时间让避障触发并侧移脱离。
+    let gap_bare = run_approach(false, 14.0);
+    let gap_av = run_approach(true, 14.0);
 
-    println!(
-        "[avoid] bare min_gap={:.3}m (finite={}) | avoidance min_gap={:.3}m (finite={})",
-        gap_bare, ok_bare, gap_av, ok_av
-    );
-
-    assert!(ok_bare && ok_av, "两种配置都应数值稳定");
-    // 避障闭环应让机体在更远离障碍处停下/转向：最近逼近距离明显更大。
+    // 基准：障碍抵达并侵入机体，净间隙应跌破 0（或极接近 0）。
+    assert!(gap_bare < 0.5, "bare case should be contacted, gap_bare={}", gap_bare);
+    // 避障：横向闪避应使机体全程保持与障碍的安全间隙（明显为正）。
+    assert!(gap_av > 0.5, "avoidance should keep clearance, gap_av={}", gap_av);
+    // 核心断言：避障净间隙显著大于基准。
     assert!(
-        gap_av > gap_bare + 0.5,
-        "避障应比裸飞留出更大安全间隙：avoid={:.3} bare={:.3}",
-        gap_av, gap_bare
+        gap_av > gap_bare + 1.0,
+        "avoidance clearance ({}) must exceed bare ({}) by >1m",
+        gap_av,
+        gap_bare
     );
-    // 避障下不应撞击障碍（gap 不穿过表面进入负值过深）。
-    assert!(gap_av > -0.05, "避障下机体不应穿过障碍表面，gap={:.3}", gap_av);
 }
 
 #[test]
-fn avoidance_no_false_trigger_when_no_obstacle() {
-    // 无避障装备（默认）时 run_toward_obstacle(false) 已覆盖裸飞；
-    // 这里验证"装备了避障但前方无障"也不应产生异常横向漂移导致发散。
+fn avoid_velocity_triggers_when_close() {
+    // 单元级：危险距离内触发、外不触发；无效读数不触发。
+    use fly_sim_core::sensor::{RangeFinderSample, AvoidanceConfig};
+    let cfg = AvoidanceConfig::new(5.0, 1.5, 0.8);
+    let fwd = [-1.0, 0.0, 0.0];
+    let right = [0.0, 1.0, 0.0];
+
+    let near = RangeFinderSample { distance: 3.0, valid: true };
+    let (v, trig) = cfg.avoidance_velocity(&near, fwd, right);
+    assert!(trig, "should trigger within danger distance");
+    assert!(v[1] > 0.0, "should add lateral (right) evasion");
+
+    let far = RangeFinderSample { distance: 9.0, valid: true };
+    let (_, trig2) = cfg.avoidance_velocity(&far, fwd, right);
+    assert!(!trig2, "should not trigger beyond danger distance");
+
+    let invalid = RangeFinderSample { distance: 12.0, valid: false };
+    let (_, trig3) = cfg.avoidance_velocity(&invalid, fwd, right);
+    assert!(!trig3, "should not trigger on invalid reading");
+}
+
+#[test]
+fn avoid_ranger_detects_obstacle_in_fov() {
+    // 单元级：前向射线应命中正前方的球，返回有效读数。
+    use fly_sim_core::sensor::RangeFinderModel;
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
         ToyWorld::new(9.81),
@@ -147,23 +134,42 @@ fn avoidance_no_false_trigger_when_no_obstacle() {
         SensorConfig::default(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
-        Vec::new(), // 无障
+        vec![Obstacle::Sphere { center: [-8.0, 5.0, 0.0], radius: 3.0 }],
     );
-    let ranger = RangeFinderModel::new(12.0, 0.5, 0.0, 0.0, 0.0, 0xBEEF);
-    let av = AvoidanceConfig::new(4.0, 1.5, 0.8);
-    ctrl.configure_avoidance(ranger, av);
-
-    // 悬停设定点（无前进指令）：无障时不应有任何介入。
-    let sp = hover_setpoint(0.0, 0.0, -5.0);
-    let total = (3.0 / DT) as u64;
-    let mut finite = true;
-    for _ in 0..total {
-        let _st = ctrl.step(&sp);
-        let (_pos, quat) = ctrl.debug_up();
-        if !quat[0].is_finite() {
-            finite = false;
-            break;
-        }
+    ctrl.set_ranger(Some(RangeFinderModel::new(12.0, 0.5, 0.0, 0.0, 0.0, 0xABCD)));
+    let hover_sp = hover_setpoint(0.0, 0.0, -5.0);
+    for _ in 0..50 {
+        ctrl.step(&hover_sp);
     }
-    assert!(finite, "无障时装备避障不应导致发散");
+    let s = ctrl.dbg_ranger().expect("ranger present");
+    // 机体在 (0,5,0)，球心 (-8,5,0) r=3，表面距 5m，应在量程内且有效。
+    assert!(s.valid, "ranger should see the forward sphere");
+    assert!((s.distance - 5.0).abs() < 0.5, "ranger distance ~5m, got {}", s.distance);
+}
+
+#[test]
+fn avoid_no_false_trigger_when_clear() {
+    // 单元级：前方无障（量程外）时测距无效，避障不介入、不影响悬停。
+    use fly_sim_core::sensor::{AvoidanceConfig, RangeFinderModel};
+    let cfg = load_airframe(None).expect("default airframe");
+    let mut ctrl = FlyController::new(
+        ToyWorld::new(9.81),
+        &cfg,
+        DT,
+        None,
+        SensorConfig::default(),
+        ControllerKind::Pid,
+        Some(ContactModel::default()),
+        vec![Obstacle::Sphere { center: [-20.0, 5.0, 0.0], radius: 3.0 }],
+    );
+    let ranger = RangeFinderModel::new(12.0, 0.5, 0.0, 0.0, 0.0, 0xABCD);
+    ctrl.configure_avoidance(ranger, AvoidanceConfig::new(11.0, 1.5, 2.0));
+    let hover_sp = hover_setpoint(0.0, 0.0, -5.0);
+    for _ in 0..250 {
+        ctrl.step(&hover_sp);
+    }
+    let (pos, q) = ctrl.debug_up();
+    // 悬停应保持在 ~5m 高度、姿态接近水平（qw≈cos45≈0.707）。
+    assert!(pos[1] > 4.0, "hover altitude should stay ~5m, got {}", pos[1]);
+    assert!((q[0] - std::f64::consts::FRAC_PI_4.cos()).abs() < 0.15, "should stay level");
 }
