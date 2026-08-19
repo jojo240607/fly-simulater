@@ -112,6 +112,7 @@ impl AirframeToml {
             att_kd: 0.3,
             kp_xy: 0.5,
             kv_xy: 0.8,
+            vel_lpf_tau: 0.15,
             battery_v_nom: self.battery_v_nom,
             battery_r: self.battery_r,
             motor_kv: self.motor_kv,

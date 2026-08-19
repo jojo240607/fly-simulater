@@ -133,6 +133,8 @@ pub struct QuadrotorPlant<W> {
     induced_vel: f64,
     /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系）。
     last_tau_body: [f64; 3],
+    /// 调试：最近一次 step 的世界系合力（引擎世界系，[x,y,z]），供诊断推力水平分量方向。
+    last_f_world: [f64; 3],
 }
 
 impl<W> QuadrotorPlant<W>
@@ -226,6 +228,7 @@ where
             last_contact: None,
             induced_vel: 0.0,
             last_tau_body: [0.0; 3],
+            last_f_world: [0.0; 3],
         }
     }
 
@@ -330,9 +333,12 @@ where
             let q = self.prop_kq * om * om;
             t_n[i] = t;
             q_n[i] = q;
-            // 电机电流 ≈ 机械功率 Q·ω / (电效率·端电压) + 小空载电流。
-            let v_m = (u * v_bat).max(1e-3);
-            let i_mech = q * om / (self.motor_eta * v_m);
+            // 电机电流 ≈ 机械功率 Q·ω / (电效率·反电动势) + 小空载电流。
+            // 反电动势 ∝ ω（= ω/kv），与电池电压解耦：避免 v_m=u·v_bat 在掉压下
+            // 正反馈（v_bat↓ → v_m↓ → i↑ → v_target↓ → v_bat↓↓ 的发散塌缩）。
+            // 真实物理：电流只经机械功率/反电动势决定，掉压只通过 ω_ss 受限（负反馈，稳定）。
+            let back_emf = (om / kv).max(1e-3);
+            let i_mech = q * om / (self.motor_eta * back_emf);
             i_bat += i_mech + 1.0; // 空载电流 ~1A/电机
         }
         // 电池电压跌落：目标 V = V_oc - I·R，但用低通平滑趋近（电池电压不能瞬时跳变，
@@ -432,6 +438,7 @@ where
         // 滑流下洗冲击机体的下拉力（机体 -Z）。
         f_body_tot[2] -= f_slip.min(sum_t * 0.4);
         let f_world_tot = rotate_by_quat(q, f_body_tot);
+        self.last_f_world = f_world_tot;
         let tau_world = rotate_by_quat(q, tau_body);
 
         // impulse 模型：把每帧"力 × dt"化为线冲量，"力矩 × dt"化为角冲量注入。
@@ -644,6 +651,49 @@ where
         self.last_tau_body
     }
 
+    /// 调试：最近一次 step 的世界系合力（引擎世界系，[x,y,z]），x=北、y=上、z=东（引擎系）。
+    pub fn debug_f_world(&self) -> [f64; 3] {
+        self.last_f_world
+    }
+
+    /// 调试：最近一次 step 实际产生的总推力（4 路 thrust_n 之和，N）。
+    pub fn debug_thrust_sum(&self) -> f64 {
+        self.thrust_n.iter().sum()
+    }
+
+    /// 调试：当前电池端电压（V），供排查掉压导致推力不足。
+    pub fn debug_battery_v(&self) -> f64 {
+        self.battery_v
+    }
+
+    /// 调试：最近一次归一化油门指令 [0,1]×4（来自飞控混控）。
+    pub fn debug_cmd_motor(&self) -> [f64; 4] {
+        self.cmd_motor
+    }
+
+    /// 调试：最近一次电机实际归一化油门（由 thrust_n/thrust_coeff 反推），用于对比指令是否被动力学吃掉。
+    pub fn debug_thrust_actual_u(&self) -> [f64; 4] {
+        let tc = (self.cfg.thrust_coeff as f64).max(1e-6);
+        [
+            self.thrust_n[0] / tc,
+            self.thrust_n[1] / tc,
+            self.thrust_n[2] / tc,
+            self.thrust_n[3] / tc,
+        ]
+    }
+
+    /// 调试：电机转速/电压/系数诊断：返回 (motor_speed[0], kv*v_bat, prop_kt, thrust_coeff, thrust_n[0])。
+    pub fn debug_motor_diag(&self) -> (f64, f64, f64, f64, f64) {
+        let kv = self.cfg.motor_kv as f64;
+        (
+            self.motor_speed[0],
+            kv * self.battery_v,
+            self.prop_kt,
+            self.cfg.thrust_coeff as f64,
+            self.thrust_n[0],
+        )
+    }
+
     /// 调试：取引擎世界系真实角速度 (rad/s)。
     pub fn debug_ang_world(&self) -> [f64; 3] {
         self.world.get_angular_velocity(self.body_id)
@@ -671,6 +721,7 @@ where
             att: quat_ned,
             omega: [RadianPerSecond(ang_body[0]), RadianPerSecond(-ang_body[1]), RadianPerSecond(-ang_body[2])],
             airspeed: MeterPerSecond((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() as f32),
+            accel_bias: [0.0; 3],
         }
     }
 

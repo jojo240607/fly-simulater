@@ -483,6 +483,27 @@ where
         self.ctrl.debug_up()
     }
 
+    /// 阶段 11-A 诊断：取 EKF 估计状态（NED），用于对比真值定位噪声下发散源。
+    pub fn ctrl_debug_estimate(&self) -> VehicleState {
+        self.ctrl.debug_estimate_ned()
+    }
+
+    /// 阶段 11-A 诊断：取 PID 垂向位置积分项 iz（用于诊断 windup）。
+    pub fn ctrl_debug_iz(&self) -> f32 {
+        self.ctrl.debug_pid_iz()
+    }
+
+    /// 阶段 11-A 诊断：取 PID 控制律内部量（绕开 no_std 无打印）。
+    /// 元组：(raw_d, raw_vd, filt_d, filt_vd, ez, iz, des_vz, acc_d, des_thr)。
+    pub fn ctrl_debug_pid_internal(&self) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32) {
+        self.ctrl.debug_pid_internal()
+    }
+
+    /// 诊断：取基线 PID 姿态误差/期望角速度/实测角速度。
+    pub fn ctrl_debug_pid_pqr(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        self.ctrl.debug_pid_pqr()
+    }
+
     /// 调试：取引擎世界系真实角速度 (rad/s)。
     pub fn debug_ang_world(&self) -> [f64; 3] {
         self.ctrl.debug_ang_world()
@@ -491,6 +512,41 @@ where
     /// 阶段 8：动力系统状态（电池端电压 V，4 路电机转速 rad/s）。
     pub fn powertrain_state(&self) -> (f64, [f64; 4]) {
         self.ctrl.powertrain_state()
+    }
+
+    /// 调试：最近一次 step 实际产生的总推力（N），供排查掉压/饱和导致推力不足。
+    pub fn debug_thrust_sum(&self) -> f64 {
+        self.ctrl.debug_thrust_sum()
+    }
+
+    /// 调试：当前电池端电压（V），供排查掉压导致推力不足。
+    pub fn debug_battery_v(&self) -> f64 {
+        self.ctrl.debug_battery_v()
+    }
+
+    /// 调试：最近一次归一化油门指令 [0,1]×4。
+    pub fn debug_cmd_motor(&self) -> [f64; 4] {
+        self.ctrl.debug_cmd_motor()
+    }
+
+    /// 调试：最近一次电机实际归一化油门 [0,1]×4。
+    pub fn debug_thrust_actual_u(&self) -> [f64; 4] {
+        self.ctrl.debug_thrust_actual_u()
+    }
+
+    /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系）。
+    pub fn debug_tau_body(&self) -> [f64; 3] {
+        self.ctrl.debug_tau_body()
+    }
+
+    /// 调试：电机转速/电压/系数诊断。
+    pub fn debug_motor_diag(&self) -> (f64, f64, f64, f64, f64) {
+        self.ctrl.debug_motor_diag()
+    }
+
+    /// 调试：最近一次 step 的世界系合力（引擎世界系，x=北/y=上/z=东）。
+    pub fn debug_f_world(&self) -> [f64; 3] {
+        self.ctrl.debug_f_world()
     }
 
     /// 阶段 3：风环境接入验证场景。

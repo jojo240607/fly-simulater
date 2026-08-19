@@ -153,15 +153,23 @@ where
         contact: Option<ContactModel>,
         obstacles: Vec<Obstacle>,
     ) -> Self {
-        let ekf = EkfEstimator::default_quad();
+        let mut ekf = EkfEstimator::default_quad();
+        // 阶段 11-A：EKF 初始位置估计必须与机体真实初始位置一致（NED d=-5，即引擎 y=5），
+        // 否则 GPS/气压首次校正前 PID 看到 ~5m 位置误差全油门弹射（见 PLAN 阶段 11-A）。
+        // 注意：此处硬编码需与 `QuadrotorPlant::new` 的初始位置（pos7=[0,5,0]→NED d=-5）保持一致。
+        ekf.set_initial_position([0.0, 0.0, -5.0]);
         let dt_s = Second(dt as f32);
-        let hil = match kind {
+        let mut hil = match kind {
             ControllerKind::Pid => {
-                // PID 姿态环单独使用时会因 EKF 姿态估计误差（纯陀螺积分噪声下漂移）
-                // 产生慢性下沉；包一层轻量 INDI 角加速度反馈（gain_scale=0.5）打破正反馈，
-                // 与纯 INDI（0.8）区别开，保留 PID 主体特性。
+                // PID 基线姿态环。注：早期曾包一层 INDI 角加速度反馈（gain_scale=0.5）以
+                // 对抗 EKF 纯陀螺积分漂移，但实测在 realistic 传感器噪声（gyro_noise=0.003）
+                // 下，INDI 的角加速度误差反馈（k_inv≈I/dt=12.5，对 dt=0.004 的有限差分）把
+                // 陀螺噪声放大成饱和的剧烈非对称电机指令（cmd 从 [0.5×4] 跳成 [1,0,0,1]），
+                // 驱动机体翻滚 → none-contact 场景垂直/整体发散（PLAN 阶段 11-A）。
+                // 修复：Pid 变体不再包 INDI（gain_scale=0=纯 PID）。实测纯 PID 在 realistic
+                // 噪声下悬停稳定（姿态误差<0.01rad、d 稳定在 -5±2m、电机指令平衡）。
                 let base = PidController::from_config(&cfg.ctrl_params());
-                let indi = IndiController::with_inertia(base, cfg.inertia, dt as f32, 0.5);
+                let indi = IndiController::with_inertia(base, cfg.inertia, dt as f32, 0.0);
                 CtrlVariant::Pid(HilContext::new(ekf, indi, dt_s))
             }
             ControllerKind::Indi => {
@@ -413,6 +421,26 @@ where
         self.plant.powertrain_state()
     }
 
+    /// 调试：最近一次 step 实际产生的总推力（N）。
+    pub fn debug_thrust_sum(&self) -> f64 {
+        self.plant.debug_thrust_sum()
+    }
+
+    /// 调试：当前电池端电压（V）。
+    pub fn debug_battery_v(&self) -> f64 {
+        self.plant.debug_battery_v()
+    }
+
+    /// 调试：最近一次归一化油门指令 [0,1]×4。
+    pub fn debug_cmd_motor(&self) -> [f64; 4] {
+        self.plant.debug_cmd_motor()
+    }
+
+    /// 调试：最近一次电机实际归一化油门 [0,1]×4。
+    pub fn debug_thrust_actual_u(&self) -> [f64; 4] {
+        self.plant.debug_thrust_actual_u()
+    }
+
     /// 最近一次控制指令。
     pub fn last_cmd(&self) -> ActuatorCmd {
         self.motors.last
@@ -465,9 +493,39 @@ where
         }
     }
 
+    /// 阶段 11-A 诊断：返回 PID 控制律内部量（绕开 no_std 无打印）。
+    /// 元组：(raw_d, raw_vd, filt_d, filt_vd, ez, iz, des_vz, acc_d, des_thr)。
+    pub fn debug_pid_internal(&self) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32) {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.ctrl.inner().debug_pid_internal(),
+            CtrlVariant::Indi(h) => h.ctrl.inner().debug_pid_internal(),
+            _ => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        }
+    }
+
+    /// 诊断：返回基线 PID 的姿态误差向量、期望机体角速度(pqr)、实测角速度。
+    /// 元组：(err[3], pqr[3], omega[3])。区分"姿态误差"与"INDI 增量"哪个主导发散。
+    pub fn debug_pid_pqr(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.ctrl.inner().dbg_last(),
+            CtrlVariant::Indi(h) => h.ctrl.inner().dbg_last(),
+            _ => ([0.0; 3], [0.0; 3], [0.0; 3]),
+        }
+    }
+
     /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系）。
     pub fn debug_tau_body(&self) -> [f64; 3] {
         self.plant.debug_tau_body()
+    }
+
+    /// 调试：电机转速/电压/系数诊断。
+    pub fn debug_motor_diag(&self) -> (f64, f64, f64, f64, f64) {
+        self.plant.debug_motor_diag()
+    }
+
+    /// 调试：最近一次 step 的世界系合力（引擎世界系，x=北/y=上/z=东）。
+    pub fn debug_f_world(&self) -> [f64; 3] {
+        self.plant.debug_f_world()
     }
 
     /// 调试：返回引擎世界系真实状态（NED），供传感器噪声鲁棒性诊断对比 EKF 估计。
