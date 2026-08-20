@@ -257,7 +257,12 @@
 - 目标：把 `read_ranger()` 读数接入飞控避障逻辑，形成"**感知→决策→规避**"完整
   闭环——机体朝障碍飞行时，反应式避障在危险距离内制动减速并横向闪避，避免碰撞。
 - 实现（`fly-sim-core/src/sensor.rs`）：
-  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral }`：反应式避障配置。
+  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral, hold_time }`：反应式避障配置。
+    - `hold_time`（s）：**单射线 FOV 丢失保持**——横向闪避会让障碍滑出前向单射线
+      （读数 `valid=false`），此时避障指令（制动+横向闪避+位置设定点偏移）在最近一次
+      **确认危险**后继续维持 `hold_time` 秒再释放，保证障碍通过机体正侧方前横向分离
+      持续积累；否则位置外环会把机体拉回原航线、抵消横向分离（实测：无保持时机体在
+      射线边缘形成极限环，净间隙≈障碍半径，见 `tests/avoidance.rs`）。`0.0`=不保持。
   - `AvoidanceConfig::avoidance_velocity(sample, fwd_ned, right_ned) -> ([f64;3], bool)`：
     根据测距读数计算 NED 避障速度指令并标记是否触发。
     - **保守失效语义**：读数 `valid=false`（瞬断/近距盲区/量程饱和）一律**不介入**
@@ -322,7 +327,12 @@
 - 目标：把 `read_ranger()` 读数接入飞控避障逻辑，形成"**感知→决策→规避**"完整
   闭环——机体朝障碍飞行时，反应式避障在危险距离内制动减速并横向闪避，避免碰撞。
 - 实现（`fly-sim-core/src/sensor.rs`）：
-  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral }`：反应式避障配置。
+  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral, hold_time }`：反应式避障配置。
+    - `hold_time`（s）：**单射线 FOV 丢失保持**——横向闪避会让障碍滑出前向单射线
+      （读数 `valid=false`），此时避障指令（制动+横向闪避+位置设定点偏移）在最近一次
+      **确认危险**后继续维持 `hold_time` 秒再释放，保证障碍通过机体正侧方前横向分离
+      持续积累；否则位置外环会把机体拉回原航线、抵消横向分离（实测：无保持时机体在
+      射线边缘形成极限环，净间隙≈障碍半径，见 `tests/avoidance.rs`）。`0.0`=不保持。
   - `AvoidanceConfig::avoidance_velocity(sample, fwd_ned, right_ned) -> ([f64;3], bool)`：
     根据测距读数计算 NED 避障速度指令并标记是否触发。
     - **保守失效语义**：读数 `valid=false`（瞬断/近距盲区/量程饱和）一律**不介入**
@@ -391,7 +401,12 @@
 - 目标：把 `read_ranger()` 读数接入飞控避障逻辑，形成"**感知→决策→规避**"完整
   闭环——机体朝障碍飞行时，反应式避障在危险距离内制动减速并横向闪避，避免碰撞。
 - 实现（`fly-sim-core/src/sensor.rs`）：
-  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral }`：反应式避障配置。
+  - `AvoidanceConfig { danger_dist, brake_gain, evade_lateral, hold_time }`：反应式避障配置。
+    - `hold_time`（s）：**单射线 FOV 丢失保持**——横向闪避会让障碍滑出前向单射线
+      （读数 `valid=false`），此时避障指令（制动+横向闪避+位置设定点偏移）在最近一次
+      **确认危险**后继续维持 `hold_time` 秒再释放，保证障碍通过机体正侧方前横向分离
+      持续积累；否则位置外环会把机体拉回原航线、抵消横向分离（实测：无保持时机体在
+      射线边缘形成极限环，净间隙≈障碍半径，见 `tests/avoidance.rs`）。`0.0`=不保持。
   - `AvoidanceConfig::avoidance_velocity(sample, fwd_ned, right_ned) -> ([f64;3], bool)`：
     根据测距读数计算 NED 避障速度指令并标记是否触发。
     - **保守失效语义**：读数 `valid=false`（瞬断/近距盲区/量程饱和）一律**不介入**

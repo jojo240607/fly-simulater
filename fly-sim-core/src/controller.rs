@@ -137,6 +137,14 @@ pub struct FlyController<W> {
     /// P1-2 闭环联动：反应式避障配置。`None`=不装避障（默认，行为同前）。
     /// 装备后，step 内读前向测距，危险时改写速度设定点（制动+横向闪避）。
     avoidance: Option<AvoidanceConfig>,
+    /// 控制周期（s），用于避障保持逻辑的计时。
+    dt: f64,
+    /// 仿真已推进时间（s），每次 [`FlyController::step`] 累加 `dt`。
+    time: f64,
+    /// 最近一次**确认危险**的时刻与避障指令（NED，m/s）：
+    /// `Some((time, vel))` 表示"已确认危险且尚在 `hold_time` 保持窗口内"。
+    /// 用于单射线 FOV 丢失后继续维持避障，避免位置环立即把机体拉回航线。
+    av_last: Option<(f64, [f64; 3])>,
 }
 
 impl<W> FlyController<W>
@@ -213,6 +221,9 @@ where
             takeoff_alt: 0.0,
             fail_mask: [1.0; 4],
             avoidance: None,
+            dt,
+            time: 0.0,
+            av_last: None,
         }
     }
 
@@ -285,14 +296,36 @@ where
                 let fwd = self.plant.forward_dir_ned();
                 let right = self.plant.right_dir_ned();
                 let (av_vel, triggered) = av_cfg.avoidance_velocity(&sample, fwd, right);
+                // 记录最近一次"确认危险"的时刻与避障指令（供 FOV 丢失后的保持窗口用）。
                 if triggered {
+                    self.av_last = Some((self.time, av_vel));
+                }
+                // 单射线 FOV 丢失（障碍滑出射线 → 读数失效）时，避障不会立即释放，
+                // 而是在最近一次确认危险后的 hold_time 内继续维持指令，让横向分离
+                // 距离积累足够；否则位置外环会把机体拉回原航线，净间隙不足（实测
+                // 机体在射线边缘形成极限环，横向位移被封顶在障碍半径附近）。
+                let held = triggered
+                    || self
+                        .av_last
+                        .map_or(false, |(t, _)| self.time - t <= av_cfg.hold_time);
+                if held {
+                    // 保持窗口内沿用最近一次确认危险的避障指令（方向恒定，避免随
+                    // 失效读数抖动）；本轮触发时即为新计算的指令。
+                    let vel = self.av_last.map_or(av_vel, |(_, v)| v);
                     // 速度设定点（NED，m/s）叠加避障指令。
-                    sp.vel[0].0 += av_vel[0] as f32;
-                    sp.vel[1].0 += av_vel[1] as f32;
-                    // 注意：setpoint 竖向/偏航不动，仅水平速度被规避层接管。
+                    sp.vel[0].0 += vel[0] as f32;
+                    sp.vel[1].0 += vel[1] as f32;
+                    // 同时偏移位置设定点的水平分量，使位置外环目标跟随横向闪避
+                    // 脱离航线——否则串级 PID 的位置环会把机体拉回原点，抵消避障
+                    // 速度指令（诊断实测：仅注入速度时机体横向位移被压制，避障几乎无效）。
+                    sp.pos[0].0 += vel[0] as f32 * 10.0;
+                    sp.pos[1].0 += vel[1] as f32 * 10.0;
+                    // 注意：setpoint 竖向/偏航不动，仅水平被规避层接管。
                 }
             }
         }
+        // 推进仿真时钟（避障保持窗口的计时基准）。
+        self.time += self.dt;
         let setpoint_ref = &sp;
         let state = match &mut self.hil {
             CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),

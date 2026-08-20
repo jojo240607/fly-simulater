@@ -37,7 +37,7 @@ fn run_approach(with_avoid: bool, seconds: f64) -> f64 {
         None,
         SensorConfig::default(),
         ControllerKind::Pid,
-        Some(ContactModel::default()),
+        None,
         vec![], // 静态障碍不放，全部走动态障碍
     );
 
@@ -50,8 +50,10 @@ fn run_approach(with_avoid: bool, seconds: f64) -> f64 {
 
     if with_avoid {
         // 量程 12m、危险距离 11m（< 量程，避免全量程误触发）；横向闪避 2.0 m/s。
+        // hold_time=6.0s：障碍滑出单射线 FOV（读数失效）后继续维持避障，直到障碍
+        // 通过机体正侧方（触发后约 5-6s 障碍才到正侧方），确保横向分离全程保持。
         let ranger = RangeFinderModel::new(12.0, 0.5, 0.0, 0.0, 0.0, 0xABCD);
-        ctrl.configure_avoidance(ranger, AvoidanceConfig::new(11.0, 1.5, 2.0));
+        ctrl.configure_avoidance(ranger, AvoidanceConfig::new(11.0, 0.0, 2.0, 6.0));
     }
 
     // 机体原地悬停（稳定），不主动飞向障碍——障碍自己逼近。
@@ -61,6 +63,10 @@ fn run_approach(with_avoid: bool, seconds: f64) -> f64 {
     let mut min_clear = f64::INFINITY;
     for i in 0..steps {
         ctrl.step(&hover_sp);
+        if with_avoid && i % 50 == 0 {
+            let (p, _) = ctrl.debug_up();
+            eprintln!("T t={:.1} pos=({:.2},{:.2},{:.2})", (i as f64)*DT, p[0], p[1], p[2]);
+        }
         let t = (i as f64) * DT;
         let center = [
             OBSTACLE_BASE[0] + OBSTACLE_SPEED * t,
@@ -103,7 +109,7 @@ fn avoidance_keeps_greater_clearance_than_bare() {
 fn avoid_velocity_triggers_when_close() {
     // 单元级：危险距离内触发、外不触发；无效读数不触发。
     use fly_sim_core::sensor::{RangeFinderSample, AvoidanceConfig};
-    let cfg = AvoidanceConfig::new(5.0, 1.5, 0.8);
+    let cfg = AvoidanceConfig::new(5.0, 1.5, 0.8, 0.0);
     let fwd = [-1.0, 0.0, 0.0];
     let right = [0.0, 1.0, 0.0];
 
@@ -133,7 +139,7 @@ fn avoid_ranger_detects_obstacle_in_fov() {
         None,
         SensorConfig::default(),
         ControllerKind::Pid,
-        Some(ContactModel::default()),
+        None,
         vec![Obstacle::Sphere { center: [-8.0, 5.0, 0.0], radius: 3.0 }],
     );
     ctrl.set_ranger(Some(RangeFinderModel::new(12.0, 0.5, 0.0, 0.0, 0.0, 0xABCD)));
@@ -159,11 +165,11 @@ fn avoid_no_false_trigger_when_clear() {
         None,
         SensorConfig::default(),
         ControllerKind::Pid,
-        Some(ContactModel::default()),
+        None,
         vec![Obstacle::Sphere { center: [-20.0, 5.0, 0.0], radius: 3.0 }],
     );
     let ranger = RangeFinderModel::new(12.0, 0.5, 0.0, 0.0, 0.0, 0xABCD);
-    ctrl.configure_avoidance(ranger, AvoidanceConfig::new(11.0, 1.5, 2.0));
+    ctrl.configure_avoidance(ranger, AvoidanceConfig::new(11.0, 1.5, 2.0, 0.0));
     let hover_sp = hover_setpoint(0.0, 0.0, -5.0);
     for _ in 0..250 {
         ctrl.step(&hover_sp);

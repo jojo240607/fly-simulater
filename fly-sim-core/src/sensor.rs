@@ -396,6 +396,14 @@ impl RangeFinderModel {
 /// 2. **横向闪避**：沿机体侧向施加一个恒定的横向速度指令，使机体偏离碰撞航线。
 ///
 /// `danger_dist` 应小于 `RangeFinderModel::max_range`，否则全量程都触发闪避。
+///
+/// **单射线 FOV 失效保持（`hold_time`）**：前向测距是**单条射线**，横向闪避会让
+/// 障碍滑出射线（FOV 丢失），读数随即失效（`valid=false`）。若此时立即释放避障，
+/// 位置外环会把机体拉回原航线，抵消横向分离，造成"闪避失效/净间隙不足"（实测：
+/// 机体在射线边缘形成极限环，横向分离被封顶在障碍半径附近）。`hold_time` 定义
+/// 最近一次**确认危险**后，即使读数失效也继续维持避障指令（制动+横向闪避+位置
+/// 设定点偏移）的最长时间，保证横向分离距离积累足够后机体再回归。`0.0`=关闭
+/// 保持（读数失效立即释放）。
 #[derive(Clone, Debug)]
 pub struct AvoidanceConfig {
     /// 危险触发距离（m）：前方障碍真值/读数小于此值即进入规避。
@@ -405,11 +413,13 @@ pub struct AvoidanceConfig {
     pub brake_gain: f64,
     /// 横向闪避速度指令（m/s，机体侧向 +Y，即右翼方向），恒定量。
     pub evade_lateral: f64,
+    /// 读数失效后避障指令的保持时间（s，`0.0`=不保持，立即释放）。
+    pub hold_time: f64,
 }
 
 impl AvoidanceConfig {
-    pub fn new(danger_dist: f64, brake_gain: f64, evade_lateral: f64) -> Self {
-        Self { danger_dist, brake_gain, evade_lateral }
+    pub fn new(danger_dist: f64, brake_gain: f64, evade_lateral: f64, hold_time: f64) -> Self {
+        Self { danger_dist, brake_gain, evade_lateral, hold_time }
     }
 
     /// 计算规避速度指令（NED 系，单位 m/s）。
