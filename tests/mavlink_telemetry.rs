@@ -24,6 +24,7 @@ fn known_state() -> VehicleState {
         att: Quaternion::from_euler(Radian(0.1), Radian(-0.2), Radian(1.57)), // roll/pitch/yaw
         omega: [RadianPerSecond(0.01), RadianPerSecond(-0.02), RadianPerSecond(0.03)],
         airspeed: MeterPerSecond(1.2),
+        accel_bias: [0.0; 3],
     }
 }
 
