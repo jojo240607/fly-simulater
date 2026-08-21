@@ -765,9 +765,47 @@ where
             ],
             att: quat_ned,
             omega: [RadianPerSecond(-ang_body[0]), RadianPerSecond(-ang_body[1]), RadianPerSecond(ang_body[2])],
+            // P3-A3：plant 真值视图这里沿用水平地速（&self 无风场采样权）；真正的
+            // 真空速（v_ground - wind）由空速计传感器路径提供（controller::SimAirspeed，
+            // 见 step()），再经 EKF update_airspeed 融合成 VehicleState.airspeed。
             airspeed: MeterPerSecond((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() as f32),
             accel_bias: [0.0; 3],
         }
+    }
+
+    /// P3-A3：当前机体位置的世界系（引擎 UP）风速，采样自风场（与 step 内同一路径）。
+    /// 无风返回零向量。
+    pub fn wind_up(&mut self) -> [f64; 3] {
+        if self.wind.is_none() {
+            return [0.0; 3];
+        }
+        let tf = self.read_body_tf();
+        let pos = [tf[0], tf[1], tf[2]];
+        let w = self.wind.as_mut().unwrap();
+        w.sample_at(self.dt, &pos)
+    }
+
+    /// P3-A3：当前机体位置的风速（NED 语义），供真空速/相对空速计算。
+    pub fn wind_ned(&mut self) -> [f32; 3] {
+        vec_up_to_ned(self.wind_up())
+    }
+
+    /// P3-A3：真实相对空速（世界 NED 系，水平分量矢量）= v_ground - wind。
+    /// 是机身相对气流的速度；无风时即地速。用于空速计样本（真空速幅值）。
+    pub fn relative_airspeed_ned(&mut self) -> [f32; 2] {
+        let vel = self.world.get_velocity(self.body_id);
+        let w = self.wind_up();
+        let vg = vec_up_to_ned(vel);
+        [vg[0] - w[0] as f32, vg[1] - w[1] as f32]
+    }
+
+    /// P3-A3：当前机体水平地速（世界 NED 系，m/s）。与 `relative_airspeed_ned`
+    /// 的区别是不扣风——供 EKF 空速计观测用（EKF 模型 `h(x)=|v_ground|`，地速
+    /// 才与其一致，避免风相对空速污染水平速度估计）。
+    pub fn ground_airspeed_ned(&mut self) -> [f32; 2] {
+        let vel = self.world.get_velocity(self.body_id);
+        let vg = vec_up_to_ned(vel);
+        [vg[0] as f32, vg[1] as f32]
     }
 
     /// P1-2 闭环联动：返回机体前向在世界 NED 系的单位向量（引擎机体系 -X → NED）。

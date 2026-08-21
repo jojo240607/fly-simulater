@@ -67,8 +67,9 @@ impl Cli {
             "pid" => ControllerKind::Pid,
             "indi" => ControllerKind::Indi,
             "lqr" => ControllerKind::Lqr,
+            "tecs" => ControllerKind::Tecs,
             other => {
-                eprintln!("[main] --controller 需要 pid|indi|lqr，收到: {}", other);
+                eprintln!("[main] --controller 需要 pid|indi|lqr|tecs，收到: {}", other);
                 std::process::exit(2);
             }
         }

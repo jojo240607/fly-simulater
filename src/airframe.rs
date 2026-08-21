@@ -113,6 +113,7 @@ impl AirframeToml {
             kp_xy: 0.5,
             kv_xy: 0.8,
             vel_lpf_tau: 0.15,
+            drag_fwd: 0.09, // P3-A3：空速拖拽前馈系数（同 default_quad 量级）
             battery_v_nom: self.battery_v_nom,
             battery_r: self.battery_r,
             motor_kv: self.motor_kv,

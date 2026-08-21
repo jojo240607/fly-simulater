@@ -5,7 +5,7 @@
 //! 同一份 `EkfEstimator` + `PidController` + `Fdir` 算法。
 
 use flyctrl_core::config::VehicleConfig;
-use flyctrl_core::controller::{Controller, IndiController, LqrController, PidController, Setpoint};
+use flyctrl_core::controller::{Controller, IndiController, LqrController, PidController, Setpoint, TecsController};
 use flyctrl_core::estimator::EkfEstimator;
 use flyctrl_core::hal::actuator::{MotorActuator, OutputProtocol};
 use flyctrl_core::hal::sensor::{AirspeedSensor, GpsSensor, ImuSensor, MagSensor};
@@ -32,12 +32,13 @@ pub fn actuator_full() -> ActuatorCmd {
     c
 }
 
-/// 控制器种类（阶段 5：高级控制律对比）。
+/// 控制器种类（阶段 5：高级控制律对比；P3-A3：TECS 总能量控制）。
 #[derive(Clone, Copy, Debug)]
 pub enum ControllerKind {
     Pid,
     Indi, // INDI 包装 PID 基线
     Lqr,
+    Tecs, // TECS 总能量控制（能量保持 + 空速拖拽前馈）
 }
 
 /// 不同控制器类型的 HIL 闭环（泛型单态化）。
@@ -45,6 +46,7 @@ enum CtrlVariant {
     Pid(HilContext<EkfEstimator, IndiController<PidController>>),
     Indi(HilContext<EkfEstimator, IndiController<PidController>>),
     Lqr(HilContext<EkfEstimator, IndiController<LqrController>>),
+    Tecs(HilContext<EkfEstimator, TecsController>),
 }
 
 // ---- 真实传感器：把物理引擎真值喂给控制律 ----
@@ -167,7 +169,7 @@ where
         // 注意：此处硬编码需与 `QuadrotorPlant::new` 的初始位置（pos7=[0,5,0]→NED d=-5）保持一致。
         ekf.set_initial_position([0.0, 0.0, -5.0]);
         let dt_s = Second(dt as f32);
-        let mut hil = match kind {
+        let hil = match kind {
             ControllerKind::Pid => {
                 // PID 基线姿态环。注：早期曾包一层 INDI 角加速度反馈（gain_scale=0.5）以
                 // 对抗 EKF 纯陀螺积分漂移，但实测在 realistic 传感器噪声（gyro_noise=0.003）
@@ -191,6 +193,12 @@ where
                 let base = LqrController::from_config(&cfg.ctrl_params());
                 let indi = IndiController::with_inertia(base, cfg.inertia, dt as f32, 0.5);
                 CtrlVariant::Lqr(HilContext::new(ekf, indi, dt_s))
+            }
+            ControllerKind::Tecs => {
+                // TECS 总能量控制（P3-A3）：垂直通道对总能量高度做 PI + 水平空速拖拽
+                // 前馈，姿态内环复用 attitude.rs（纯 TECS，同 PID 变体不包 INDI）。
+                let tecs = TecsController::from_config(&cfg.ctrl_params());
+                CtrlVariant::Tecs(HilContext::new(ekf, tecs, dt_s))
             }
         };
 
@@ -272,13 +280,23 @@ where
         let (imu_sample, pos_sample) = self.plant.read_sensors();
         self.imu.last = imu_sample;
         self.gps.last = pos_sample;
-        // 真空速 = 水平速度幅值（无风假设下，世界速度即相对空气速度）。
-        let st = self.plant.state_ned();
-        let vh = (st.vel[0].0 * st.vel[0].0 + st.vel[1].0 * st.vel[1].0).sqrt();
+        // P3-A3：空速计观测用**地速幅值** |v_ground|——EKF 空速模型 `h(x)=|v_ground|`，
+        // 喂地速才一致，避免逆风下风相对空速（<地速）把水平速度估计拉偏（曾致逆风
+        // 被吹回 + 拖拽前馈用错方向）。真实相对空速矢量经 set_measured_airspeed_vec
+        // 单独注入 TECS 做拖拽前馈（见下），两者互不干扰。
+        let vg = self.plant.ground_airspeed_ned();
+        let vh = (vg[0] * vg[0] + vg[1] * vg[1]).sqrt();
         self.air.last = Some(AirspeedSample {
             speed: flyctrl_core::units::Airspeed(vh as f32),
             timestamp_s: 0.0,
         });
+        // 相对空速矢量（NED 水平）= v_ground - wind：每周期注入控制器，供 TECS
+        // 空速拖拽前馈定向（其它控制器默认忽略）。
+        let v_rel = self.plant.relative_airspeed_ned();
+        match &mut self.hil {
+            CtrlVariant::Tecs(h) => h.ctrl.set_measured_airspeed_vec(v_rel),
+            _ => {}
+        }
         // 磁力计：取机体磁场（含硬铁/软铁/噪声），喂给 EKF yaw 约束。
         let (mag_sample, baro) = self.plant.read_sensors_attitude();
         self.mag.last = [
@@ -331,6 +349,7 @@ where
             CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
             CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
             CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Tecs(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
         };
 
         // 2.4) 气压计高度融合：锚定 EKF 垂直通道，抑制开环加计积分导致的高度漂移
@@ -343,6 +362,7 @@ where
             CtrlVariant::Pid(h) => h.est.update_alt(baro_alt),
             CtrlVariant::Indi(h) => h.est.update_alt(baro_alt),
             CtrlVariant::Lqr(h) => h.est.update_alt(baro_alt),
+            CtrlVariant::Tecs(h) => h.est.update_alt(baro_alt),
         }
 
         // 2.5) 阶段 5/8：故障处理。
@@ -490,7 +510,26 @@ where
             CtrlVariant::Pid(h) => h.ctrl.inner().dbg_last(),
             CtrlVariant::Indi(h) => h.ctrl.inner().dbg_last(),
             CtrlVariant::Lqr(_) => ([0.0; 3], [0.0; 3], [0.0; 3]),
+            CtrlVariant::Tecs(h) => h.ctrl.dbg_last(),
         }
+    }
+
+    /// P3-A3 调试：TECS 最近一次（能量高度[向下], 能量误差[向下正]）与（真空速, 拖拽前馈加速度幅值）。
+    pub fn dbg_tecs(&self) -> ((f32, f32), (f32, f32)) {
+        match &self.hil {
+            CtrlVariant::Tecs(h) => (h.ctrl.debug_energy(), h.ctrl.debug_drag()),
+            _ => ((0.0, 0.0), (0.0, 0.0)),
+        }
+    }
+
+    /// P3-A3 调试：当前机体位置风速（NED，m/s）。
+    pub fn wind_ned(&mut self) -> [f32; 3] {
+        self.plant.wind_ned()
+    }
+
+    /// P3-A3 调试：真实相对空速矢量（NED 系，水平分量，m/s）= v_ground - wind。
+    pub fn relative_airspeed_ned(&mut self) -> [f32; 2] {
+        self.plant.relative_airspeed_ned()
     }
 
     /// 调试：取引擎世界系真实角速度 (rad/s)。
@@ -505,6 +544,7 @@ where
             CtrlVariant::Pid(h) => h.estimate(),
             CtrlVariant::Indi(h) => h.estimate(),
             CtrlVariant::Lqr(h) => h.estimate(),
+            CtrlVariant::Tecs(h) => h.estimate(),
         }
     }
 
@@ -514,6 +554,7 @@ where
             CtrlVariant::Pid(h) => h.est.accel_bias(),
             CtrlVariant::Indi(h) => h.est.accel_bias(),
             CtrlVariant::Lqr(h) => h.est.accel_bias(),
+            CtrlVariant::Tecs(h) => h.est.accel_bias(),
         }
     }
 

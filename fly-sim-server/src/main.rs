@@ -96,6 +96,7 @@ impl SimDriver {
         match s {
             "lqr" => ControllerKind::Lqr,
             "indi" => ControllerKind::Indi,
+            "tecs" => ControllerKind::Tecs,
             _ => ControllerKind::Pid,
         }
     }
