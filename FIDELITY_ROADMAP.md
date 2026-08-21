@@ -566,9 +566,9 @@
 
 - [ ] **验收判据**：收敛判定必须同时断言 `TRU` 有界（不只 `EST≈TRU`），推广到所有场景测试。
 - [x] **`ToyWorld` 默认 `ContactModel`**：建议默认 `Some(default())`（与 `PhySdkWorld` 一致），避免无地面时噪声发散被误判为估计器缺陷（阶段 11 C 项落地）。
-  - 落地（`fly-simulater` 本次提交）：MAVLink SIL 路径（`main.rs` `FlyController::new`）`contact=None` → `Some(ContactModel::default())`，与主 SIL 路径/`view.rs`/`fly-sim-server` 一致。架构上接触模型属于 `plant.rs` 而非 world（`ToyWorld`/`PhySdkWorld` 均无接触字段），故不改 world 结构体、无死代码。真空/自由落体与噪声消融诊断场景仍显式传 `None`（`run_freefall`、`zz_noise_ablation`），语义不变。
-- [ ] **控制律倾斜补偿**：`des_thrust /= cos(tilt)`——已定位的移动掉高根因，属调整既有 PID 而非新功能。
-- [ ] **大气密度随高度/温度**：`air_density` 目前固定值，高海拔/热气流场景失真（低成本调整）。
+  - 落地（`fly-simulater` 本次提交）：MAVLink SIL 路径（`main.rs` `FlyController::new`）`contact=None` → `Some(ContactModel::default())`，与主 SIL 路径/`view.rs`/`fly-sim-server` 一致。架构上接触模型属于 `plant.rs` 而非 world（`ToyWorld`/`PhySdkWorld` 均无接触字段），故不改 world 结构体、无死代码。真空/自由落体与噪声鲁棒性诊断场景仍显式传 `None`（`run_freefall`、`zz_diag_noise`），语义不变。
+- [x] **控制律倾斜补偿**：`des_thrust /= cos(tilt)`——已定位的移动掉高根因，属调整既有 PID 而非新功能。P3-A1 已随轨迹跟踪落地（`pid.rs` / `manual.rs` 均按 1/cos(tilt) 放大总推力）。
+- [x] **大气密度随高度/温度**：`air_density` 现按 ISA 对流层标准大气随高度衰减（`plant.rs::air_density_at`，温度-高度关系隐含），高海拔推力/诱导速度/气动阻力更真实；11km 以上指数外推。
 - [ ] **传感器噪声默认值**：默认零噪声屏蔽了 EKF/控制律噪声行为，真实场景测试应默认开启 realistic 噪声。
 
 ### 推进记录（进度跟踪）

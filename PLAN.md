@@ -265,12 +265,12 @@ allocation）重排剩余 3 路电机推力/力矩，属未来工作（见 PLAN 
 
 ---
 
-## 阶段 11 — `--sensor-noise` 鲁棒性根因校正 + 噪声下控制律稳定 ⏳ 进行中
+## 阶段 11 — `--sensor-noise` 鲁棒性根因校正 + 噪声下控制律稳定 ✅ 完成
 
 **背景（对 PLAN §4/§5 结论的重要校正）**：阶段 4/5 把 `--sensor-noise` 发散归因为
 "EKF 测量噪声协方差 R 疑似为 0，估计器缺陷"。**实测证明该归因错误**——正确根因如下。
 
-**诊断（实测，`tests/_noise_probe2.rs`）**：
+**诊断（实测，`tests/_noise_probe2.rs`，诊断后已删）**：
 - `--sensor-noise` + `ContactModel::None`：40s 真实高度 `TRU alt=534m`、水平 60m，且
   **`EST alt=535m` ≈ TRU**（EKF 估计与真值几乎一致）→ EKF 没有发散，**是物理真值在飞走**。
 - `--sensor-noise` + `ContactModel::Some(default)`（默认 `ground_y=-5` 地面约束）：
@@ -284,13 +284,18 @@ allocation）重排剩余 3 路电机推力/力矩，属未来工作（见 PLAN 
 2. 收敛判据不能只看"EST 跟 TRU 一致"——那只能证明 EKF 跟踪正常，不能证明系统稳定。
    必须同时断言 **TRU 自身有界**（如 `|TRU alt - setpoint| < 容差`）。PLAN §4 旧判据只看 dz 是误导。
 
-**下一步（待做，低风险优先）**：
-- A. **控制律噪声鲁棒性**：在 `flyctrl-core` 调 PID 参数/前馈或加 EKF 输出低通，
-  使 realistic 噪声下悬停 TRU 有界（先确认是 IMU 姿态抖动还是 GPS 位置外环主导）。
-- B. **回归测试锁定**：新增 `tests/sensor_noise.rs`，断言 `--sensor-noise` 下 TRU 有界
-  （目前已知发散，作为 `ignore` 待修复项 + `#[should_panic]` 边界），避免回归掩盖。
-- C. **仿真默认安全网**：`ToyWorld::new` 默认 `ContactModel` 建议 `Some(default())`
-  （与 PhySdkWorld 一致），避免无地面时噪声发散被误判为"估计器缺陷"。
+**落地（均已完成）**：
+- A. **控制律噪声鲁棒性**（P3-A2）：根因定位为 **IMU 陀螺噪声/偏置主导**（GPS 位置外环次之），
+  消融诊断证明 IMU 单独叠加即让姿态环/电机指令饱和。修复：PID 变体不再包 INDI 角加速度反馈
+  （其有限差分 k≈I/dt=12.5 把陀螺噪声放大成饱和非对称电机指令而翻滚发散），改纯 PID 后
+  realistic 噪声 + 无地面约束下悬停稳定（TRU 有界）。见 `tests/sensor_noise.rs`。
+- B. **回归测试锁定**（`tests/sensor_noise.rs` 3 项）：realistic 噪声下
+  `hover_realistic_contact_bounded` / `hover_realistic_none_contact_bounded` 断言 TRU 有界、
+  `est_tracks_truth_under_noise` 断言 EST≈TRU，`--features phy` 亦通过。
+- C. **仿真默认安全网**（P3-A 收尾 #2）：MAVLink SIL 路径 `contact` 默认
+  `Some(ContactModel::default())`（与主 SIL 路径/`view.rs`/`fly-sim-server` 一致），
+  避免无地面时噪声发散被误判为估计器缺陷。
 
-**当前状态**：根因已定位（控制律，非 EKF）；临时探针 `tests/_noise_probe.rs` / `_noise_probe2.rs`
-用于诊断，确认后应删除。
+**当前状态**：根因已定位并修复（控制律，非 EKF）；临时探针 `tests/_noise_probe.rs` /
+`_noise_probe2.rs` 与消融诊断 `tests/zz_noise_ablation.rs` 已完成使命并删除。
+阶段 11 收尾（P3-A2 + P3-A 收尾 #2）全部落地。

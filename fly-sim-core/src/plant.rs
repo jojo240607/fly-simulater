@@ -119,6 +119,26 @@ struct AeroDrag {
     fx: [f64; 3],
 }
 
+/// 大气密度随高度衰减（ISA 对流层标准大气，温度-高度关系隐含在内）。
+/// 公式：ρ(h) = ρ0 · (1 - L·h/T0)^(g/(L·R) - 1)，L=0.0065 K/m, T0=288.15K。
+/// 对流层顶（11km）以上按指数外推饱和，避免远高于 11km 时数值异常。
+fn air_density_at(rho0: f64, alt_m: f64) -> f64 {
+    let alt = alt_m.max(0.0); // 低于海平面按海平面
+    const L: f64 = 0.0065; // K/m，对流层温度递减率
+    const T0: f64 = 288.15; // K，海平面温度
+    const G: f64 = 9.80665; // m/s²
+    const R: f64 = 287.05; // J/(kg·K)，干空气气体常数
+    let exp = G / (L * R) - 1.0; // ≈4.2559
+    if alt <= 11000.0 {
+        rho0 * (1.0 - L * alt / T0).powf(exp)
+    } else {
+        // 对流层顶密度延续，按尺度高 H≈R·T_tropo/g≈6341m 指数衰减
+        let rho_tropo = rho0 * (1.0 - L * 11000.0 / T0).powf(exp);
+        let h_tropo = R * (T0 - L * 11000.0) / G; // 对流层顶尺度高
+        rho_tropo * (-(alt - 11000.0) / h_tropo).exp()
+    }
+}
+
 // ============================================================ 被控对象
 
 pub struct QuadrotorPlant<W> {
@@ -406,7 +426,8 @@ where
         //   机体上升 (vb_z>0) → 穿过桨盘空气上流 (v<0) → vi 增大（爬升更费劲）；
         //   机体下降 (vb_z<0) → vi 减小（下降更省力，直至涡环）。
         // 解：vi = (-v + sqrt(v² + 2·T/(ρ·A))) / 2 = (vb_z + sqrt(vb_z² + 2·T/(ρ·A))) / 2。
-        let rho = self.cfg.air_density as f64;
+        // 空气密度随高度衰减（ISA 标准大气），高海拔推力/诱导速度更真实。
+        let rho = air_density_at(self.cfg.air_density as f64, h);
         let a_disk = (self.cfg.disk_area as f64).max(1e-4);
         let vb_now = rotate_by_quat_conj(q, self.world.get_velocity(self.body_id));
         let vz = vb_now[2]; // 机体 Z 速度（上正）
@@ -472,7 +493,7 @@ where
             [0.0; 3]
         };
         // 阶段 2b：机体气动阻力（含诱导阻力），基于相对风速（v_body - wind），在机体坐标系施加。
-        let aero = self.aero_drag_body(q, &wind_up);
+        let aero = self.aero_drag_body(q, &wind_up, h);
         // 机体合力 = 旋翼推力 + 气动阻力 + 滑流冲击（P0-2）；合力矩 = 旋翼力矩（阻力矩略，量级小）
         let mut f_body_tot = [0.0, 0.0, 0.0];
         for k in 0..3 {
@@ -552,7 +573,8 @@ where
     /// 阶段 2b：机体坐标系气动阻力（含动量理论诱导阻力）。
     /// 基于相对风速 `v_rel = v_body - wind`（阶段 3 风场）。
     /// 返回机体坐标系三轴力 [fx,fy,fz]（N），与世界系推力叠加前先旋到世界系。
-    fn aero_drag_body(&self, q: [f64; 4], wind_up: &WindVec) -> AeroDrag {
+    /// `alt_up`：世界系高度（Y 上正），用于大气密度随高度衰减。
+    fn aero_drag_body(&self, q: [f64; 4], wind_up: &WindVec, alt_up: f64) -> AeroDrag {
         // 机体线速度（世界系 -> 机体系）：用现成 rotate_by_quat_conj。
         let vel = self.world.get_velocity(self.body_id);
         // 相对风速：机体速度 - 风速（同世界系）。
@@ -567,7 +589,7 @@ where
         //  (2) 诱导阻力：随前飞速度增大（悬停→0，前飞→k*T）。
         //      物理上诱导阻力是"为产生升力而伴随的前飞阻力"，与水平速度相关，
         //      悬停时无水平速度故≈0，不应是恒常下拉力（否则制造虚假稳态偏置）。
-        let rho = self.cfg.air_density as f64;
+        let rho = air_density_at(self.cfg.air_density as f64, alt_up);
         let sum_t: f64 = self.thrust_n.iter().sum();
         let vh = (vb[0] * vb[0] + vb[1] * vb[1]).sqrt(); // 机体水平速度
         let v_ref = 1.0; // 特征速度 (m/s)，sigmoid 拐点
@@ -899,4 +921,44 @@ fn rotate_by_quat_conj(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
         r10 * v[0] + r11 * v[1] + r12 * v[2],
         r20 * v[0] + r21 * v[1] + r22 * v[2],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn air_density_decreases_with_altitude() {
+        let rho0 = 1.225;
+        let at_sea = air_density_at(rho0, 0.0);
+        let at_1k = air_density_at(rho0, 1000.0);
+        let at_5k = air_density_at(rho0, 5000.0);
+        let at_10k = air_density_at(rho0, 10000.0);
+        // 海平面即基准
+        assert!((at_sea - rho0).abs() < 1e-6);
+        // 严格单调递减
+        assert!(at_1k < at_sea);
+        assert!(at_5k < at_1k);
+        assert!(at_10k < at_5k);
+        // 大致量级：~1km ≈ -9%，~5km ≈ -40%，~10km ≈ -66%（ISA）
+        assert!((at_1k / rho0 - 0.907).abs() < 0.02);
+        assert!((at_5k / rho0 - 0.601).abs() < 0.02);
+        assert!((at_10k / rho0 - 0.337).abs() < 0.02);
+    }
+
+    #[test]
+    fn air_density_handles_tropopause_and_negative() {
+        let rho0 = 1.225;
+        // 低于海平面按海平面 clamp
+        assert!((air_density_at(rho0, -500.0) - rho0).abs() < 1e-6);
+        // 对流层顶内无跳变（11km 衔接连续）
+        let at_11k = air_density_at(rho0, 11000.0);
+        let at_12k = air_density_at(rho0, 12000.0);
+        assert!(at_12k < at_11k);
+        // 极高空不产生 NaN / 负值，且密度应很小但为正
+        let at_30k = air_density_at(rho0, 30000.0);
+        assert!(at_30k.is_finite());
+        assert!(at_30k > 0.0);
+        assert!(at_30k < at_12k);
+    }
 }
