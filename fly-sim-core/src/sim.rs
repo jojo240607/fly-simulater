@@ -8,7 +8,7 @@
 
 use flyctrl_core::controller::Setpoint;
 use flyctrl_core::invariants;
-use flyctrl_core::units::{Meter, MeterPerSecond, Radian};
+use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, Radian};
 use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
 
 use crate::controller::{hover_setpoint, FlyController};
@@ -214,6 +214,7 @@ where
             pos: [Meter(0.0), Meter(0.0), Meter(-5.0)],
             yaw: Radian(0.0),
             vel: [MeterPerSecond(forward_vx_ned as f32), MeterPerSecond(0.0), MeterPerSecond(0.0)],
+            acc: [MeterPerSecondSquared::ZERO; 3],
         };
         let total = (seconds / self.dt) as u64;
         let mut all_ok = true;
@@ -657,6 +658,7 @@ where
             let sp0 = Setpoint {
                 pos: [Meter(n0 as f32), Meter(e0 as f32), Meter(d0 as f32)],
                 vel: [MeterPerSecond::ZERO; 3],
+                acc: [MeterPerSecondSquared::ZERO; 3],
                 yaw: Radian(y0 as f32),
             };
             for _ in 0..(500u64) {
@@ -709,15 +711,21 @@ where
             let inv = 1.0 / seg_len[seg];
             // 期望位置
             let (pn, pe, pd) = (a.0 + dx * f, a.1 + dy * f, a.2 + dz * f);
-            let _ = inv;
             // 偏航（段起点 yaw）
             let yaw = a.3;
 
             let sp = Setpoint {
                 pos: [Meter(pn as f32), Meter(pe as f32), Meter(pd as f32)],
-                // 位置追踪（不给速度前馈）：让 PID 位置环自行追踪，避免速度前馈
-                // 与高度/姿态环耦合导致移动中掉高。
-                vel: [MeterPerSecond::ZERO; 3],
+                // 速度前馈（P3-A1 轨迹跟踪）：沿段方向给 `cruise_v`，消除位置环
+                // "仅靠 kp 误差追赶限速移动目标"的稳态跟随误差（≈cruise_v/kp_xy，
+                // kp_xy=0.3 时 2m/s 巡航约 6.7m>5m 发散阈值）。旧注释称速度前馈致
+                // 移动掉高——那是倾斜补偿缺失时代的产物，`cos_tilt` 推力补偿已在
+                // flyctrl PID 落地（commit 553744d），现可安全开启。
+                // 加速度前馈：折线段匀速巡航切向加速度≈0，转弯为瞬时方向跳变
+                // （非光滑曲线，不宜给尖峰），故恒为 0；`Setpoint::acc` 已接线到
+                // PID 中环，供光滑曲线/轨迹场景使用。
+                vel: [MeterPerSecond((dx * inv * cruise_v) as f32), MeterPerSecond((dy * inv * cruise_v) as f32), MeterPerSecond((dz * inv * cruise_v) as f32)],
+                acc: [MeterPerSecondSquared::ZERO; 3],
                 yaw: Radian(yaw as f32),
             };
             let (st, _cmd) = self.step_frame(&sp);

@@ -29,7 +29,7 @@ use fly_sim_core::sensor::SensorConfig;
 use fly_sim_core::sim::SimLoop;
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::controller::Setpoint;
-use flyctrl_core::units::{Meter, MeterPerSecond, Radian};
+use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, Radian};
 
 #[cfg(feature = "phy")]
 use fly_sim_core::physics::PhySdkWorld;
@@ -63,6 +63,7 @@ fn run_steady(kind: ControllerKind, contact: Option<ContactModel>, secs: f64) ->
     let sp = Setpoint {
         pos: [Meter(0.0), Meter(0.0), Meter(-5.0)],
         vel: [MeterPerSecond(0.0), MeterPerSecond(0.0), MeterPerSecond(0.0)],
+        acc: [MeterPerSecondSquared::ZERO; 3],
         yaw: Radian(0.0),
     };
     let mut ds = Vec::new();

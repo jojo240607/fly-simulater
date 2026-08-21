@@ -1,13 +1,15 @@
 //! P2-2 任务级逻辑：waypoint 路径跟随框架验证。
 //!
-//! 说明：`run_mission` 提供"任务执行 + 失败检测"框架。当前 PID 悬停控制器
-//! 在**持续移动目标**下会掉高/振荡（无倾斜垂直分量补偿），故长距离巡航会被
-//! 任务层可靠判定为 `stable=false`（正确失败检测，不误报成功）。
+//! 说明：`run_mission` 提供"任务执行 + 失败检测"框架。
+//! - P3-A1（轨迹跟踪）前：PID 悬停控制器在**持续移动目标**下无速度前馈，稳态跟随
+//!   误差 ≈ cruise_v/kp_xy（kp_xy=0.3、2m/s 巡航约 6.7m>5m 发散阈值），长距离巡航
+//!   被判 `stable=false`。
+//! - P3-A1（轨迹跟踪）后：`run_mission` 沿路径给速度前馈 + flyctrl PID 倾斜补偿
+//!   与加速度前馈，长距离巡航应 `stable=true`（本文件的验收目标）。
 //! 本测试验证：
 //! - `run_mission` API 返回结构正确（duration/误差非负、可运行）；
-//! - 任务层**可靠检测**控制器无法跟随的路径（长距离移动 → stable=false），
-//!   而不是误报成功——这是仿真任务层的核心价值（失败检测）。
-//! - 悬停/极小任务可稳定完成（stable=true）。
+//! - 长距离巡航能被**稳定跟随**（stable=true）——P3-A1 验收；
+//! - 任务层仍能检测**真正**的失控（误差记录、发散路径检测不误报成功）。
 
 #![cfg(feature = "phy")]
 
@@ -46,17 +48,19 @@ fn mission_api_returns_valid_structure() {
 }
 
 #[test]
-fn mission_detects_controller_move_limitation() {
-    // 长距离移动巡航：PID 悬停控制器在持续大幅移动目标下跟踪误差超限（>5m），
-    // 任务层应**可靠检测为失败**（stable=false），不误报成功——这是任务层的核心
-    // 价值（失败检测，而非盲目报成功）。
+fn mission_long_cruise_stable_with_trajectory_tracking() {
+    // P3-A1 验收：长距离巡航（10m @ 2m/s）在"速度前馈 + 倾斜补偿"下应稳定跟随
+    // （stable=true）。修复前无速度前馈，稳态误差 ≈ cruise_v/kp_xy = 2.0/0.3 ≈ 6.7m
+    // > 5m 发散阈值 → stable=false；现沿路径给前馈速度，稳态误差应显著收敛。
     let mut loop_sim = make_loop();
     let wp = [(0.0, 0.0, -5.0, 0.0), (10.0, 0.0, -5.0, 0.0)];
     let r = loop_sim.run_mission(&wp, 2.0);
-    // 任务确实执行了（有时长），且检测到失控。
-    assert!(r.duration > 0.1, "任务应实际执行: dur={:.2}", r.duration);
-    assert!(!r.stable, "长距离巡航应被任务层检测为失败（PID 移动局限）");
-    assert!(r.max_err > 0.0, "应记录到跟踪误差: {:.2}", r.max_err);
+    assert!(r.stable, "长距离巡航应被稳定跟随（P3-A1）: max_err={:.2}", r.max_err);
+    // 跟随完成：时长 ≈ 路径长/巡航速度（含起飞稳定段 2s）。
+    assert!((r.duration - 10.0 / 2.0).abs() < 2.5, "时长应≈全程: dur={:.2}", r.duration);
+    // 跟踪误差应明显低于发散阈值（5m）。实测约 3.3m，来自巡航启停的速度阶跃瞬态
+    // （折线匀速巡航无加速度前馈），远好于修复前的 6.7m 稳态误差。
+    assert!(r.max_err < 4.5, "跟踪误差应显著收敛: max_err={:.2}", r.max_err);
 }
 
 #[test]
