@@ -582,7 +582,7 @@
 - 验证（P3-A1，`flyctrl` 6d79086 + `fly-simulater` ea38e39）：5 场景（Hover/Step/Wind/Square/Circle）数值稳定无 NaN，pos_RMS 3.58–5.50m；垂向环 PM=36°/GM=∞（ki_z 0.6→0.3），悬停振荡 0.11m，垂向扰动 1.0s 恢复；`--scenario mission` 长距离跟随 `stable=true`。
 - 验证（P3-A2，`fly-simulater` 5c2d3ee `tests/sensor_noise.rs`）：realistic 噪声 + 无地面约束下 TRU 高度 ±0.6m、水平漂移 <3m、姿态倾斜 <5.1°、EKF 估计误差 <0.3m；噪声消融定位主导源（GPS 位置外环）。
 - 验证（P3-A3，`flyctrl` deab60a + `fly-simulater` 0550c49 `tests/tecs_airspeed.rs` 3 项）：TECS 悬停收敛；2m/s 逆风空速拖拽前馈被吹回 1.29m→0.03m（49×）；80m 高速巡航（vmax=5）总能量高度误差峰值 TECS 0.313 vs PID 0.793（<0.5×）、巡航速度 5.06 vs 3.56 m/s（前馈补偿寄生阻力）。空速源分离：EKF 空速观测用地速幅值、TECS 用相对空速矢量（`set_measured_airspeed_vec`），避免风相对空速污染水平速度估计。
-- 验证（P3-D1，`flyctrl` + `fly-simulater` `tests/rc_modes.rs` 3 项）：遥控解锁 → 手动/增稳 → 定点平移（6 位档位开关：手动/增稳/定高/定点/返航/降落）→ RTL 回原点 → 降落触地 全流程数值稳定；未解锁请求定点/任务被治理器拒绝、解锁后放行；解锁开/合门控与 FDIR 一致，解锁关合 → 电机零推力自由坠落（u≈0）。`FlyController::step_rc` + `HilContext::step_with_cmd` 与 `step` 共用采集/估计/FDIR/收尾骨架，手动/增稳控制律（`flyctrl-core::controller::manual`：角速率直通 / 姿态保持）复用姿态内环与电机混控。
+- 验证（P3-D1，`flyctrl` 58b2e98 + `fly-simulater` 158b3c7 `tests/rc_modes.rs` 3 项）：遥控解锁 → 手动/增稳 → 定点平移（6 位档位开关：手动/增稳/定高/定点/返航/降落）→ RTL 回原点 → 降落触地 全流程数值稳定；未解锁请求定点/任务被治理器拒绝、解锁后放行；解锁开/合门控与 FDIR 一致，解锁关合 → 电机零推力自由坠落（u≈0）。`FlyController::step_rc` + `HilContext::step_with_cmd` 与 `step` 共用采集/估计/FDIR/收尾骨架，手动/增稳控制律（`flyctrl-core::controller::manual`：角速率直通 / 姿态保持）复用姿态内环与电机混控。
 
 #### P3-D：使用场景/生态层（Top 2/3）
 - [x] **P3-D1 RC 输入 + 全飞行模式**：遥控解锁 → 手动/增稳 → 自主任务 → RTL/降落 全流程场景（sim 侧注入 `RcInput`）。
