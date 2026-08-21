@@ -31,27 +31,61 @@ use crate::sensor::{RangeFinderModel, RangeFinderSample, SensorConfig, SensorMod
 // 飞控（NED）     ：世界 北-X,东-Y,下-Z；机体 前-X,右-Y,下-Z。
 //
 // 世界位置：ned(n,e,d) <-> up(x,y,z): x=n, y=-d, z=-e
-// 机体轴：  飞控机体下-Z = 引擎机体上+Z，故引擎机体四元数 = 飞控 q * q_flipX，
-//           q_flipX = (w=0, x=1, y=0, z=0) 绕 X 转 180°。
+// 世界基变换（NED→引擎，反射 det=-1）：M_wn = [[1,0,0],[0,0,-1],[0,-1,0]]
+// 机体基变换（FRD→引擎，反射 det=-1）：M_bn = diag(1,1,-1)
+// 姿态（旋转矩阵/四元数）须经旋转矩阵合成，不能直接四元数相乘：
+//   R_ned = M_wn · R_up · M_bn
+// 伪向量（角速度/力矩）反射时额外取反：ω_fc = (-x, -y, +z)（引擎机体系）。
+// 真向量（比力/位置/速度）仅翻转 z：v_fc = (x, y, -z)。
 
-/// 引擎机体(前-右-上)四元数 -> 飞控机体(前-右-下)四元数。
+/// 引擎机体(前-右-上)四元数 -> 飞控机体 FRD(前-右-下)四元数。
+///
+/// 两套基变换都是反射（det=-1），姿态空间的合成必须用旋转矩阵：
+/// R_ned = M_wn · R_up · M_bn。旧 X-180° 四元数翻转会把水平悬停
+/// （q_up≈绕 X 转 -90°）错误合成出 roll=90°，TRU 报 90° 伪影并把
+/// 姿态环符号搞反（roll_force_probe 实测 +roll 出西向推力）。
 pub fn quat_up_to_ned(q_up: [f64; 4]) -> Quaternion {
-    // q_flipX * q_up   (绕 X 转 180° 把上轴翻成下轴)
-    let flip = Quaternion { w: 0.0, x: 1.0, y: 0.0, z: 0.0 };
     let q = Quaternion {
         w: q_up[0] as f32,
         x: q_up[1] as f32,
         y: q_up[2] as f32,
         z: q_up[3] as f32,
     };
-    flip * q
-}
-
-/// 飞控机体(前-右-下)四元数 -> 引擎机体(前-右-上)四元数。
-fn quat_ned_to_up(q_ned: Quaternion) -> [f64; 4] {
-    let flip = Quaternion { w: 0.0, x: 1.0, y: 0.0, z: 0.0 };
-    let q = flip * q_ned; // q_flipX * q_ned
-    [q.w as f64, q.x as f64, q.y as f64, q.z as f64]
+    // R_up：引擎机体 -> 引擎世界（标准四元数旋转矩阵）。
+    let (w, x, y, z) = (q.w as f64, q.x as f64, q.y as f64, q.z as f64);
+    let r = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+        [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
+        [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    // R_ned = M_wn · R_up · M_bn：先右乘 M_bn（第 3 列取反），
+    // 再左乘 M_wn（行 1 不变，行 2 = -原第 3 行，行 3 = -原第 2 行）。
+    let c = [
+        [r[0][0], r[0][1], -r[0][2]],
+        [-r[2][0], -r[2][1], r[2][2]],
+        [-r[1][0], -r[1][1], r[1][2]],
+    ];
+    // 旋转矩阵 -> 四元数（选迹最大主元，数值稳定）。
+    let tr = c[0][0] + c[1][1] + c[2][2];
+    let (qw, qx, qy, qz) = if tr > 0.0 {
+        let s = 2.0 * (tr + 1.0).sqrt();
+        (0.25 * s, (c[2][1] - c[1][2]) / s, (c[0][2] - c[2][0]) / s, (c[1][0] - c[0][1]) / s)
+    } else if c[0][0] >= c[1][1] && c[0][0] >= c[2][2] {
+        let s = 2.0 * (1.0 + c[0][0] - c[1][1] - c[2][2]).sqrt();
+        ((c[2][1] - c[1][2]) / s, 0.25 * s, (c[0][1] + c[1][0]) / s, (c[0][2] + c[2][0]) / s)
+    } else if c[1][1] >= c[2][2] {
+        let s = 2.0 * (1.0 + c[1][1] - c[0][0] - c[2][2]).sqrt();
+        ((c[0][2] - c[2][0]) / s, (c[0][1] + c[1][0]) / s, 0.25 * s, (c[1][2] + c[2][1]) / s)
+    } else {
+        let s = 2.0 * (1.0 + c[2][2] - c[0][0] - c[1][1]).sqrt();
+        ((c[1][0] - c[0][1]) / s, (c[0][2] + c[2][0]) / s, (c[1][2] + c[2][1]) / s, 0.25 * s)
+    };
+    Quaternion {
+        w: qw as f32,
+        x: qx as f32,
+        y: qy as f32,
+        z: qz as f32,
+    }
 }
 
 /// NED 世界向量 (n,e,d) -> 引擎世界向量 (x,y,z)。
@@ -411,6 +445,15 @@ where
             let tq = spin[i] * q_n[i];
             tau_body[2] += tq;
         }
+        // 伪向量反射（引擎机体系 前-右-上 → 飞控 FRD 前-右-下）：
+        // 飞控指令 (p_cmd,q_cmd,r_cmd) 在飞控机体轴。反射 det=-1 下伪向量（角速度/力矩）
+        // 须额外取反：τ_fc = (-x,-y,+z)。由臂几何反解得的引擎 roll 力矩 τ_x = +2l·p，
+        // 反射到飞控系得 -2l·p（反号），故引擎 roll 力矩必须翻转为 -2l·p_cmd：
+        // 飞控 +roll（右滚）对应引擎绕前轴 -θ（右手定则 +X 把右翼旋向上=左滚），
+        // 引擎受 -θ 时推力（机体 +Z）才旋向 +Y(东) -> 东向推力，与飞控 +tilt_e 语义一致。
+        // pitch/yaw 已同号无需翻转（τ_y=-2l·q、τ_z=+2k·r 反射后恰为 +q/+r）。
+        // 注意：陀螺进动力矩是引擎系真实物理力矩，不参与反射，须在翻转之后叠加。
+        tau_body[0] = -tau_body[0];
         // 陀螺进动：螺旋桨角动量 H = I_rotor·Ω·ẑ(机体)，机体以 ω 转动产生 M_gyro = H × ω。
         // 四旋翼等速反桨时净 H_z=0（悬停无净陀螺）；转速不对称（机动/偏航/故障）时
         // 产生俯仰↔滚转耦合力矩（陀螺稳定效应）。
@@ -555,12 +598,14 @@ where
         let pos_ned = vec_up_to_ned(pos_up); // [n, e, d]
 
         // 角速度：Rapier 的 get_angular_velocity 返回【世界系】角速度，必须先旋到
-        // 引擎机体(前-右-上)系，再按飞控混控端 (p,-q,-r) 的约定翻转 Y、Z 得到飞控机体
-        // (前-右-下)系。该翻转必须与 actuator 端的 (p,-q,-r) 互为逆，否则俯仰/偏航轴的
-        // 阻尼项符号反掉，姿态环发散（悬停近水平时世界系≈机体系故无碍，倾斜后炸机）。
+        // 引擎机体(前-右-上)系，再经伪向量反射（FRD→引擎 det=-1，坐标变换乘 det）
+        // 得到飞控机体(前-右-下)系：ω_fc = (-x, -y, +z)（引擎机体分量）。
+        // 该变换必须与 actuator 端力矩反射（roll 翻转，见 step() 注释）互为一致，
+        // 否则对应轴的阻尼项符号反掉，倾斜后姿态环正反馈发散
+        // （悬停近水平时世界系≈机体系故无碍，倾斜后 p 速率指数增长炸机）。
         let q_up_q = Quaternion { w: q_up[0] as f32, x: q_up[1] as f32, y: q_up[2] as f32, z: q_up[3] as f32 };
         let ang_body = rotate_vec_by_quat_inverse(q_up_q, [ang[0] as f32, ang[1] as f32, ang[2] as f32]);
-        let omega_fc = [ang_body[0], -ang_body[1], -ang_body[2]];
+        let omega_fc = [-ang_body[0], -ang_body[1], ang_body[2]];
 
         // 比力（机体，不含重力）：数值微分世界速度得 a_world，减重力项后旋到机体。
         let a_world = [
@@ -719,7 +764,7 @@ where
                 MeterPerSecond(vec_up_to_ned(vel)[2]),
             ],
             att: quat_ned,
-            omega: [RadianPerSecond(ang_body[0]), RadianPerSecond(-ang_body[1]), RadianPerSecond(-ang_body[2])],
+            omega: [RadianPerSecond(-ang_body[0]), RadianPerSecond(-ang_body[1]), RadianPerSecond(ang_body[2])],
             airspeed: MeterPerSecond((vel[0] * vel[0] + vel[1] * vel[1]).sqrt() as f32),
             accel_bias: [0.0; 3],
         }
