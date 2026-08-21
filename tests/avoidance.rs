@@ -57,7 +57,8 @@ fn run_approach(with_avoid: bool, seconds: f64) -> (f64, TruStats) {
         &cfg,
         DT,
         None,
-        SensorConfig::default(),
+        // 场景测试默认真实噪声（FIDELITY_ROADMAP 收尾项：默认零噪声会屏蔽 EKF/控制律噪声行为）。
+        SensorConfig::realistic(),
         ControllerKind::Pid,
         None,
         vec![], // 静态障碍不放，全部走动态障碍

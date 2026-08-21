@@ -26,7 +26,8 @@ fn make_ctrl() -> FlyController<PhySdkWorld> {
         &cfg,
         DT,
         None,
-        SensorConfig::default(),
+        // 场景测试默认真实噪声（FIDELITY_ROADMAP 收尾项：默认零噪声会屏蔽 EKF/控制律噪声行为）。
+        SensorConfig::realistic(),
         ControllerKind::Pid,
         Some(ContactModel::default()),
         Vec::new(),
@@ -53,16 +54,16 @@ fn eff_scales_motor_command_not_zero() {
     ctrl.step(&sp);
     let cmd = ctrl.last_cmd();
     assert!(cmd.motor[0] > 0.0, "m0 部分退化指令应 >0（缩放而非置零），got {}", cmd.motor[0]);
-    // m0 缩放后若原指令非零，应明显小于正常档（m1 未退化，可作参考）。
-    if m1_base > 0.01 {
-        assert!(
-            cmd.motor[0] < cmd.motor[1] + 1e-6,
-            "m0 缩放后推力应低于未退化路 (m0={}, m1={})",
-            cmd.motor[0], cmd.motor[1]
-        );
-    }
-    // 其余三路不受影响。
-    assert!((cmd.motor[1] - m1_base).abs() < 1e-3, "m1 不应受 m0 退化影响");
+    // P1-1 分配器把 0<eff<1 的电机按"有效"参与分配（全有效退化为 invert_full），
+    // 指令保持满量级不逐路 ×eff 缩小（推力缩减由 plant 端 eff 语义承载）：
+    // m0 应接近未退化档 m1_base 的量级（非置零、非塌缩）。
+    assert!(
+        (cmd.motor[0] - m1_base).abs() < 0.1,
+        "m0 应保持有效电机量级（非置零），m0={}, m1_base={}",
+        cmd.motor[0], m1_base
+    );
+    // 其余三路不受影响（容忍 realistic 噪声逐拍抖动）。
+    assert!((cmd.motor[1] - m1_base).abs() < 0.1, "m1 不应受 m0 退化影响");
 }
 
 #[test]

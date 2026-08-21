@@ -570,7 +570,8 @@
   - 落地（`fly-simulater` 本次提交）：MAVLink SIL 路径（`main.rs` `FlyController::new`）`contact=None` → `Some(ContactModel::default())`，与主 SIL 路径/`view.rs`/`fly-sim-server` 一致。架构上接触模型属于 `plant.rs` 而非 world（`ToyWorld`/`PhySdkWorld` 均无接触字段），故不改 world 结构体、无死代码。真空/自由落体与噪声鲁棒性诊断场景仍显式传 `None`（`run_freefall`、`zz_diag_noise`），语义不变。
 - [x] **控制律倾斜补偿**：`des_thrust /= cos(tilt)`——已定位的移动掉高根因，属调整既有 PID 而非新功能。P3-A1 已随轨迹跟踪落地（`pid.rs` / `manual.rs` 均按 1/cos(tilt) 放大总推力）。
 - [x] **大气密度随高度/温度**：`air_density` 现按 ISA 对流层标准大气随高度衰减（`plant.rs::air_density_at`，温度-高度关系隐含），高海拔推力/诱导速度/气动阻力更真实；11km 以上指数外推。
-- [ ] **传感器噪声默认值**：默认零噪声屏蔽了 EKF/控制律噪声行为，真实场景测试应默认开启 realistic 噪声。
+- [x] **传感器噪声默认值**：默认零噪声屏蔽了 EKF/控制律噪声行为，真实场景测试应默认开启 realistic 噪声。
+  - 落地：`mission.rs` / `tecs_airspeed.rs` / `rc_modes.rs` / `degraded.rs` / `avoidance.rs` 等所有闭环场景测试的 `SensorConfig::default()` → `SensorConfig::realistic()`，默认跑真实噪声；同时修复 realistic 噪声暴露的两个问题——`SimGps` 健康判断改为"定位锁定状态"（`has_fix`，避免 20Hz GPS 非帧时刻 `position_available` 逐帧抖动误拒模式切换），以及 `degraded.rs` 电机退化指令断言对齐分配器"缩放而非逐路×eff"语义。默认与 `--features phy` 全量回归通过，无回归。
 
 ### 推进记录（进度跟踪）
 

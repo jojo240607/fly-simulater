@@ -61,6 +61,12 @@ pub struct SimImu {
 /// 物理引擎提供的 GPS/NED 位置。
 pub struct SimGps {
     last: Option<PosSample>,
+    /// 定位锁定标志：收到过有效样本即为 true（仿真 GPS 一经锁定持续有效）。
+    /// realistic GPS 为 20Hz、控制率更高，非 GPS 帧 `last=None` 属正常；
+    /// `healthy()` 若直接看 `last.is_some()` 会让 position_available 逐帧抖动，
+    /// 模式治理器在非 GPS 帧请求定点/任务会被误拒。用"锁定状态"而非"本帧有样本"
+    /// 表征可用性（EKF 融合仍走 `read()` 的 `Some` 帧，不受影响）。
+    has_fix: bool,
 }
 
 // 说明：为绕开 `plant` 同时被 FlyController（可变）与传感器 trait（可变）借用的冲突，
@@ -73,7 +79,7 @@ impl ImuSensor for SimImu {
 }
 impl GpsSensor for SimGps {
     fn read(&mut self) -> Option<PosSample> { self.last }
-    fn healthy(&self) -> bool { self.last.is_some() }
+    fn healthy(&self) -> bool { self.has_fix }
 }
 
 /// 物理引擎提供的空速（真空速，不含风）：由世界真值水平速度幅值换算。
@@ -222,7 +228,7 @@ where
                 gyro: [RadianPerSecond(0.0); 3],
             },
         };
-        let gps = SimGps { last: None };
+        let gps = SimGps { last: None, has_fix: false };
         let air = SimAirspeed { last: None };
         let mag = SimMag { last: [0.0; 3] };
         let motors = SimMotors { last: ActuatorCmd::zero() };
@@ -496,6 +502,10 @@ where
         let (imu_sample, pos_sample) = self.plant.read_sensors();
         self.imu.last = imu_sample;
         self.gps.last = pos_sample;
+        // GPS 定位锁定：收到有效样本即置位（仿真 GPS 一经锁定持续有效）。
+        if pos_sample.is_some() {
+            self.gps.has_fix = true;
+        }
         let vg = self.plant.ground_airspeed_ned();
         let vh = (vg[0] * vg[0] + vg[1] * vg[1]).sqrt();
         self.air.last = Some(AirspeedSample {

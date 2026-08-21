@@ -90,7 +90,8 @@ fn run_scenario(
         &cfg,
         DT,
         wind,
-        SensorConfig::default(),
+        // 场景测试默认真实噪声（FIDELITY_ROADMAP 收尾项：默认零噪声会屏蔽 EKF/控制律噪声行为）。
+        SensorConfig::realistic(),
         kind,
         Some(ContactModel::default()),
         Vec::new(),
