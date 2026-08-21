@@ -564,7 +564,8 @@
 
 ### 既有项调整清单（不只"加"，还要"改"）
 
-- [ ] **验收判据**：收敛判定必须同时断言 `TRU` 有界（不只 `EST≈TRU`），推广到所有场景测试。
+- [x] **验收判据**：收敛判定必须同时断言 `TRU` 有界（不只 `EST≈TRU`），推广到所有场景测试。
+  - 落地：新增共享工具 `tests/common/mod.rs`（`TruStats` 逐帧统计 + `assert_tru_bounded` 统一断言），判定量归一化为水平漂移/高度/倾角三个量，避免各测试各自写一份且阈值不一致。已推广到 `sensor_noise.rs`、`headless_hover_wind.rs`、`mission.rs`、`avoidance.rs`、`tecs_airspeed.rs`、`rc_modes.rs` 全部闭环场景测试；默认与 `--features phy` 全绿，无回归。`degraded.rs`（故障容错，失控即判据）、`wind_scan.rs`（打印型诊断，无通过性断言）不含收敛判定，不适用。
 - [x] **`ToyWorld` 默认 `ContactModel`**：建议默认 `Some(default())`（与 `PhySdkWorld` 一致），避免无地面时噪声发散被误判为估计器缺陷（阶段 11 C 项落地）。
   - 落地（`fly-simulater` 本次提交）：MAVLink SIL 路径（`main.rs` `FlyController::new`）`contact=None` → `Some(ContactModel::default())`，与主 SIL 路径/`view.rs`/`fly-sim-server` 一致。架构上接触模型属于 `plant.rs` 而非 world（`ToyWorld`/`PhySdkWorld` 均无接触字段），故不改 world 结构体、无死代码。真空/自由落体与噪声鲁棒性诊断场景仍显式传 `None`（`run_freefall`、`zz_diag_noise`），语义不变。
 - [x] **控制律倾斜补偿**：`des_thrust /= cos(tilt)`——已定位的移动掉高根因，属调整既有 PID 而非新功能。P3-A1 已随轨迹跟踪落地（`pid.rs` / `manual.rs` 均按 1/cos(tilt) 放大总推力）。

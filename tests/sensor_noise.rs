@@ -26,6 +26,9 @@ use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, Radian};
 #[cfg(feature = "phy")]
 use fly_sim_core::physics::PhySdkWorld;
 
+mod common;
+use common::{assert_tru_bounded, TruStats};
+
 fn make_world() -> impl RigidBodyWorld + 'static {
     #[cfg(feature = "phy")]
     {
@@ -37,19 +40,10 @@ fn make_world() -> impl RigidBodyWorld + 'static {
     }
 }
 
-/// 稳态悬停轨迹统计（TRU 真值）。
+/// 稳态悬停轨迹统计：TRU 真值（复用共享断言工具）+ EKF 贴合度。
 struct HoverStats {
-    /// 采样窗口内 TRU 高度 d 范围（m，-5 为设定点）。
-    d_min: f64,
-    d_max: f64,
-    /// 采样窗口内 TRU 水平漂移最大值（m）。
-    h_max: f64,
-    /// 采样窗口内 TRU 姿态偏离水平最大值（deg，2·acos(w)，NED 单位四元数=水平）。
-    tilt_max_deg: f64,
-    /// 是否出现 NaN/Inf。
-    nan: bool,
-    /// 结束时 TRU 高度 d。
-    end_d: f64,
+    /// TRU 真值统计（nan/水平漂移/高度范围/倾角，见 `common::assert_tru_bounded`）。
+    tru: TruStats,
     /// 结束时 EST−TRU 位置误差（m，EKF 是否贴合真值）。
     est_err: [f64; 3],
 }
@@ -57,12 +51,7 @@ struct HoverStats {
 impl Default for HoverStats {
     fn default() -> Self {
         Self {
-            d_min: f64::MAX,
-            d_max: f64::MIN,
-            h_max: 0.0,
-            tilt_max_deg: 0.0,
-            nan: false,
-            end_d: 0.0,
+            tru: TruStats::default(),
             est_err: [0.0; 3],
         }
     }
@@ -98,42 +87,19 @@ fn run_steady(contact: Option<ContactModel>, secs: f64) -> HoverStats {
         // 姿态偏离水平 = att 相对单位四元数（水平）的旋转角 = 2·acos(w)。
         let tilt = 2.0 * (truth.att.w as f64).clamp(-1.0, 1.0).acos().to_degrees();
         if i % 25 == 0 {
-            st.d_min = st.d_min.min(d);
-            st.d_max = st.d_max.max(d);
-            st.h_max = st.h_max.max(h);
-            st.tilt_max_deg = st.tilt_max_deg.max(tilt);
+            st.tru.sample(h, d, tilt);
         }
-        if !d.is_finite() || !h.is_finite() {
-            st.nan = true;
+        if st.tru.nan {
             return st;
         }
     }
     let (truth, _) = sim.snapshot();
     let est = sim.ctrl_debug_estimate();
-    st.end_d = truth.pos[2].0 as f64;
+    st.tru.end_d = truth.pos[2].0 as f64;
     for k in 0..3 {
         st.est_err[k] = (est.pos[k].0 - truth.pos[k].0).abs() as f64;
     }
     st
-}
-
-fn assert_tru_bounded(st: &HoverStats, label: &str, max_h: f64) {
-    assert!(!st.nan, "[{label}] TRU 出现 NaN/Inf");
-    assert!(
-        st.end_d.abs() < 10.0,
-        "[{label}] TRU 高度 runaway：end d={:.1}（期望≈-5）",
-        st.end_d
-    );
-    assert!(
-        st.h_max < max_h,
-        "[{label}] TRU 水平漂移过大：h_max={:.1}m（期望 < {max_h}）",
-        st.h_max
-    );
-    assert!(
-        st.tilt_max_deg < 45.0,
-        "[{label}] TRU 姿态翻滚：max tilt={:.1}°（期望 < 45°，避免翻机）",
-        st.tilt_max_deg
-    );
 }
 
 /// P3-A2 核心验收：realistic 噪声 + **无地面约束**（最严苛，无掩盖）。
@@ -143,9 +109,10 @@ fn hover_realistic_none_contact_bounded() {
     let st = run_steady(None, 40.0);
     println!(
         "hover(none-contact) d=[{:.1},{:.1}] end={:.1} h_max={:.1} tilt_max={:.1}° est_err={:.2}/{:.2}/{:.2}",
-        st.d_min, st.d_max, st.end_d, st.h_max, st.tilt_max_deg, st.est_err[0], st.est_err[1], st.est_err[2]
+        st.tru.d_min, st.tru.d_max, st.tru.end_d, st.tru.h_max, st.tru.tilt_max_deg,
+        st.est_err[0], st.est_err[1], st.est_err[2]
     );
-    assert_tru_bounded(&st, "none-contact", 15.0);
+    assert_tru_bounded(&st.tru, "none-contact", -5.0, 15.0, 45.0);
 }
 
 /// realistic 噪声 + 默认地面约束（P1-2 掩盖态也应稳定，不 runaway）。
@@ -154,9 +121,10 @@ fn hover_realistic_contact_bounded() {
     let st = run_steady(Some(ContactModel::default()), 30.0);
     println!(
         "hover(contact)    d=[{:.1},{:.1}] end={:.1} h_max={:.1} tilt_max={:.1}° est_err={:.2}/{:.2}/{:.2}",
-        st.d_min, st.d_max, st.end_d, st.h_max, st.tilt_max_deg, st.est_err[0], st.est_err[1], st.est_err[2]
+        st.tru.d_min, st.tru.d_max, st.tru.end_d, st.tru.h_max, st.tru.tilt_max_deg,
+        st.est_err[0], st.est_err[1], st.est_err[2]
     );
-    assert_tru_bounded(&st, "contact", 15.0);
+    assert_tru_bounded(&st.tru, "contact", -5.0, 15.0, 45.0);
 }
 
 /// 噪声下 EKF 必须贴合真值：EST 位置误差有界（证明发散的是控制律放大而非估计器）。
@@ -164,7 +132,7 @@ fn hover_realistic_contact_bounded() {
 fn est_tracks_truth_under_noise() {
     let st = run_steady(None, 40.0);
     println!("est_err = {:.2}/{:.2}/{:.2} m", st.est_err[0], st.est_err[1], st.est_err[2]);
-    assert!(!st.nan, "TRU 出现 NaN/Inf");
+    assert!(!st.tru.nan, "TRU 出现 NaN/Inf");
     for k in 0..3 {
         assert!(
             st.est_err[k] < 5.0,

@@ -20,6 +20,9 @@ use fly_sim_core::sim::SimLoop;
 use fly_simulater::airframe::load_airframe;
 use fly_sim_core::physics::ContactModel;
 
+mod common;
+use common::{assert_tru_bounded, TruStats};
+
 const DT: f64 = 0.004;
 
 fn make_loop() -> SimLoop<PhySdkWorld> {
@@ -61,6 +64,17 @@ fn mission_long_cruise_stable_with_trajectory_tracking() {
     // 跟踪误差应明显低于发散阈值（5m）。实测约 3.3m，来自巡航启停的速度阶跃瞬态
     // （折线匀速巡航无加速度前馈），远好于修复前的 6.7m 稳态误差。
     assert!(r.max_err < 4.5, "跟踪误差应显著收敛: max_err={:.2}", r.max_err);
+    // 验收判据（FIDELITY_ROADMAP）：收敛判定同时断言 TRU 有界——mission 全程内部
+    // 已用真值角速度（>6 rad/s）做发散检测；此处再断言终点物理真值不 runaway
+    // （snapshot 为真值 NED 状态；路径终点在 NED 北 10m，故水平判定量给足裕度）。
+    let (truth, _) = loop_sim.snapshot();
+    let mut tru = TruStats::default();
+    tru.sample(
+        (truth.pos[0].0 as f64).hypot(truth.pos[1].0 as f64),
+        truth.pos[2].0 as f64,
+        2.0 * (truth.att.w as f64).clamp(-1.0, 1.0).acos().to_degrees(),
+    );
+    assert_tru_bounded(&tru, "mission long-cruise", -5.0, 20.0, 45.0);
 }
 
 #[test]

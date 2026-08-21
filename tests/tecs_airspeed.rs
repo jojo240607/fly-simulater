@@ -17,6 +17,9 @@ use fly_sim_core::wind::{WindConfig, WindField};
 use fly_simulater::airframe::load_airframe;
 use flyctrl_core::controller::Setpoint;
 
+mod common;
+use common::{assert_tru_bounded, TruStats};
+
 const DT: f64 = 0.004;
 
 /// 机体推力轴（机体 +Z）偏离世界竖直 (0,1,0) 的倾角（度）。
@@ -50,6 +53,7 @@ struct Diag {
     end_vel: [f32; 3],
     end_airspeed: f32, // EKF 真空速估计（仅 TECS 填充）
     max_drag_a: f32,   // 拖拽前馈加速度幅值峰值（仅 TECS 填充）
+    tru: TruStats,     // TRU 真值有界统计（验收判据：不 NaN/高度不 runaway/不翻滚）
 }
 
 impl Diag {
@@ -64,6 +68,7 @@ impl Diag {
             end_vel: [0.0; 3],
             end_airspeed: 0.0,
             max_drag_a: 0.0,
+            tru: TruStats::default(),
         }
     }
 }
@@ -106,6 +111,12 @@ fn run_scenario(
             break;
         }
         d.max_tilt_deg = d.max_tilt_deg.max(tilt_deg(quat));
+        // TRU 真值归一化（NED）：h=hypot(n,e)、d=down、tilt。
+        d.tru.sample(
+            (st.pos[0].0 as f64).hypot(st.pos[1].0 as f64),
+            st.pos[2].0 as f64,
+            tilt_deg(quat),
+        );
         // 能量高度（真值，NED）：h_eq = pos_d - v_h²/(2g)；误差 = 设定能量高度 - 实际
         let vh = (st.vel[0].0 * st.vel[0].0 + st.vel[1].0 * st.vel[1].0).sqrt();
         let h_eq = st.pos[2].0 - vh * vh / (2.0 * g);
@@ -148,6 +159,8 @@ fn tecs_hover_converges_headless() {
     assert!(dy < 1.5, "TECS 悬停高度漂移过大: {:.2}m", dy);
     // 无风悬停：EKF 真空速应趋于 0
     assert!(d.end_airspeed < 0.5, "无风悬停真空速估计应≈0，得 {:.2}", d.end_airspeed);
+    // TRU 有界：全程物理真值不 NaN/高度不 runaway/不翻滚（验收判据推广）。
+    assert_tru_bounded(&d.tru, "tecs hover", -5.0, 8.0, 45.0);
 }
 
 #[test]
@@ -181,6 +194,9 @@ fn tecs_headwind_feedforward_reduces_blowback() {
         "空速拖拽前馈未减小稳态偏移: on={:.2}m vs off={:.2}m",
         on.end_pos[0], off.end_pos[0],
     );
+    // TRU 有界：逆风两分支全程物理真值均不发散（验收判据推广）。
+    assert_tru_bounded(&off.tru, "tecs headwind FF-off", -5.0, 8.0, 45.0);
+    assert_tru_bounded(&on.tru, "tecs headwind FF-on", -5.0, 8.0, 45.0);
 }
 
 #[test]
@@ -214,4 +230,7 @@ fn tecs_energy_height_tracks_better_than_pid() {
     );
     assert!(tecs.max_e_eq < 0.6, "TECS 巡航能量高度误差过大: {:.3}", tecs.max_e_eq);
     assert!((tecs.end_pos[0] - 80.0).abs() < 20.0, "TECS 未沿航线前进: pos_n={:.2}", tecs.end_pos[0]);
+    // TRU 有界：巡航全程物理真值不发散（验收判据推广）。
+    assert_tru_bounded(&tecs.tru, "tecs cruise", -5.0, 100.0, 45.0);
+    assert_tru_bounded(&pid.tru, "pid cruise", -5.0, 100.0, 45.0);
 }

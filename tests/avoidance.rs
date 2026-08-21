@@ -15,6 +15,9 @@ use fly_sim_core::physics::{DynamicObstacle, Obstacle, ToyWorld, ContactModel};
 use fly_sim_core::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig};
 use fly_simulater::airframe::load_airframe;
 
+mod common;
+use common::{assert_tru_bounded, TruStats};
+
 const DT: f64 = 0.004;
 
 /// 障碍基准中心（引擎世界系，Y-up：x=北, y=上, z=-东）。
@@ -25,10 +28,29 @@ const OBSTACLE_RADIUS: f64 = 3.0;
 /// 障碍以 2.0 m/s 沿 +x（北向）逼近机体。
 const OBSTACLE_SPEED: f64 = 2.0;
 
-/// 跑一个逼近场景，返回全程机体到障碍球面的最小净间隙（m，正=未接触）。
+/// 机体推力轴（机体 +Z）偏离世界竖直 (0,1,0) 的倾角（度），口径同 tecs/rc_modes。
+fn tilt_deg(q: [f64; 4]) -> f64 {
+    let (w, x, y, z) = (q[0], q[1], q[2], q[3]);
+    let v = [0.0f64, 0.0, 1.0];
+    let qv = [y * v[2] - z * v[1], z * v[0] - x * v[2], x * v[1] - y * v[0]];
+    let qqv = [
+        y * qv[2] - z * qv[1],
+        z * qv[0] - x * qv[2],
+        x * qv[1] - y * qv[0],
+    ];
+    let up = [
+        v[0] + 2.0 * w * qv[0] + 2.0 * qqv[0],
+        v[1] + 2.0 * w * qv[1] + 2.0 * qqv[1],
+        v[2] + 2.0 * w * qv[2] + 2.0 * qqv[2],
+    ];
+    let dot = up[1].clamp(-1.0, 1.0); // 与世界 +Y 点积
+    f64::acos(dot).to_degrees()
+}
+
+/// 跑一个逼近场景，返回 (全程机体到障碍球面的最小净间隙(m), TRU 真值有界统计)。
 ///
 /// `with_avoid`：是否装备前向测距 + 反应式避障。
-fn run_approach(with_avoid: bool, seconds: f64) -> f64 {
+fn run_approach(with_avoid: bool, seconds: f64) -> (f64, TruStats) {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
         ToyWorld::new(9.81),
@@ -61,19 +83,21 @@ fn run_approach(with_avoid: bool, seconds: f64) -> f64 {
 
     let steps = (seconds / DT) as u64;
     let mut min_clear = f64::INFINITY;
+    let mut tru = TruStats::default();
     for i in 0..steps {
         ctrl.step(&hover_sp);
+        let (pos, quat) = ctrl.debug_up();
         if with_avoid && i % 50 == 0 {
-            let (p, _) = ctrl.debug_up();
-            eprintln!("T t={:.1} pos=({:.2},{:.2},{:.2})", (i as f64)*DT, p[0], p[1], p[2]);
+            eprintln!("T t={:.1} pos=({:.2},{:.2},{:.2})", (i as f64)*DT, pos[0], pos[1], pos[2]);
         }
+        // TRU 真值归一化（引擎 Y-up → NED：h=hypot(x,z)、d=-y、tilt）。
+        tru.sample(pos[0].hypot(pos[2]), -pos[1], tilt_deg(quat));
         let t = (i as f64) * DT;
         let center = [
             OBSTACLE_BASE[0] + OBSTACLE_SPEED * t,
             OBSTACLE_BASE[1],
             OBSTACLE_BASE[2],
         ];
-        let (pos, _) = ctrl.debug_up();
         let dist = ((pos[0] - center[0]).powi(2)
             + (pos[1] - center[1]).powi(2)
             + (pos[2] - center[2]).powi(2))
@@ -83,14 +107,18 @@ fn run_approach(with_avoid: bool, seconds: f64) -> f64 {
             min_clear = clear;
         }
     }
-    min_clear
+    (min_clear, tru)
 }
 
 #[test]
 fn avoidance_keeps_greater_clearance_than_bare() {
     // 障碍从 26m 外逼近，约 13s 到达机体；留足时间让避障触发并侧移脱离。
-    let gap_bare = run_approach(false, 14.0);
-    let gap_av = run_approach(true, 14.0);
+    let (gap_bare, tru_bare) = run_approach(false, 14.0);
+    let (gap_av, tru_av) = run_approach(true, 14.0);
+
+    // TRU 有界：全程物理真值不 NaN、高度不 runaway、姿态不翻滚（验收判据推广）。
+    assert_tru_bounded(&tru_bare, "avoid bare", -5.0, 15.0, 45.0);
+    assert_tru_bounded(&tru_av, "avoid evasive", -5.0, 15.0, 45.0);
 
     // 基准：障碍抵达并侵入机体，净间隙应跌破 0（或极接近 0）。
     assert!(gap_bare < 0.5, "bare case should be contacted, gap_bare={}", gap_bare);

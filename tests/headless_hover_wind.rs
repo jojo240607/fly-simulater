@@ -19,6 +19,9 @@ use fly_simulater::airframe::load_airframe;
 use fly_sim_core::wind::{WindConfig, WindField};
 use flyctrl_core::vehicle::ActuatorCmd;
 
+mod common;
+use common::{assert_tru_bounded, TruStats};
+
 const DT: f64 = 0.004;
 const WIND_SPEED: f64 = 0.5; // 北向基础风 (m/s)
 
@@ -46,13 +49,16 @@ fn tilt_deg(q: [f64; 4]) -> f64 {
     f64::acos(dot).to_degrees()
 }
 
-fn run_pid(wind_speed: f64) -> (bool, f64, f64, f64, f64) {
+fn run_pid(wind_speed: f64) -> (bool, TruStats, f64) {
     run_pid_with_offset(wind_speed, 0.0, 0.0)
 }
 
 /// pos_offset_n / pos_offset_e：设定点相对 (0,0,-5) 的北/东偏移。
 /// 用于探测位置环控制方向（是否正反馈）。
-fn run_pid_with_offset(wind_speed: f64, off_n: f64, off_e: f64) -> (bool, f64, f64, f64, f64) {
+///
+/// 返回 `(数值是否有限, TRU 有界统计, 末态倾角°)`。TRU 判定量归一化：
+/// 水平漂移 = hypot(up.x, up.z)、NED down = -up.y、倾角 = tilt_deg(quat)。
+fn run_pid_with_offset(wind_speed: f64, off_n: f64, off_e: f64) -> (bool, TruStats, f64) {
     let cfg = load_airframe(None).expect("default airframe");
     let wind = if wind_speed > 0.0 {
         Some(WindField::new(WindConfig {
@@ -76,8 +82,7 @@ fn run_pid_with_offset(wind_speed: f64, off_n: f64, off_e: f64) -> (bool, f64, f
     let total = (10.0 / DT) as u64;
 
     let mut finite = true;
-    let mut max_tilt = 0.0f64;
-    let mut end_pos = [0.0f64; 3];
+    let mut tru = TruStats::default();
     let mut end_tilt = 0.0f64;
 
     for i in 0..total {
@@ -88,50 +93,42 @@ fn run_pid_with_offset(wind_speed: f64, off_n: f64, off_e: f64) -> (bool, f64, f
             break;
         }
         let t = tilt_deg(quat);
-        max_tilt = max_tilt.max(t);
+        // 引擎 UP 系与 NED 映射：ned_d = -up_y（见 plant::vec_ned_to_up / vec_up_to_ned）。
+        // 设定点 NED down=-5 对应引擎 up_y=+5，故高度判定量按 NED down 计算。
+        tru.sample(pos[0].hypot(pos[2]), -pos[1], t);
         if i == total - 1 {
-            end_pos = pos;
             end_tilt = t;
         }
     }
-    let horiz = end_pos[0].hypot(end_pos[2]).abs();
-    // 引擎 UP 系与 NED 映射：ned_d = -up_y（见 plant::vec_ned_to_up / vec_up_to_ned）。
-    // 设定点 NED down=-5 对应引擎 up_y=+5，故真实高度偏差按 NED down 计算。
-    let ned_d = -end_pos[1];
-    let sp_ned_d = -5.0; // 设定点 NED down=-5
-    let dy = (ned_d - sp_ned_d).abs();
-    (finite, max_tilt, horiz, dy, end_tilt)
+    (finite, tru, end_tilt)
 }
 
 #[test]
 fn pid_hover_with_0_5_wind_stable_headless() {
     // 风速扫描：定位翻滚阈值 + 确认无风高度漂移问题。
     for &ws in &[0.0_f64, 0.1, 0.2, 0.3, 0.5] {
-        let (finite, mt, h, dy, et) = run_pid(ws);
+        let (finite, tru, et) = run_pid(ws);
         println!(
-            "[PID] wind={:.2} finite={} max_tilt={:.2}° end_tilt={:.2}° horiz={:.2}m dy={:.2}m {}",
-            ws, finite, mt, et, h, dy,
-            if mt < 45.0 && finite { "OK" } else { "*** 翻滚/发散 ***" },
+            "[PID] wind={:.2} finite={} max_tilt={:.2}° end_tilt={:.2}° h_max={:.2}m d=[{:.2},{:.2}] end_d={:.2} {}",
+            ws, finite, tru.tilt_max_deg, et, tru.h_max, tru.d_min, tru.d_max, tru.end_d,
+            if finite && tru.tilt_max_deg < 45.0 { "OK" } else { "*** 翻滚/发散 ***" },
         );
     }
 
-    let (f0, mt0, h0, dy0, _et0) = run_pid(0.0);
-    let (f1, mt1, h1, dy1, _et1) = run_pid(WIND_SPEED);
+    let (f0, tru0, _et0) = run_pid(0.0);
+    let (f1, tru1, _et1) = run_pid(WIND_SPEED);
 
     assert!(f0, "无风也出现 NaN/Inf");
     assert!(f1, "0.5 m/s 风出现 NaN/Inf");
-    // 报告但不强制（先把实测事实暴露给用户）：
-    if mt0 >= 45.0 {
-        println!("[WARN] 无风 max_tilt={:.2}° 异常（应≈0）", mt0);
-    }
-    if dy0 >= 1.5 {
-        println!("[WARN] 无风高度漂移 dy={:.2}m（位置/高度环疑似未正常工作）", dy0);
-    }
-    if mt1 >= 45.0 {
-        println!("[FAIL] 0.5 m/s 风翻滚 max_tilt={:.2}°：PID 抗风能力不足", mt1);
-    }
+    // 验收判据（FIDELITY_ROADMAP）：收敛判定必须同时断言 TRU 有界——不只数值有限，
+    // 还要水平漂移 / 高度 / 姿态倾角全部受限（无风与 0.5 m/s 风悬停均应满足）。
+    assert_tru_bounded(&tru0, "no-wind hover", -5.0, 3.0, 45.0);
+    assert_tru_bounded(&tru1, "0.5 m/s wind hover", -5.0, 3.0, 45.0);
 
-    println!("[实测结论] 见上方扫描；无风高度偏差 dy={:.2}m，0.5风 max_tilt={:.2}°", dy0, mt1);
+    println!(
+        "[实测结论] 无风 h_max={:.2}m，0.5风 max_tilt={:.2}°",
+        tru0.h_max, tru1.tilt_max_deg
+    );
 }
 
 /// 带可调增益的闭环步进：off_n/off_e 为设定点相对 (0,0,-5) 的北/东偏移。
