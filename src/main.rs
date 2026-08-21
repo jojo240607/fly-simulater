@@ -404,6 +404,9 @@ fn main() {
             let world_mav = fly_sim_core::physics::PhySdkWorld::create_empty();
             #[cfg(not(feature = "phy"))]
             let world_mav = ToyWorld::new(9.81);
+            // P3-A 收尾 #2：默认启用地面接触（`Some(default())`），与主 SIL 路径/PhySdkWorld
+            // 一致，避免无地面约束时噪声发散被误判为估计器缺陷。真 HIL 接板时地面约束
+            // 由真实世界承担，此默认仅作用于 SIL。
             let mut fc = FlyController::new(
                 world_mav,
                 &cfg,
@@ -411,7 +414,7 @@ fn main() {
                 None,
                 sensor_cfg_mav,
                 cli.controller,
-                None,
+                Some(fly_sim_core::physics::ContactModel::default()),
                 Vec::new(),
             );
             fc.set_motor_eff(eff_mask);

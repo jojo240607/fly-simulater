@@ -565,7 +565,8 @@
 ### 既有项调整清单（不只"加"，还要"改"）
 
 - [ ] **验收判据**：收敛判定必须同时断言 `TRU` 有界（不只 `EST≈TRU`），推广到所有场景测试。
-- [ ] **`ToyWorld` 默认 `ContactModel`**：建议默认 `Some(default())`（与 `PhySdkWorld` 一致），避免无地面时噪声发散被误判为估计器缺陷（阶段 11 C 项落地）。
+- [x] **`ToyWorld` 默认 `ContactModel`**：建议默认 `Some(default())`（与 `PhySdkWorld` 一致），避免无地面时噪声发散被误判为估计器缺陷（阶段 11 C 项落地）。
+  - 落地（`fly-simulater` 本次提交）：MAVLink SIL 路径（`main.rs` `FlyController::new`）`contact=None` → `Some(ContactModel::default())`，与主 SIL 路径/`view.rs`/`fly-sim-server` 一致。架构上接触模型属于 `plant.rs` 而非 world（`ToyWorld`/`PhySdkWorld` 均无接触字段），故不改 world 结构体、无死代码。真空/自由落体与噪声消融诊断场景仍显式传 `None`（`run_freefall`、`zz_noise_ablation`），语义不变。
 - [ ] **控制律倾斜补偿**：`des_thrust /= cos(tilt)`——已定位的移动掉高根因，属调整既有 PID 而非新功能。
 - [ ] **大气密度随高度/温度**：`air_density` 目前固定值，高海拔/热气流场景失真（低成本调整）。
 - [ ] **传感器噪声默认值**：默认零噪声屏蔽了 EKF/控制律噪声行为，真实场景测试应默认开启 realistic 噪声。
