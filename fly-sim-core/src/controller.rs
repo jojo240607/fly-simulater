@@ -5,13 +5,15 @@
 //! 同一份 `EkfEstimator` + `PidController` + `Fdir` 算法。
 
 use flyctrl_core::config::VehicleConfig;
-use flyctrl_core::controller::{Controller, IndiController, LqrController, PidController, Setpoint, TecsController};
+use flyctrl_core::controller::{manual, Controller, IndiController, LqrController, ManualParams, PidController, Setpoint, TecsController};
 use flyctrl_core::estimator::EkfEstimator;
+use flyctrl_core::fdir::Health;
+use flyctrl_core::flightmode::{FlightMode, ModeContext, ModeGovernor};
 use flyctrl_core::hal::actuator::{MotorActuator, OutputProtocol};
 use flyctrl_core::hal::sensor::{AirspeedSensor, GpsSensor, ImuSensor, MagSensor};
 use flyctrl_core::hil::HilContext;
-use flyctrl_core::units::{Meter, MeterPerSecondSquared, Radian, RadianPerSecond, Second};
-use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, VehicleState};
+use flyctrl_core::units::{Airspeed, Meter, MeterPerSecondSquared, Radian, RadianPerSecond, Second};
+use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, RcInput, VehicleState};
 
 use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
@@ -132,6 +134,16 @@ pub struct FlyController<W> {
     mode: u8,
     /// 最近一次 MAVLink 起飞指令请求的高度（m，绝对），0 表示无。
     takeoff_alt: f32,
+    /// P3-D1：飞行模式治理器（RC 模式开关 → 经合法性校验生效），与 `mode` 字段保持同步。
+    mode_gov: ModeGovernor,
+    /// P3-D1：手动/增稳控制参数（从机型配置提取，供 RC 直通档使用）。
+    manual: ManualParams,
+    /// P3-D1：返航基准点（起飞点，NED m）；初始即原点 (0,0,-5)。
+    home: [f32; 3],
+    /// P3-D1：进入自主保持模式时锚定的保持点（NED m），供 Position/Altitude/Mission 使用。
+    hold_pos: [f32; 3],
+    /// 最近一次传感器采样周期的气压计高度（m，向上为正），`finalize` 用它做 EKF 高度融合。
+    baro_alt: f32,
     /// 阶段 5：故障注入——每路电机推进效率系数（1.0=正常，0.0=完全停转，
     /// 中间值=部分效率退化）。实测：四旋翼在当前无重构控制律下，单电机推力
     /// 损失（无论完全还是部分）均致姿控发散、不可恢复（见 sim.rs run_hover_degraded）。
@@ -227,6 +239,11 @@ where
             armed: true,
             mode: 0,
             takeoff_alt: 0.0,
+            mode_gov: ModeGovernor::new(FlightMode::Manual),
+            manual: ManualParams::from_ctrl(&cfg.ctrl_params()),
+            home: [0.0, 0.0, -5.0],
+            hold_pos: [0.0, 0.0, -5.0],
+            baro_alt: 5.0,
             fail_mask: [1.0; 4],
             avoidance: None,
             dt,
@@ -275,39 +292,30 @@ where
     }
 
     /// 推模式：先让 plant 产出当帧样本，存入传感器 trait，再跑控制律，最后 step 世界。
+    ///
+    /// P3-D1：与 [`FlyController::step_rc`]（RC 直通）共用 `sample_sensors` /
+    /// `finalize`，仅"控制指令来源"不同：这里消费外部给定设定点（自主轨迹），
+    /// `step_rc` 消费遥控摇杆（手动/增稳）或由模式生成的保持设定点。
     pub fn step(&mut self, setpoint: &Setpoint) -> VehicleState {
-        // 1) 取世界真值（NED 语义）。
-        let (imu_sample, pos_sample) = self.plant.read_sensors();
-        self.imu.last = imu_sample;
-        self.gps.last = pos_sample;
-        // P3-A3：空速计观测用**地速幅值** |v_ground|——EKF 空速模型 `h(x)=|v_ground|`，
-        // 喂地速才一致，避免逆风下风相对空速（<地速）把水平速度估计拉偏（曾致逆风
-        // 被吹回 + 拖拽前馈用错方向）。真实相对空速矢量经 set_measured_airspeed_vec
-        // 单独注入 TECS 做拖拽前馈（见下），两者互不干扰。
-        let vg = self.plant.ground_airspeed_ned();
-        let vh = (vg[0] * vg[0] + vg[1] * vg[1]).sqrt();
-        self.air.last = Some(AirspeedSample {
-            speed: flyctrl_core::units::Airspeed(vh as f32),
-            timestamp_s: 0.0,
-        });
-        // 相对空速矢量（NED 水平）= v_ground - wind：每周期注入控制器，供 TECS
-        // 空速拖拽前馈定向（其它控制器默认忽略）。
-        let v_rel = self.plant.relative_airspeed_ned();
-        match &mut self.hil {
-            CtrlVariant::Tecs(h) => h.ctrl.set_measured_airspeed_vec(v_rel),
-            _ => {}
-        }
-        // 磁力计：取机体磁场（含硬铁/软铁/噪声），喂给 EKF yaw 约束。
-        let (mag_sample, baro) = self.plant.read_sensors_attitude();
-        self.mag.last = [
-            mag_sample.field[0] as f32,
-            mag_sample.field[1] as f32,
-            mag_sample.field[2] as f32,
-        ];
+        // 1) 采集当帧传感器样本（imu/gps/空速/磁力计/气压），与 step_rc 共用。
+        self.sample_sensors();
 
-        // 2) 跑控制律（SIL/HIL 共享闭环）。motors.apply 只记录指令。
-        // 2.0) P1-2 闭环联动：装备避障时，先读前向测距并把避障速度并入设定点。
-        //      setpoint 是 immutable 引用，这里构造一个叠加过避障的本地副本。
+        // 2) 按设定点闭环（含避障叠加 + 推进时钟），与 step_rc 共用。
+        let state = self.run_setpoint(setpoint);
+
+        // 3) 收尾：气压融合 / 故障处理 / 解锁门控 / 推进物理世界（与 step_rc 共用）。
+        self.finalize();
+
+        state
+    }
+
+    /// 设定点闭环骨架：避障叠加 → 推进仿真时钟 → HIL 单步。
+    ///
+    /// `step` / `step_rc` 共用，保证两条路径（自主设定点 / RC 直通）的
+    /// 设定点型控制律（Position/Mission/Rtl/Land 等）行为一致。
+    fn run_setpoint(&mut self, setpoint: &Setpoint) -> VehicleState {
+        // P1-2 闭环联动：装备避障时，先读前向测距并把避障速度并入设定点。
+        // setpoint 是 immutable 引用，这里构造一个叠加过避障的本地副本。
         let mut sp = setpoint.clone();
         if let Some(av_cfg) = &self.avoidance {
             if let Some(sample) = self.plant.read_ranger() {
@@ -345,19 +353,184 @@ where
         // 推进仿真时钟（避障保持窗口的计时基准）。
         self.time += self.dt;
         let setpoint_ref = &sp;
-        let state = match &mut self.hil {
+        match &mut self.hil {
             CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
             CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
             CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
             CtrlVariant::Tecs(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
+        }
+    }
+
+    /// RC 直通闭环骨架：推进仿真时钟 → 按调用方给出的即时指令 HIL 单步。
+    ///
+    /// 供手动（角速率）/ 增稳（姿态保持）等**非设定点型**控制律使用，
+    /// 与 `run_setpoint` 共用采集/估计/FDIR 骨架（见 [`HilContext::step_with_cmd`]）。
+    fn run_cmd(&mut self, cmd_fn: impl FnOnce(&VehicleState) -> ActuatorCmd) -> VehicleState {
+        self.time += self.dt;
+        match &mut self.hil {
+            CtrlVariant::Pid(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, cmd_fn, &mut self.motors, &self.cfg),
+            CtrlVariant::Indi(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, cmd_fn, &mut self.motors, &self.cfg),
+            CtrlVariant::Lqr(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, cmd_fn, &mut self.motors, &self.cfg),
+            CtrlVariant::Tecs(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, cmd_fn, &mut self.motors, &self.cfg),
+        }
+    }
+
+    /// P3-D1：RC 直通步进——遥控输入驱动解锁、模式切换与手动/增稳控制。
+    ///
+    /// 完整流程："解锁 → 手动（角速率直通）→ 增稳（姿态保持）→ 定点/返航/降落"。
+    /// - 解锁门控：`rc.armed` 直接决定 `armed`（链路过时 `rc.fresh=false` 时保持现状，
+    ///   安全裁决仍由 FDIR 兜底）。
+    /// - 模式治理：`rc.mode` 槽位 → 目标模式，经 [`ModeGovernor`] 合法性校验后生效，
+    ///   健康恶化时自动降级（Critical→Land、Mission→Rtl），`self.mode` 与治理器同步。
+    /// - 手动/增稳：直接映射摇杆（消费 [`HilContext::step_with_cmd`]，不跟踪位置设定点）。
+    /// - 定点/返航/降落：沿用设定点闭环，锚定 `hold_pos` / `home`。
+    pub fn step_rc(&mut self, rc: &RcInput) -> VehicleState {
+        // 1) 解锁门控同步：遥控解锁开关（链路过时保持当前，交给 FDIR 裁决）。
+        if rc.fresh {
+            self.armed = rc.armed;
+        }
+
+        // 2) 模式治理：RC 模式开关槽位 → 目标模式（0/1/2/3/4/5 = 手动/增稳/
+        //    定高/定点/返航/降落；6 位档位开关）。
+        //    经合法性校验后生效；健康恶化主动降级；`self.mode` 与治理器保持同步。
+        let slots: [FlightMode; 6] = [
+            FlightMode::Manual,
+            FlightMode::Stabilize,
+            FlightMode::Altitude,
+            FlightMode::Position,
+            FlightMode::Rtl,
+            FlightMode::Land,
+        ];
+        let target = slots[(rc.mode as usize).min(slots.len() - 1)];
+        let ctx = ModeContext::new(self.armed, self.health(), self.gps.healthy());
+        self.mode_gov.request(target, &ctx);
+        self.mode_gov.degrade_on_health(&ctx);
+        self.sync_mode();
+
+        // 3) 采集当帧传感器样本（与 step 共用）。
+        self.sample_sensors();
+
+        // 4) 按当前模式分派控制：手动/增稳直通摇杆，其余锚定保持点。
+        let state = match self.mode_gov.mode() {
+            FlightMode::Manual => {
+                let p = self.manual;
+                self.run_cmd(|est| manual::manual_rates(rc, est, &p))
+            }
+            FlightMode::Stabilize => {
+                let p = self.manual;
+                self.run_cmd(|est| manual::stabilize(rc, est, &p))
+            }
+            FlightMode::Altitude | FlightMode::Position | FlightMode::Mission => {
+                let sp = hover_setpoint(self.hold_pos[0], self.hold_pos[1], self.hold_pos[2]);
+                self.run_setpoint(&sp)
+            }
+            FlightMode::Rtl => {
+                let sp = hover_setpoint(self.home[0], self.home[1], self.home[2]);
+                self.run_setpoint(&sp)
+            }
+            FlightMode::Land => {
+                // 降落：锚定保持点水平位置，目标高度降至地面（NED d=0）。
+                let sp = hover_setpoint(self.hold_pos[0], self.hold_pos[1], 0.0);
+                self.run_setpoint(&sp)
+            }
         };
 
-        // 2.4) 气压计高度融合：锚定 EKF 垂直通道，抑制开环加计积分导致的高度漂移
-        // （真实掉高/控制抖动的根因之一）。baro.altitude 为向上高度（m），EKF 用向下为负 D，
-        // 通过 update_alt 把气压测高作为 D 位置观测（见 ekf::update_alt：y = -alt - x[2]）。
-        // baro 含噪声/漂移（见 SensorModel::process_baro），经独立 r_alt 观测约束 D 位置。
-        // 三种控制律底层都是 EkfEstimator，逐一调用。
-        let baro_alt = baro.altitude as f32;
+        // 5) 收尾：气压融合 / 故障处理 / 解锁门控 / 推进物理世界（与 step 共用）。
+        self.finalize();
+
+        state
+    }
+
+    /// P3-D1：请求切换飞行模式（经模式治理器校验，非法请求保持当前模式不变）。
+    pub fn request_mode(&mut self, target: FlightMode) -> bool {
+        let ctx = ModeContext::new(self.armed, self.health(), self.gps.healthy());
+        let ok = self.mode_gov.request(target, &ctx);
+        self.sync_mode();
+        ok
+    }
+
+    /// 当前生效的飞行模式（与 `mode` 字段同源）。
+    pub fn flight_mode(&self) -> FlightMode {
+        self.mode_gov.mode()
+    }
+
+    /// P3-D1：设置定点/定高/降落模式的锚定保持点（NED，m）。供地面站任务或测试平移。
+    pub fn set_hold_pos(&mut self, n: f32, e: f32, d: f32) {
+        self.hold_pos = [n, e, d];
+    }
+
+    /// 当前 FDIR 健康状态。
+    pub fn health(&self) -> Health {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.fdir.health(),
+            CtrlVariant::Indi(h) => h.fdir.health(),
+            CtrlVariant::Lqr(h) => h.fdir.health(),
+            CtrlVariant::Tecs(h) => h.fdir.health(),
+        }
+    }
+
+    /// 把治理器当前模式同步到 MAV custom mode 低字节（`self.mode`）。
+    fn sync_mode(&mut self) {
+        self.mode = match self.mode_gov.mode() {
+            FlightMode::Manual => 0,
+            FlightMode::Stabilize => 1,
+            FlightMode::Altitude => 2,
+            FlightMode::Position => 3,
+            FlightMode::Rtl => 4,
+            FlightMode::Land => 5,
+            FlightMode::Mission => 6,
+        };
+    }
+
+    /// 推模式第一步：采集当帧传感器样本并写入传感器 trait。
+    ///
+    /// `step` / `step_rc` 共用，保证两条路径（自主设定点 / RC 直通）的测量通道一致：
+    /// - IMU/GPS：物理真值经噪声模型；
+    /// - 空速计：观测用**地速幅值** |v_ground|——EKF 空速模型 `h(x)=|v_ground|`，
+    ///   喂地速才一致，避免逆风下风相对空速（<地速）把水平速度估计拉偏（曾致逆风
+    ///   被吹回 + 拖拽前馈用错方向）。真实相对空速矢量经 set_measured_airspeed_vec
+    ///   单独注入 TECS 做拖拽前馈（见下），两者互不干扰；
+    /// - 磁力计：机体磁场（含硬铁/软铁/噪声），喂给 EKF yaw 约束；
+    /// - 气压计：向上高度（m），存 `baro_alt` 供收尾做 EKF 高度观测。
+    fn sample_sensors(&mut self) {
+        let (imu_sample, pos_sample) = self.plant.read_sensors();
+        self.imu.last = imu_sample;
+        self.gps.last = pos_sample;
+        let vg = self.plant.ground_airspeed_ned();
+        let vh = (vg[0] * vg[0] + vg[1] * vg[1]).sqrt();
+        self.air.last = Some(AirspeedSample {
+            speed: Airspeed(vh as f32),
+            timestamp_s: 0.0,
+        });
+        // 相对空速矢量（NED 水平）= v_ground - wind：每周期注入控制器，供 TECS
+        // 空速拖拽前馈定向（其它控制器默认忽略）。
+        let v_rel = self.plant.relative_airspeed_ned();
+        match &mut self.hil {
+            CtrlVariant::Tecs(h) => h.ctrl.set_measured_airspeed_vec(v_rel),
+            _ => {}
+        }
+        let (mag_sample, baro) = self.plant.read_sensors_attitude();
+        self.mag.last = [
+            mag_sample.field[0] as f32,
+            mag_sample.field[1] as f32,
+            mag_sample.field[2] as f32,
+        ];
+        self.baro_alt = baro.altitude as f32;
+    }
+
+    /// 推模式收尾：气压计融合 → 故障处理 → 解锁门控 → 注入执行器 → 推进物理世界。
+    ///
+    /// `step` / `step_rc` 共用。控制指令已在 hil 步内经 `motors.apply` 记录于
+    /// `self.motors.last`，这里做显式回写与安全门控：
+    /// - 气压计高度融合：锚定 EKF 垂直通道，抑制开环加计积分导致的高度漂移
+    ///   （真实掉高/控制抖动的根因之一）。baro.altitude 为向上高度（m），EKF 用
+    ///   向下为负 D，通过 update_alt 把气压测高作为 D 位置观测（y = -alt - x[2]）。
+    ///   baro 含噪声/漂移，经独立 r_alt 观测约束 D 位置。三种控制律底层都是 EkfEstimator。
+    /// - 故障处理：全有效 → 按效率系数缩放每路指令；存在退化/失效电机 → 用控制
+    ///   分配器(P1-1)最小二乘重分配到剩余有效电机（容错，牺牲偏航等最弱轴）。
+    /// - 解锁门控：未解锁（DISARM）时强制零推力，模拟电机停转/安全上锁。
+    fn finalize(&mut self) {
+        let baro_alt = self.baro_alt;
         match &mut self.hil {
             CtrlVariant::Pid(h) => h.est.update_alt(baro_alt),
             CtrlVariant::Indi(h) => h.est.update_alt(baro_alt),
@@ -365,10 +538,6 @@ where
             CtrlVariant::Tecs(h) => h.est.update_alt(baro_alt),
         }
 
-        // 2.5) 阶段 5/8：故障处理。
-        // - 全有效：按效率系数缩放每路指令（原行为，不变）。
-        // - 存在退化/失效电机：用控制分配器(P1-1)把期望动作(推力/滚转/俯仰/偏航)
-        //   最小二乘重分配到剩余有效电机，实现容错（牺牲偏航等最弱轴）。
         let has_degraded = self.fail_mask.iter().any(|&e| e < 1.0);
         let mut cmd = self.motors.last;
         if has_degraded {
@@ -395,7 +564,7 @@ where
             }
         }
 
-        // 2.6) 把控制指令显式回写被控对象（注入推力/力矩）。
+        // 把控制指令显式回写被控对象（注入推力/力矩）。
         // 解锁门控：未解锁（MAVLink DISARM）时强制零推力，模拟电机停转/安全上锁。
         if self.armed {
             self.plant.apply_actuators(&cmd);
@@ -403,10 +572,8 @@ where
             self.plant.apply_actuators(&ActuatorCmd::zero());
         }
 
-        // 3) 推进物理世界（已注入本拍推力）。
+        // 推进物理世界（已注入本拍推力）。
         self.plant.step();
-
-        state
     }
 
     /// 解锁（MAVLink ARM）。电机恢复可转。
@@ -414,7 +581,20 @@ where
     /// 上锁（MAVLink DISARM）。本拍起电机停转（零推力）。
     pub fn disarm(&mut self) { self.armed = false; }
     /// 设置飞行模式（MAV custom mode 低字节），由 MAVLink DO_SET_MODE / 内部状态机写入。
-    pub fn set_mode(&mut self, mode: u8) { self.mode = mode; }
+    /// 经模式治理器校验后生效（未解锁/无位置/健康不足时拒绝，保持当前模式）。
+    pub fn set_mode(&mut self, mode: u8) {
+        let target = match mode {
+            0 => FlightMode::Manual,
+            1 => FlightMode::Stabilize,
+            2 => FlightMode::Altitude,
+            3 => FlightMode::Position,
+            4 => FlightMode::Rtl,
+            5 => FlightMode::Land,
+            6 => FlightMode::Mission,
+            _ => return, // 未知模式码：忽略，保持当前。
+        };
+        let _ = self.request_mode(target);
+    }
     /// 请求起飞到指定绝对高度（m）。仅记录意图，实际目标由上层任务逻辑消费。
     pub fn request_takeoff(&mut self, alt_m: f32) { self.takeoff_alt = alt_m; }
     /// 当前是否解锁。
