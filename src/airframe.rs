@@ -41,6 +41,40 @@ pub struct AirframeToml {
     pub rotor_inertia: f32,
     #[serde(default = "default_slipstream_drag")]
     pub slipstream_drag_coeff: f32,
+    // ---- P3-C1 叶素理论参数（可选，缺省用默认值）----
+    #[serde(default = "default_rotor_blades")]
+    pub rotor_blades: f32,
+    #[serde(default = "default_rotor_solidity")]
+    pub rotor_solidity: f32,
+    #[serde(default = "default_rotor_cl_alpha")]
+    pub rotor_cl_alpha: f32,
+    #[serde(default = "default_rotor_cd0")]
+    pub rotor_cd0: f32,
+    #[serde(default = "default_rotor_stall_alpha")]
+    pub rotor_stall_alpha: f32,
+    // ---- P3-C2 桨盘干扰（可选，缺省用默认值）----
+    #[serde(default = "default_rotor_downwash_coupling")]
+    pub rotor_downwash_coupling: f32,
+}
+
+fn default_rotor_downwash_coupling() -> f32 {
+    0.25
+}
+
+fn default_rotor_blades() -> f32 {
+    2.0
+}
+fn default_rotor_solidity() -> f32 {
+    0.08
+}
+fn default_rotor_cl_alpha() -> f32 {
+    6.2832
+}
+fn default_rotor_cd0() -> f32 {
+    0.012
+}
+fn default_rotor_stall_alpha() -> f32 {
+    0.24
 }
 
 fn default_rotor_inertia() -> f32 {
@@ -113,12 +147,18 @@ impl AirframeToml {
             kp_xy: 0.5,
             kv_xy: 0.8,
             vel_lpf_tau: 0.15,
-            drag_fwd: 0.09, // P3-A3：空速拖拽前馈系数（同 default_quad 量级）
+            drag_fwd: 0.14, // P3-A3/C1/C2：空速拖拽前馈（对齐 default_quad 的 0.14，含 BET 桨盘阻力 + P3-C2 下洗耦合）
             battery_v_nom: self.battery_v_nom,
             battery_r: self.battery_r,
             motor_kv: self.motor_kv,
             motor_r: self.motor_r,
             rotor_inertia: self.rotor_inertia,
+            rotor_blades: self.rotor_blades,
+            rotor_solidity: self.rotor_solidity,
+            rotor_cl_alpha: self.rotor_cl_alpha,
+            rotor_cd0: self.rotor_cd0,
+            rotor_stall_alpha: self.rotor_stall_alpha,
+            rotor_downwash_coupling: self.rotor_downwash_coupling,
         }
     }
 }

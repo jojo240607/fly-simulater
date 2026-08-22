@@ -589,6 +589,149 @@ pub fn resolve_obstacle_contact<W: RigidBodyWorld>(
     }
 }
 
+// ============================================================ 机体-机体碰撞（P3-C3）
+
+/// 参与机体-机体碰撞的动态刚体碰撞体描述。
+///
+/// 每个碰撞体 = 一个**动态刚体**（有自己的质量/速度/位置，受碰撞冲量作用），
+/// 用**球**近似其碰撞体积（四旋翼取螺旋桨外周包络，见 plant 的 `1.2×臂长`）。
+/// 与静态 `Obstacle` 的惩罚模型互补：机体-机体是**两个动态刚体**之间的碰撞，
+/// 冲量必须等大反向施加（牛顿第三定律），保证**动量守恒**——这是 P3-C3 与
+/// "只推单体"的静态障碍/地面接触的本质区别。
+#[derive(Clone, Copy, Debug)]
+pub struct BodyCollider {
+    /// 刚体 id（`RigidBodyWorld::add_body` 返回值）。
+    pub id: i64,
+    /// 刚体质量（kg）。`0` 表示静态刚体（无限质量，只被撞、不回动）。
+    pub mass: f64,
+    /// 碰撞球半径（m）。表面-表面间隙 = 中心距 - (r_self + r_peer)。
+    pub radius: f64,
+}
+
+/// 解算一个动态刚体 `self_` 与一组**其他动态刚体** `peers` 的碰撞。
+///
+/// 对每个穿透的 peer 计算"弹簧-阻尼法向冲量 + 库仑摩擦冲量"，并**等大反向**
+/// 施加到 `self_` 与 peer（牛顿第三定律）——与静态障碍/地面"只推单体"不同，
+/// 这是**双刚体动量守恒**的碰撞。几何：球-球，间隙 = 中心距 - (r_self+r_peer)。
+///
+/// 复用 `ContactModel` 参数（`penalty_k` / `restitution` / `friction`），但临界阻尼用
+/// **折合质量** `m_eff = m_self·m_peer/(m_self+m_peer)`（双质量弹簧-阻尼的标准量，
+/// 与静态障碍用 `m_self` 的区别：peer 也是动态刚体，惯性须计耦合）；
+/// 法向冲量 `jn = (k·pen + c_n·max(-vn,0))·dt`（阻尼只在接近时吸能、不泵能量），
+/// 施加 `-jn·n` 于 self、`+jn·n` 于 peer（`n` = self→peer，两体沿 -n/+n **互相分离**、
+/// 等大反向动量守恒）。切向库仑摩擦同样用折合质量 + **相对切向
+/// 速度**：`jt = min(μ·jn, m_eff·|v_t_rel|)` 沿相对滑移反方向等大反向施加（预算内
+/// 完全抑制相对滑移、超出按库仑封顶），动量依然守恒。
+///
+/// 返回每个发生接触的 peer 的 `ContactInfo`（`normal` 指向 peer、`impulse` 为本体
+/// 受到的冲量）；无接触返回空 `Vec`。多 peer 同时穿透时各接触独立叠加（对本体的
+/// 多个冲量求和注入，各 peer 也各自收到反冲）。
+///
+/// `peer.mass == 0`（静态刚体）：仅本体受冲量、peer 不回动（`m_eff` 退化为本体质量，
+/// 与静态障碍模型一致）。
+pub fn resolve_body_peer_collisions<W: RigidBodyWorld>(
+    world: &mut W,
+    self_: BodyCollider,
+    peers: &[BodyCollider],
+    cm: &ContactModel,
+    dt: f64,
+) -> Vec<ContactInfo> {
+    let mut out = Vec::new();
+
+    let mut tf_self = [0.0f64; 7];
+    world.get_body_transform(self_.id, &mut tf_self);
+    let p_self = [tf_self[0], tf_self[1], tf_self[2]];
+    let v_self = world.get_velocity(self_.id);
+
+    // 阻尼比由恢复系数推导（与地面/障碍同源）：ζ = -ln(e)/(2π)，clamp [0,1]。
+    let zeta = if cm.restitution >= 1.0 {
+        0.0
+    } else {
+        (-cm.restitution.ln()) / (2.0 * std::f64::consts::PI)
+    }
+    .clamp(0.0, 1.0);
+
+    for peer in peers {
+        if peer.id == self_.id {
+            continue;
+        }
+        let mut tf_peer = [0.0f64; 7];
+        world.get_body_transform(peer.id, &mut tf_peer);
+        let p_peer = [tf_peer[0], tf_peer[1], tf_peer[2]];
+        let v_peer = world.get_velocity(peer.id);
+
+        // 球-球间隙：中心距 - (r_self + r_peer)；<0 即穿透。
+        let d = [p_peer[0] - p_self[0], p_peer[1] - p_self[1], p_peer[2] - p_self[2]];
+        let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let gap = dist - (self_.radius + peer.radius);
+        if gap >= 0.0 || dist < 1e-9 {
+            continue;
+        }
+        let penetration = -gap;
+        // 法向：self -> peer（单位）。
+        let n = [d[0] / dist, d[1] / dist, d[2] / dist];
+
+        // 折合质量；静态 peer（无限质量）退化为本体质量。
+        let m_eff = if peer.mass <= 0.0 {
+            self_.mass
+        } else {
+            self_.mass * peer.mass / (self_.mass + peer.mass)
+        };
+        // 相对速度（peer 相对 self），法向分量 vn>0 = 分离。
+        let v_rel = [v_peer[0] - v_self[0], v_peer[1] - v_self[1], v_peer[2] - v_self[2]];
+        let vn = v_rel[0] * n[0] + v_rel[1] * n[1] + v_rel[2] * n[2];
+
+        let c_crit = 2.0 * (cm.penalty_k * m_eff).sqrt();
+        let c_n = zeta * c_crit;
+
+        // 法向冲量（弹簧 + 阻尼，只在接近时吸能），只推不拉。
+        let f_spring = cm.penalty_k * penetration;
+        let f_damp = -c_n * vn.min(0.0);
+        let jn = ((f_spring + f_damp) * dt).max(0.0);
+
+        // 等大反向法向冲量（n = self→peer）：self 沿 **-n** 推离 peer、peer 沿 **+n** 推离 self，
+        // 两体互相分离（与地面模型"沿接触法向推离"同源），且等大反向 → 动量守恒。
+        let mut imp_self = [-n[0] * jn, -n[1] * jn, -n[2] * jn];
+        let mut imp_peer = [n[0] * jn, n[1] * jn, n[2] * jn];
+
+        // 切向库仑摩擦（折合质量 + 相对切向速度）：抑制相对滑移，预算 = μ·jn。
+        let vt_rel = [v_rel[0] - n[0] * vn, v_rel[1] - n[1] * vn, v_rel[2] - n[2] * vn];
+        let vt_mag = (vt_rel[0] * vt_rel[0] + vt_rel[1] * vt_rel[1] + vt_rel[2] * vt_rel[2]).sqrt();
+        let mut friction_impulse = 0.0;
+        if vt_mag > 1e-9 && jn > 0.0 {
+            let budget = cm.friction * jn;
+            let jt = budget.min(m_eff * vt_mag);
+            // dir = -v_t_hat：self 沿反滑移方向受力、peer 等大反向。
+            let dir = [-vt_rel[0] / vt_mag, -vt_rel[1] / vt_mag, -vt_rel[2] / vt_mag];
+            for k in 0..3 {
+                imp_self[k] += jt * dir[k];
+                imp_peer[k] -= jt * dir[k];
+            }
+            friction_impulse = jt;
+        }
+
+        world.apply_impulse(self_.id, &imp_self, 0);
+        if peer.mass > 0.0 {
+            world.apply_impulse(peer.id, &imp_peer, 0);
+        }
+
+        out.push(ContactInfo {
+            touching: true,
+            penetration,
+            normal_force: f_spring + f_damp,
+            friction_impulse,
+            normal: n,
+            point: [
+                0.5 * (p_self[0] + p_peer[0]),
+                0.5 * (p_self[1] + p_peer[1]),
+                0.5 * (p_self[2] + p_peer[2]),
+            ],
+            impulse: imp_self,
+        });
+    }
+    out
+}
+
 /// 解算刚体 `id` 与（可能带地形的）地面的接触，并把冲量经 `world.apply_impulse` 注入。
 ///
 /// 返回接触信息。引擎系 Y-up；接触判定面 `contact_y = terrain_surface_y(m, x, z)`。

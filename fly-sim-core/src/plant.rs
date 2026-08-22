@@ -15,15 +15,17 @@
 
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::vehicle::{
-    rotate_vec_by_quat_inverse, ActuatorCmd, ImuSample, PosSample, Quaternion, VehicleState,
+    rotate_vec_by_quat_inverse, ActuatorCmd, ImuSample, PosSample, Quaternion, RtkSample,
+    VehicleState, VioSample,
 };
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 
 use crate::physics::{
-    ray_obstacle_distance, ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld,
+    ray_obstacle_distance, BodyCollider, ContactInfo, ContactModel, DynamicObstacle, Obstacle,
+    RigidBodyWorld,
 };
 use crate::wind::{WindField, WindVec};
-use crate::sensor::{RangeFinderModel, RangeFinderSample, SensorConfig, SensorModel};
+use crate::sensor::{RangeFinderFrame, RangeFinderModel, SensorConfig, SensorFault, SensorModel};
 
 // ============================================================ 坐标桥接
 //
@@ -139,7 +141,166 @@ fn air_density_at(rho0: f64, alt_m: f64) -> f64 {
     }
 }
 
+// ============================================================ P3-C1 叶素理论（BET）内核
+
+/// P3-C1：叶素理论（BET）单桨解析内核返回。
+///
+/// 以均匀入流 + 线性扭桨（θ(r) = θ0·r）的解析解（BEMT，参考 Leishman
+/// *Principles of Helicopter Aerodynamics*）替代纯动量理论点推力：
+/// - 推力随总入流 λ 增大而减小（爬升/前飞推力损失）；
+/// - 桨盘平面水平力 C_H（诱导 + 剖面阻力，悬停为 0，前飞随 μ 增长）；
+/// - 纵向挥舞角 a1（前飞低头），使推力矢量相对机体倾斜；
+/// - 桨尖失速：后行侧叶尖叶素攻角随 μ→1 趋于无穷，平滑触发失速
+///   （推力塌陷 / 反扭矩剧增 / 水平力增大）。
+#[derive(Debug, Clone, Copy)]
+pub struct BetResult {
+    /// 桨盘法向推力（N，沿桨盘轴向上）。
+    pub thrust: f64,
+    /// 反扭矩失速因子（悬停/常规 = 1，深失速 > 1，乘到 ∝ω² 反扭矩上）。
+    pub torque_factor: f64,
+    /// 桨盘平面内水平力（N，沿来流反方向；悬停 = 0）。
+    pub h_force: f64,
+    /// 纵向挥舞角（rad，负=桨盘相对机体后倾（前飞 flap-back），
+            /// 使推力矢量产生后向阻力分量；悬停/无前飞 = 0）。
+            pub a1: f64,
+    /// 横向挥舞角（rad，本模型对称简化 = 0）。
+    pub b1: f64,
+}
+
+/// P3-C1：叶素理论单桨内核（纯函数，便于内核级高 μ / 失速边界单测）。
+///
+/// 输入：
+/// - `rho` 空气密度；`omega` 转速；`r_rotor` 桨半径；`a_rotor` 单桨盘面积。
+/// - `vz` 沿桨盘轴来流（机体 Z，上正 = 向下穿盘为正，与动量理论 vi 同号）。
+///   注：plant 侧爬升/下降耦合由 `vi`（完整动量理论诱导速度，已含 vz）携带，
+///   此处 vz 传 0，避免与动量理论 vi 的 vz 项双重计入导致灵敏度过强。
+/// - `vxy` 桨盘平面来流速度（前飞速度）。
+/// - `vi` 动量理论诱导速度（含垂直气流耦合）。
+/// - `theta0` 悬停标定反解的有效桨距（rad，见 [`QuadrotorPlant::new`]）。
+pub fn bet_rotor(
+    rho: f64,
+    omega: f64,
+    r_rotor: f64,
+    a_rotor: f64,
+    vz: f64,
+    vxy: f64,
+    vi: f64,
+    theta0: f64,
+    sigma: f64,
+    cl_alpha: f64,
+    cd0: f64,
+    _stall_alpha: f64,
+) -> BetResult {
+    // 停桨 / 低转速（omega·R 很小）时 μ=vxy/vt 与 λ=vz/vt 会发散（vt→0），
+    // 线性 BEMT 在"桨叶停转 + 横流/垂直流"下无意义（升力机制失效）。对前进比
+    // 与入流比做物理饱和：正常飞行 μ≲1、λ≲1 不受影响；停桨时推力趋 0、
+    // 挥舞/H 力保持有界，避免 Σt·a1 爆炸破坏数值稳定。
+    const MU_MAX: f64 = 1.5;
+    const LAM_MAX: f64 = 3.0;
+    let vt = (omega * r_rotor).max(1e-3); // 叶尖速度（下限防 μ/λ 发散）
+    let mu = (vxy / vt).min(MU_MAX); // 前进比（桨盘平面）
+    let lam_i = (vi / vt).clamp(-LAM_MAX, LAM_MAX); // 诱导入流
+    let lam_c = (vz / vt).clamp(-LAM_MAX, LAM_MAX); // 垂直来流入流（vz 上正 = 向下穿盘为正）
+    let lam = lam_i + lam_c; // 总入流
+    let sa = sigma * cl_alpha;
+
+    // 线性扭桨均匀入流解析（BEMT）：
+    //   C_T = (σa/4)·(θ0/3 − λ/2)
+    //   C_H = (σa/4)·μ·(θ0/2 − λ/2) + (σ·Cd0/4)·μ
+    //   a1  = −μ·(4·θ0/3 + λ)          （前飞低头，负）
+    let ct = (sa / 4.0) * (theta0 / 3.0 - 0.5 * lam);
+    let ch = (sa / 4.0) * mu * (0.5 * theta0 - 0.5 * lam) + (sigma * cd0 / 4.0) * mu;
+    let a1 = -mu * (4.0 * theta0 / 3.0 + lam);
+
+    // 桨尖失速：后行侧叶尖叶素相对速度 v_rel = vt·(1−μ)，μ→1 时趋于 0，
+    // 该侧叶尖进入反向气流/深失速（retreating-blade stall）：推力塌陷、
+    // 反扭矩剧增（torque_factor>1）、水平力增大。失速深度 s 随前进比 μ
+    // 单调加深（μ≤μ_stall 无失速，μ_stall≈0.6 起进入，μ→1 深失速）。
+    let mu_stall = 0.60;
+    let s = if mu <= mu_stall {
+        0.0
+    } else {
+        (0.5 * (1.0 + ((mu - mu_stall) / 0.10).tanh())).clamp(0.0, 1.0) // 失速深度 [0,1]
+    };
+
+    let ct_eff = (ct * (1.0 - 0.5 * s)).max(0.0);
+    let ch_eff = ch * (1.0 + s);
+    let a1_eff = a1 * (1.0 + 0.5 * s);
+    let torque_factor = 1.0 + 2.0 * s;
+
+    let thrust = ct_eff * rho * a_rotor * vt * vt;
+    let h_force = ch_eff * rho * a_rotor * vt * vt;
+    BetResult {
+        thrust: thrust.max(0.0),
+        torque_factor,
+        h_force,
+        a1: a1_eff,
+        b1: 0.0,
+    }
+}
+
 // ============================================================ 被控对象
+
+/// P3-C2：相邻桨下洗耦合修正项（纯函数）。
+///
+/// 前飞时，上游桨的滑流（下洗 `vi`）被自由流吹向后，部分射入下游桨盘 → 下游桨的
+/// 入流比增大 → 推力下降、反扭矩增大（前/后桨不对称，产生前飞俯仰干扰力矩，物理上
+/// 等价于真实多旋翼前飞时后桨需更吃力维持桨盘姿态）。
+///
+/// 几何模型（机体系 XY，前=X、右=Y，桨位 `arms` 与 `step` 内力矩同约定）：
+///   - 上游方向 `u_up = -v_h/|v_h|`（来流方向；前飞 +X 时上游即机体 -X/前向）。
+///   - 对桨对 (源 j → 目标 i)：`along = (pos_i − pos_j)·u_up` 为下游沿流偏移
+///     （>0 表示 j 在 i 上游），`across` 为横向间距（滑流须横向覆盖目标桨盘）。
+///   - 覆盖系数 `frac = clamp(along/2l, 0, 1) · exp(−across/w)`，`w` 取桨径
+///     （≈ 单桨盘半径），同侧正前方桨（across=0）覆盖满，对角/侧向桨指数衰减。
+///   - 吹送系数 `blow = |v_h|/(|v_h|+vi)`：滑流随自由流被吹向下游的程度。悬停
+///     （|v_h|=0）滑流垂直向下、桨盘共面互不干扰；前飞速度越大，滑流越被吹平
+///     （相对下洗 vi 更快向后扫），越能扫入下游桨盘 → 耦合随速度从 0 单调逼近 1。
+///   - 每桨耦合入流增量 `vi_coup[i] = k · blow · Σ_j frac_ij · vi`（源下洗取
+///     桨盘平均 vi）。
+///
+/// 悬停（`|v_h|≈0`）时上游方向未定义、滑流垂直向下且桨盘共面互不干扰 → 返回全 0，
+/// 保持 P3-C1 悬停标定（保零回归）。`k = 0` 时该修正项整体关闭。
+pub fn downwash_coupling(
+    vh: [f64; 2],       // 机体水平速度（前, 右），m/s
+    arms: [[f64; 2]; 4], // 桨位（机体系 XY），m
+    vi: f64,             // 桨盘平均下洗（动量理论诱导速度），m/s
+    k: f64,              // 耦合系数（无量纲，config `rotor_downwash_coupling`）
+) -> [f64; 4] {
+    let mut out = [0.0f64; 4];
+    let vh_mag = (vh[0] * vh[0] + vh[1] * vh[1]).sqrt();
+    if vh_mag <= 1e-3 || k <= 0.0 || vi <= 1e-6 {
+        return out; // 悬停 / 关闭 / 无下洗：零耦合
+    }
+    // 吹送系数：滑流被自由流吹向下游的程度。|v_h|=vi 时吹送一半（blow=0.5），
+    // 高速时逼近 1（滑流完全扫入下游桨盘）；悬停已由阈值挡在 0。
+    let blow = vh_mag / (vh_mag + vi);
+    // 上游方向（来流方向，机体系）。
+    let uu = [-vh[0] / vh_mag, -vh[1] / vh_mag];
+    // 距离尺度：臂长两倍（正前方桨 along=2l 覆盖饱和），横向衰减尺度取单桨盘半径。
+    let l = (arms[0][0].abs()).max(arms[0][1].abs()); // 臂长 l（取首桨 |x| 近似）
+    let along_full = 2.0 * l;
+    let w = l * 0.55; // 横向衰减尺度 ≈ 桨径（r ≈ 0.55·臂长，disk_area 对应）
+    for i in 0..4 {
+        let mut acc = 0.0;
+        for j in 0..4 {
+            if i == j {
+                continue;
+            }
+            let dx = arms[i][0] - arms[j][0];
+            let dy = arms[i][1] - arms[j][1];
+            let along = dx * uu[0] + dy * uu[1];
+            if along <= 0.0 {
+                continue; // j 不在 i 上游
+            }
+            let across = (dx * dx + dy * dy - along * along).max(0.0).sqrt();
+            let frac = (along / along_full).min(1.0) * (-across / w).exp();
+            acc += frac;
+        }
+        out[i] = k * blow * acc * vi;
+    }
+    out
+}
 
 pub struct QuadrotorPlant<W> {
     world: W,
@@ -183,8 +344,15 @@ pub struct QuadrotorPlant<W> {
     ranger: Option<RangeFinderModel>,
     /// 最近一次接触解算结果（供日志 / 调试；`None` 表示本步未接触）。
     last_contact: Option<ContactInfo>,
+    /// P3-C3：其他动态刚体碰撞体列表（参与机体-机体碰撞解算）。
+    /// 非空时每步经 `resolve_body_peer_collisions` 解算双刚体碰撞（等大反向冲量、动量守恒）。
+    peer_colliders: Vec<BodyCollider>,
     /// P0-2：动量理论诱导速度（m/s），含垂直气流耦合；每步在 step() 内刷新。
     induced_vel: f64,
+    /// P3-C1：悬停标定反解的有效桨距 θ0（rad，ω 无关常量，见 `bet_rotor`）。
+    bet_theta0: f64,
+    /// P3-C1：悬停等效诱导速度（不含爬升耦合，供下一拍 BET 核使用）。
+    bet_vi: f64,
     /// 调试：最近一次 apply_actuators 算出的机体力矩（引擎机体系）。
     last_tau_body: [f64; 3],
     /// 调试：最近一次 step 的世界系合力（引擎世界系，[x,y,z]），供诊断推力水平分量方向。
@@ -258,6 +426,20 @@ where
             cfg.torque_coeff as f64 * cfg.thrust_coeff as f64 / (omega_max * omega_max);
         let battery_v = cfg.battery_v_nom as f64;
 
+        // P3-C1：悬停标定反解有效桨距 θ0。
+        // BET 悬停推力须精确 = prop_kt·ω²（保零回归）。悬停（vz=vxy=0，μ=0）下
+        //   C_T = (σa/4)·(θ0/3 − λ_i/2)，C_T_hover = T/(ρA(vt)²) = prop_kt/(ρA·R²)（ω 无关），
+        //   λ_i_hover = vi/vt = sqrt(prop_kt/(2ρA))/R（ω 无关）。
+        // 反解 θ0 = 3·(4·C_T_hover/(σa) + λ_i_hover/2)。
+        let rho0 = cfg.air_density as f64;
+        let a_rotor = (cfg.disk_area as f64).max(1e-4) / 4.0; // 单桨盘面积
+        let r_rotor = (a_rotor / std::f64::consts::PI).sqrt();
+        let sigma = cfg.rotor_solidity as f64;
+        let cla = cfg.rotor_cl_alpha as f64;
+        let ct_hover = prop_kt / (rho0 * a_rotor * r_rotor * r_rotor);
+        let lam_i_hover = (prop_kt / (2.0 * rho0 * a_rotor)).sqrt() / r_rotor;
+        let bet_theta0 = 3.0 * (4.0 * ct_hover / (sigma * cla) + 0.5 * lam_i_hover);
+
         Self {
             world,
             body_id,
@@ -280,7 +462,10 @@ where
             dynamic_obstacles: Vec::new(),
             ranger: None,
             last_contact: None,
+            peer_colliders: Vec::new(),
             induced_vel: 0.0,
+            bet_theta0,
+            bet_vi: 0.0,
             last_tau_body: [0.0; 3],
             last_f_world: [0.0; 3],
         }
@@ -309,6 +494,15 @@ where
         self.dynamic_obstacles = obs;
     }
 
+    /// P3-C3：注册/清除参与机体-机体碰撞的**其他动态刚体**碰撞体列表。
+    ///
+    /// `peers` 非空：每步经 `resolve_body_peer_collisions` 解算双刚体碰撞
+    /// （等大反向冲量、动量守恒，复用 `contact` 惩罚参数）。
+    /// `peers` 空：关闭机体-机体碰撞解算。
+    pub fn set_peer_colliders(&mut self, peers: Vec<BodyCollider>) {
+        self.peer_colliders = peers;
+    }
+
     /// P1-2 障碍反射：注册/清除避障距离传感器（雷达/深度相机）。
     ///
     /// `Some(model)`：启用避障射线探测；`None`：关闭（控制器不会收到避障反馈）。
@@ -317,34 +511,44 @@ where
         self.ranger = ranger;
     }
 
-    /// P1-2 障碍反射：从机体沿**机体前方**（引擎机体系 -X = 前）发射一条射线，
-    /// 探测最近障碍并生成一次避障传感器读数。
+    /// P1-2/P3-B2 障碍反射：从机体沿**水平扇形多射线**（机体前方 -X 为中线）同时
+    /// 发射射线，探测最近障碍并生成一帧多射线避障读数。
     ///
-    /// - 射线起点 = 机体当前世界位置；方向 = 机体前方在引擎世界系的单位向量
-    ///   （由刚体四元数把引擎机体 -X 旋转到世界系）。
-    /// - 探测当前生效的所有障碍（当前帧静态 + 按 `self.time` 生成的动态障碍并集）。
-    /// - 真值距离经 `RangeFinderModel` 转成传感器读数（含近距盲区"视觉失效"/
-    ///   量程饱和/噪声/随机瞬断——见 `RangeFinderModel::sample`）。
+    /// - 射线方向 = 机体水平面内 `±fov_half` 等角的 `ray_count` 条（机体前-右-下
+    ///   语义，见 [`RangeFinderModel::ray_dirs_body`]），经刚体四元数旋转到世界系。
+    /// - 每条射线探测当前生效的所有障碍（当前帧静态 + 按 `self.time` 生成的动态
+    ///   障碍并集），真值距离经 `RangeFinderModel::sample_ray` 独立转成传感器读数
+    ///   （含近距盲区"视觉失效"/量程饱和/噪声/随机瞬断）。
+    /// - `ray_count=1` 时退化为旧单射线（正前方）。
     ///
     /// 未装备传感器（`ranger.is_none()`）返回 `None`。
-    pub fn read_ranger(&mut self) -> Option<RangeFinderSample> {
+    pub fn read_ranger(&mut self) -> Option<RangeFinderFrame> {
         let model = self.ranger.as_mut()?;
         // 机体世界位置 + 姿态（引擎世界系）
         let mut tf = [0.0f64; 7];
         self.world.get_body_transform(self.body_id, &mut tf);
         let origin = [tf[0], tf[1], tf[2]];
         let q = [tf[3], tf[4], tf[5], tf[6]];
-        // 引擎机体系前方 = -X，旋转到世界系
-        let fwd_body = [-1.0, 0.0, 0.0];
-        let dir = rotate_by_quat(q, fwd_body);
         // 合并当前障碍（静态 + 动态按 time 生成）
         let mut all: Vec<Obstacle> = self.obstacles.clone();
         for d in &self.dynamic_obstacles {
             all.push(d.at(self.time));
         }
         let max_range = model.max_range;
-        let true_dist = ray_obstacle_distance(origin, dir, max_range, &all);
-        Some(model.sample(true_dist))
+        // P3-B2：逐条射线求交 + 独立采样。
+        let mut rays = Vec::with_capacity(model.ray_count.max(1));
+        for dir_body in model.ray_dirs_body() {
+            // 射线方向先旋转到引擎世界系（Y-up，与障碍同一坐标系）做求交。
+            let dir_world = rotate_by_quat(q, dir_body);
+            let true_dist = ray_obstacle_distance(origin, dir_world, max_range, &all);
+            // 读数方向再转 NED（前-右-下）：世界 Y-up 下 z=-东、y=上，
+            // 故 NED 东=-world.z、NED 下=-world.y。必须与 `forward_dir_ned` /
+            // `right_dir_ned` / `AvoidanceConfig::avoidance_velocity` 同口径，
+            // 否则横向分量被混点丢弃 → lateral_comp≈0 逐帧翻号（P3-B2 排查）。
+            let dir_ned = [dir_world[0], -dir_world[2], -dir_world[1]];
+            rays.push(model.sample_ray(dir_ned, true_dist));
+        }
+        Some(RangeFinderFrame { rays })
     }
 
     /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。
@@ -361,7 +565,46 @@ where
 
     /// 推进一个物理步：先把旋翼力/力矩注入机体，再 step。
     pub fn step(&mut self) {
-        // ---- 阶段 8 动力系统（油门→电压→转速→推力，∝ω² + 电池掉压）----
+        // ---- P3-C1：旋翼推进前置量（姿态/大气/速度，供 BET 核逐桨使用）----
+        // 取当前引擎姿态（按 body_id 偏移）用于把机体力/矩旋到世界系。
+        let tf = self.read_body_tf();
+        let q = [tf[3], tf[4], tf[5], tf[6]];
+        // 当前高度（世界系 Y 为"上"，NED 下向=-Y），用于地面效应/大气密度。
+        let h = tf[1];
+        let rho = air_density_at(self.cfg.air_density as f64, h);
+        // 机体线速度（世界系→引擎机体系）：前-右-上，vz 上正。
+        let vb_now = rotate_by_quat_conj(q, self.world.get_velocity(self.body_id));
+        let vz = vb_now[2]; // 机体 Z 速度（上正）
+        let vxy = (vb_now[0] * vb_now[0] + vb_now[1] * vb_now[1]).sqrt(); // 桨盘平面速度
+        // BET 桨盘几何 / 叶素参数（单桨盘，disk_area = 4×单桨盘）。
+        let a_rotor = (self.cfg.disk_area as f64).max(1e-4) / 4.0;
+        let r_rotor = (a_rotor / std::f64::consts::PI).sqrt();
+        let sigma = self.cfg.rotor_solidity as f64;
+        let cla = self.cfg.rotor_cl_alpha as f64;
+        let cd0 = self.cfg.rotor_cd0 as f64;
+        let stall_alpha = self.cfg.rotor_stall_alpha as f64;
+        // 上一拍动量理论诱导速度（含爬升/下降耦合）作 BET 入流比；垂直气流耦合由
+        // vi 携带（见下），核内 vz 传 0 避免与 momentum-theory 的 vz 项双重计入。
+        let vi_bet = self.bet_vi;
+        // X 布局臂向量（前+X, 右+Y）：m0=前右, m1=后左, m2=前左, m3=后右
+        let l = self.cfg.arm_length as f64;
+        let arms: [[f64; 2]; 4] = [
+            [l, l],   // 0 前右
+            [-l, -l], // 1 后左
+            [l, -l],  // 2 前左
+            [-l, l],  // 3 后右
+        ];
+        // P3-C2：相邻桨下洗耦合修正项。前飞时上游桨滑流射入下游桨盘 → 下游桨入流
+        // 增大、推力下降（前/后桨不对称，前飞俯仰干扰力矩）。悬停 v_xy=0 → 全 0，
+        // 保持悬停标定；`rotor_downwash_coupling=0` 可关闭。
+        let vi_coup = downwash_coupling(
+            [vb_now[0], vb_now[1]],
+            arms,
+            vi_bet,
+            self.cfg.rotor_downwash_coupling as f64,
+        );
+
+        // ---- 阶段 8 动力系统（油门→电压→转速→推力，BET + 电池掉压）----
         // 用上一拍电池电压算本拍电流/掉压（一拍延迟，250Hz 足够稳定）。
         let kv = self.cfg.motor_kv as f64;
         let tau = (self.cfg.motor_tau as f64).max(1e-6);
@@ -370,6 +613,8 @@ where
         let mut t_n = [0.0f64; 4];
         let mut q_n = [0.0f64; 4]; // 螺旋桨反扭矩（机体 Z 轴反扭矩）
         let mut i_bat = 0.0f64;
+        let mut sum_h = 0.0f64; // P3-C1：4 桨 H 力（桨盘平面反来流）合计
+        let mut sum_a1_t = 0.0f64; // P3-C1：Σ t·a1，纵向挥舞使推力后倾的水平分量
         for i in 0..4 {
             let u = self.cmd_motor[i].clamp(0.0, 1.0);
             // 控制器语义：归一化油门 u 表示期望推力 = thrust_coeff·u（线性，与控制律兼容）。
@@ -382,11 +627,21 @@ where
             // 转速一阶滞后
             self.motor_speed[i] += (omega_ss - self.motor_speed[i]) * alpha;
             let om = self.motor_speed[i].max(0.0);
-            // 螺旋桨：推力与反扭矩均 ∝ ω²
-            let t = self.prop_kt * om * om;
-            let q = self.prop_kq * om * om;
+            // P3-C1：叶素理论（BET）单桨内核替代 ∝ω² 推力。
+            // 悬停校准保证 t = prop_kt·ω²（保零回归）；前飞 μ 增大 / 后行侧叶尖失速时
+            // 推力衰减、反扭矩放大（torque_factor），并产生桨盘平面 H 力与纵向挥舞 a1。
+            // P3-C2：逐桨叠加相邻桨下洗耦合入流 vi_coup[i]（下游桨入流比增大）。
+            let vi_in = vi_bet + vi_coup[i];
+            let bet = bet_rotor(
+                rho, om, r_rotor, a_rotor, 0.0, vxy, vi_in, self.bet_theta0, sigma, cla, cd0,
+                stall_alpha,
+            );
+            let t = bet.thrust;
+            let q = self.prop_kq * om * om * bet.torque_factor;
             t_n[i] = t;
             q_n[i] = q;
+            sum_h += bet.h_force;
+            sum_a1_t += t * bet.a1; // 挥舞倾角×推力 = 纵向推力后倾分量（小角近似）
             // 电机电流 ≈ 机械功率 Q·ω / (电效率·反电动势) + 小空载电流。
             // 反电动势 ∝ ω（= ω/kv），与电池电压解耦：避免 v_m=u·v_bat 在掉压下
             // 正反馈（v_bat↓ → v_m↓ → i↑ → v_target↓ → v_bat↓↓ 的发散塌缩）。
@@ -402,22 +657,25 @@ where
         self.battery_v += (v_target - self.battery_v) * alpha_bat;
         self.thrust_n = t_n;
 
-        // ---- 旋翼推进模型（引擎世界系，f64）----
-        // 取当前引擎姿态（按 body_id 偏移）用于把机体力/矩旋到世界系。
-        let tf = self.read_body_tf();
-        let q = [tf[3], tf[4], tf[5], tf[6]];
-        // 当前高度（世界系 Y 为"上"，NED 下向=-Y），用于地面效应。
-        let h = tf[1];
-        // 阶段 2c：地面效应增益（近地推力增强），桨径估为 0.4·臂长。
+        // ---- 阶段 2c：地面效应增益（近地推力增强），桨径估为 0.4·臂长。----
         let prop_diam = 0.4 * self.cfg.arm_length as f64;
         let ge = ground_effect_gain(h, prop_diam);
         for i in 0..4 {
             t_n[i] *= ge;
         }
 
-        // 机体合力（引擎机体系）：推力沿机体 +Z。
+        // 机体合力（引擎机体系）：推力沿机体 +Z；P3-C1 叠加桨盘平面 H 力（反来流）
+        // 与纵向挥舞 a1 导致的推力后倾分量（前飞真实阻力 / 推力矢量偏移）。
         let sum_t: f64 = t_n.iter().sum();
-        let f_body = [0.0, 0.0, sum_t];
+        let (ux, uy) = if vxy > 1e-6 {
+            (-vb_now[0] / vxy, -vb_now[1] / vxy)
+        } else {
+            (0.0, 0.0)
+        };
+        // 纵向挥舞 a1：前飞时桨盘相对机体后倾（a1<0，flap-back），推力矢量后倾 →
+        // 机体前向分量 = Σ t·a1 < 0 = 后向阻力（与 H 力同向）。注意是 +sum_a1_t：
+        // a1<0 时该分量必须为负（后向），否则会错误地产生前向推力、减小阻力。
+        let f_body = [sum_a1_t + sum_h * ux, sum_h * uy, sum_t];
         let f_world = rotate_by_quat(q, f_body);
 
         // ---- P0-2：滑流 / 诱导速度（动量理论）----
@@ -427,13 +685,16 @@ where
         //   机体下降 (vb_z<0) → vi 减小（下降更省力，直至涡环）。
         // 解：vi = (-v + sqrt(v² + 2·T/(ρ·A))) / 2 = (vb_z + sqrt(vb_z² + 2·T/(ρ·A))) / 2。
         // 空气密度随高度衰减（ISA 标准大气），高海拔推力/诱导速度更真实。
-        let rho = air_density_at(self.cfg.air_density as f64, h);
         let a_disk = (self.cfg.disk_area as f64).max(1e-4);
-        let vb_now = rotate_by_quat_conj(q, self.world.get_velocity(self.body_id));
-        let vz = vb_now[2]; // 机体 Z 速度（上正）
         let disc_term = 2.0 * sum_t / (rho * a_disk);
         let vi = (vz + (vz * vz + disc_term).max(0.0).sqrt()) * 0.5;
         self.induced_vel = vi;
+        // P3-C1：完整动量理论诱导速度（含 vz 爬升/下降耦合）供下一拍 BET 核使用。
+        // 动量理论 vi 已含垂直气流耦合（爬升 vi 增大、下降 vi 减小），作为 BET 的
+        // 入流比 λ_i 即能表达"爬升更费劲/下降更省力"；核内不再另加线性 λ_c（否则
+        // 双重计入，且悬停标定的小 θ0 使线性 λ_c 灵敏度过强，3m/s 爬升推力塌陷 ~66%，
+        // 破坏垂直环能量管理）。一拍延迟，与电池电压同口径，250Hz 足够稳定。
+        self.bet_vi = vi;
         // 滑流冲击机体下拉力：下洗气流 vi 作用在等效投影面积 a_disk 上的动量通量，
         // 按 slipstream_drag_coeff 比例耦合到机身（沿机体 -Z）。
         let f_slip = self.cfg.slipstream_drag_coeff as f64 * 0.5 * rho * a_disk * vi * vi;
@@ -441,14 +702,7 @@ where
         // 已包含在 aero_drag_body 的诱导阻力项中，这里只加沿轴的下洗冲击部分。
 
         // 机体合力矩（引擎机体系）：臂力矩 + 反扭矩。
-        let l = self.cfg.arm_length as f64;
-        // X 布局臂向量（前+X, 右+Y）：m0=前右, m1=后左, m2=前左, m3=后右
-        let arms: [[f64; 2]; 4] = [
-            [l, l],   // 0 前右
-            [-l, -l], // 1 后左
-            [l, -l],  // 2 前左
-            [-l, l],  // 3 后右
-        ];
+        // （arms 已在旋翼推进段定义：m0=前右, m1=后左, m2=前左, m3=后右）
         // spin: 0,1 CCW(+1), 2,3 CW(-1)
         let spin: [f64; 4] = [1.0, 1.0, -1.0, -1.0];
         // 陀螺进动效应：机体角速度（世界系→机体系）用于算螺旋桨角动量进动力矩。
@@ -568,6 +822,33 @@ where
                 self.last_contact = Some(info);
             }
         }
+
+        // ---- P3-C3：机体-机体碰撞解算（双刚体动量守恒，等大反向冲量）----
+        // 与其他动态刚体（peer_colliders）逐一解算球-球碰撞，复用 contact 惩罚参数。
+        // 本体碰撞球半径取螺旋桨外周包络（≈1.2×臂长），与障碍模型同源。
+        if !self.peer_colliders.is_empty() {
+            let self_collider = BodyCollider {
+                id: self.body_id,
+                mass: self.cfg.mass as f64,
+                radius: 1.2 * self.cfg.arm_length as f64,
+            };
+            let cm = self.contact.clone().unwrap_or_default();
+            let infos = crate::physics::resolve_body_peer_collisions(
+                &mut self.world,
+                self_collider,
+                &self.peer_colliders,
+                &cm,
+                self.dt,
+            );
+            if !infos.is_empty() {
+                // 取最深穿透的 peer 接触标记 last_contact（显著程度最高）。
+                let deepest = infos
+                    .into_iter()
+                    .max_by(|a, b| a.penetration.partial_cmp(&b.penetration).unwrap())
+                    .unwrap();
+                self.last_contact = Some(deepest);
+            }
+        }
     }
 
     /// 阶段 2b：机体坐标系气动阻力（含动量理论诱导阻力）。
@@ -607,6 +888,12 @@ where
         fx[2] -= di.min(sum_t * 0.5);
 
         AeroDrag { fx }
+    }
+
+    /// P3-B3：向传感器模型注入故障（偏置突变/漂移/卡死，见 [`SensorFault`]）。
+    /// 故障在"真值 → 传感器读数"处生效，随后经 `read_sensors` 喂给 EKF/FDIR。
+    pub fn inject_sensor_fault(&mut self, fault: SensorFault) {
+        self.sensor.apply_fault(fault);
     }
 
     /// 由刚体真值生成传感器样本（NED 语义）喂飞控。
@@ -654,6 +941,52 @@ where
             vel_ned,
         );
         (imu, pos_sample)
+    }
+
+    /// P3-B1：由刚体真值生成 VIO（视觉里程计）样本。
+    ///
+    /// VIO 提供**高频**相对位置/速度观测：短期精度高、无绝对参考故长期缓慢漂移。
+    /// 这里在真值 NED 位置/速度上叠加确定性小噪声 + 按时间线性累积的漂移
+    /// （模拟无绝对参考的视觉里程计），位置/速度噪声均低于普通 GPS。
+    /// 与 EKF `r_vio_pos=0.25 / r_vio_vel=0.01` 匹配（详见 estimator/ekf.rs）。
+    pub fn read_vio(&mut self) -> Option<VioSample> {
+        let tf = self.read_body_tf();
+        let pos_ned = vec_up_to_ned([tf[0], tf[1], tf[2]]);
+        let vel = self.world.get_velocity(self.body_id);
+        let vel_ned = vec_up_to_ned(vel);
+        let t = self.time as f32;
+        // 漂移率（m/s 每轴，缓慢累积；~5s 后累计 ~0.25m，由 RTK 绝对位置持续纠正）。
+        let drift = [0.05 * t, -0.03 * t, 0.02 * t];
+        let w = |amp: f32, k: f32| f32::sin(t * k) * amp;
+        Some(VioSample::with_vel(
+            [
+                Meter(pos_ned[0] + drift[0] + w(0.15, 37.0)),
+                Meter(pos_ned[1] + drift[1] + w(0.12, 31.0)),
+                Meter(pos_ned[2] + drift[2] + w(0.09, 43.0)),
+            ],
+            [
+                MeterPerSecond(vel_ned[0] + w(0.05, 29.0)),
+                MeterPerSecond(vel_ned[1] + w(0.04, 23.0)),
+                MeterPerSecond(vel_ned[2] + w(0.03, 47.0)),
+            ],
+        ))
+    }
+
+    /// P3-B1：由刚体真值生成 RTK-GPS 样本。
+    ///
+    /// RTK 提供**厘米级高精度**绝对位置（载波相位差分），更新率低但噪声远小于
+    /// 普通 GPS 与 VIO，用于抑制 VIO 长期漂移并提供绝对参考。这里噪声 ~0.02m
+    /// （确定性正弦），与 EKF `r_rtk=0.0025` 匹配。
+    pub fn read_rtk(&mut self) -> Option<RtkSample> {
+        let tf = self.read_body_tf();
+        let pos_ned = vec_up_to_ned([tf[0], tf[1], tf[2]]);
+        let t = self.time as f32;
+        let w = |amp: f32, k: f32| f32::sin(t * k) * amp;
+        Some(RtkSample::new([
+            Meter(pos_ned[0] + w(0.02, 41.0)),
+            Meter(pos_ned[1] + w(0.016, 47.0)),
+            Meter(pos_ned[2] + w(0.012, 53.0)),
+        ]))
     }
 
     /// 由刚体真值生成磁力计/气压计样本（机体系/高度语义）喂飞控。

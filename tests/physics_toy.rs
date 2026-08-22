@@ -8,8 +8,11 @@
 //! 运行：`cargo test --test physics_toy`
 
 use fly_sim_core::{ContactModel, RigidBodyWorld, TerrainField, ToyWorld};
-use fly_sim_core::physics::{resolve_ground_contact, resolve_obstacle_contact, DynamicObstacle, Obstacle};
-use fly_sim_core::sensor::RangeFinderModel;
+use fly_sim_core::physics::{
+    resolve_body_peer_collisions, resolve_ground_contact, resolve_obstacle_contact, BodyCollider,
+    DynamicObstacle, Obstacle,
+};
+use fly_sim_core::sensor::{RangeFinderModel, RayReading};
 use fly_sim_core::controller::actuator_full;
 use fly_sim_core::QuadrotorPlant;
 use fly_simulater::airframe::load_airframe;
@@ -522,6 +525,119 @@ fn dynamic_obstacle_translates_and_blocks() {
     assert!(tf[1].is_finite() && tf[2].is_finite(), "动态障碍后状态应有限");
 }
 
+// ============================================================ P3-C3 多刚体真实碰撞（机体-机体）
+
+/// P3-C3 验收 1：两等质量刚体正碰 → **动量守恒**（精确）、peer 被撞动、非弹性损失动能。
+///
+/// id1（x=0）以 +1 m/s 撞静止的 id2（x=2，等质量 m=1，半径 0.5 → 球面间隙 1.0）。
+/// 碰撞解算把冲量等大反向施加到两刚体（牛顿第三定律）→ 碰后总动量 = 初动量 1.0。
+#[test]
+fn body_peer_collision_conserves_momentum() {
+    let mut world = ToyWorld::new(0.0); // 无重力，纯水平正碰
+    let id1 = world.add_body(1.0, &[0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[0.01, 0.01, 0.01]);
+    let id2 = world.add_body(1.0, &[2.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[0.01, 0.01, 0.01]);
+    world.apply_impulse(id1, &[1.0, 0.0, 0.0], 0); // m=1 → dv=1，id1 初速 +1 m/s
+
+    let cm = ContactModel {
+        restitution: 0.5,
+        penalty_k: 10000.0,
+        ..Default::default()
+    };
+    let self_col = BodyCollider { id: id1, mass: 1.0, radius: 0.5 };
+    let peers = &[BodyCollider { id: id2, mass: 1.0, radius: 0.5 }];
+
+    // 接近速度 1 m/s、初始球面间隙 1.0 → t≈1s（250 步）才接触；跑足 600 步等分离稳定。
+    for _ in 0..600 {
+        resolve_body_peer_collisions(&mut world, self_col, peers, &cm, DT);
+        world.step(DT);
+    }
+
+    let v1 = world.get_velocity(id1);
+    let v2 = world.get_velocity(id2);
+    // 动量守恒（等质量）：m1·v1 + m2·v2 = 1·v1x + 1·v2x = 初动量 1.0。
+    assert!(
+        (v1[0] + v2[0] - 1.0).abs() < 1e-3,
+        "动量不守恒: v1x={} v2x={}",
+        v1[0], v2[0]
+    );
+    // peer 被撞动（获得正向速度且快于本体），本体减速 → 分离速度 < 接近速度（非弹性）。
+    assert!(
+        v2[0] > v1[0] && v2[0] > 0.05,
+        "peer 应被撞出正向速度: v1x={} v2x={}",
+        v1[0], v2[0]
+    );
+    // 动能损失：e<1 非完全弹性 → 碰后总动能 < 碰前 (0.5·1·1² = 0.5)。
+    let ke0 = 0.5 * 1.0 * 1.0 * 1.0;
+    let ke1 = 0.5 * 1.0 * (v1[0] * v1[0] + v2[0] * v2[0]);
+    assert!(ke1 < ke0, "非弹性碰撞应损失动能: ke0={} ke1={}", ke0, ke1);
+}
+
+/// P3-C3 验收 2：本体撞向**静态刚体**（`mass=0`，无限质量）→ 本体反弹（恢复系数约束）、
+/// 静态刚体不被推动（只被撞、不回动，与障碍模型语义一致）。
+#[test]
+fn static_peer_absorbs_impact() {
+    let mut world = ToyWorld::new(0.0);
+    let id1 = world.add_body(1.0, &[0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[0.01, 0.01, 0.01]);
+    let id2 = world.add_body(1.0, &[1.5, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[0.01, 0.01, 0.01]);
+    world.apply_impulse(id1, &[1.0, 0.0, 0.0], 0); // id1 初速 +1 m/s
+
+    let cm = ContactModel {
+        restitution: 0.5,
+        penalty_k: 10000.0,
+        ..Default::default()
+    };
+    let self_col = BodyCollider { id: id1, mass: 1.0, radius: 0.5 };
+    let peers = &[BodyCollider { id: id2, mass: 0.0, radius: 0.5 }]; // 静态 peer
+
+    for _ in 0..600 {
+        resolve_body_peer_collisions(&mut world, self_col, peers, &cm, DT);
+        world.step(DT);
+    }
+
+    let v1 = world.get_velocity(id1);
+    let v2 = world.get_velocity(id2);
+    // 静态 peer 不受冲量 → 保持静止（无重力、无外力）。
+    assert!(v2[0].abs() < 1e-9, "静态 peer 不应获得速度: v2x={}", v2[0]);
+    // 本体反弹：碰后速度反向（与初始 +x 相反），且非弹性损失使 |v1| < 接近速度 1.0。
+    assert!(v1[0] < 0.0, "本体应反弹反向: v1x={}", v1[0]);
+    assert!(v1[0].abs() < 1.0, "非弹性反弹速度应小于接近速度: v1x={}", v1[0]);
+}
+
+/// P3-C3 验收 3：plant 接入多刚体碰撞——`set_peer_colliders` 注册与机体重叠的 peer 后，
+/// step 解算机体-机体碰撞：报告接触并把 peer 推离本体，状态保持有限。
+#[test]
+fn plant_peer_collision_integrates() {
+    let mut world = ToyWorld::new(0.0); // 无重力、零油门：碰撞冲量是唯一作用力
+    // peer 刚体：与机体（初始 (0,5,0)，碰撞球半径 1.2·arm≈0.27）重叠。
+    let peer_id = world.add_body(1.0, &[0.2, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0], &[1.0, 1.0, 1.0]);
+    let mut plant = make_plant(world);
+    plant.set_peer_colliders(vec![BodyCollider {
+        id: peer_id,
+        mass: 1.0,
+        radius: 0.2,
+    }]);
+    // 机体碰撞半径 1.2·0.225≈0.27 + peer 0.2 = 0.47 > 中心距 0.2 → 初始即穿透。
+    let mut saw_contact = false;
+    let mut first_finite = true;
+    for _ in 0..200 {
+        plant.step();
+        saw_contact |= plant.contact_info().is_some();
+        let (pos, _) = plant.debug_up();
+        for v in pos.iter() {
+            first_finite &= v.is_finite();
+        }
+    }
+    assert!(saw_contact, "重叠 peer 应报告过接触");
+    assert!(first_finite, "plant 状态应全程有限");
+    // 碰撞把本体沿法向反方向（peer 在 +X → 本体被推往 -X）推离 peer（初始 x=0 → 应 <0）。
+    let (pos, _) = plant.debug_up();
+    assert!(
+        pos[0] < -0.02,
+        "本体应被碰撞推离 peer(-X): px={}",
+        pos[0]
+    );
+}
+
 // ============================================================ 障碍反射到传感器（避障雷达/视觉失效）
 
 /// 避障雷达探测到前方障碍：沿机体前方发射射线命中静态球，`valid=true` 且距离接近真值。
@@ -531,11 +647,34 @@ fn ranger_detects_obstacle_ahead() {
     let world = ToyWorld::new(9.81);
     let mut plant = make_plant(world);
     plant.set_obstacles(vec![Obstacle::Sphere { center: [-2.0, 5.0, 0.0], radius: 1.0 }]);
-    // 无噪声、无盲区、无随机失效，量程 10m。
-    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.0, 0.0, 0.0, 0.0, 0xABCD)));
-    let s = plant.read_ranger().expect("应装备传感器");
+    // 无噪声、无盲区、无随机失效，量程 10m；单射线（ray_count=1）退化为正前方。
+    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 0xABCD)));
+    let s = plant.read_ranger().expect("应装备传感器").center().clone();
     assert!(s.valid, "前方有障碍时读数应有效");
     assert!((s.distance - 1.0).abs() < 1e-6, "真值距离≈1.0m, got {}", s.distance);
+}
+
+/// P3-B2 多射线：扇形侧向射线能覆盖偏出中央视线的障碍（单射线会漏检）。
+#[test]
+fn ranger_fan_rays_cover_side_obstacle() {
+    // 障碍球偏出正前方：中心 (-2,5,3) r=1.0（世界 z=+3 = NED 东偏），中央射线（-X）
+    // 看不到它，而右侧扇形射线（绕下轴偏 +fov_half）能命中。
+    let world = ToyWorld::new(9.81);
+    let mut plant = make_plant(world);
+    plant.set_obstacles(vec![Obstacle::Sphere { center: [-2.0, 5.0, 3.0], radius: 1.0 }]);
+    // 三射线扇形：±45°（fov_half=π/4），中央 + 左右各一。
+    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.0, 0.0, 0.0, 0.0, std::f64::consts::FRAC_PI_4, 3, 0xBEEF)));
+    let frame = plant.read_ranger().expect("应装备传感器");
+    assert_eq!(frame.rays.len(), 3, "ray_count=3 应返回 3 条读数");
+    // 中央射线（index 1）方向为 -X，障碍在 +z 侧 → 中央射线看不到（量程外饱和失效）。
+    let center = &frame.rays[1];
+    assert!(!center.valid, "侧向障碍应偏出中央射线视野");
+    // 至少有一条侧向射线命中（右侧 index 0 或左侧 index 2）。
+    let side_hits: Vec<&RayReading> = frame.rays.iter().filter(|r| r.valid).collect();
+    assert_eq!(side_hits.len(), 1, "应恰好一条侧向射线命中, 实际 {}", side_hits.len());
+    let d = side_hits[0].distance;
+    // 球心 (-2,5,3) r=1，表面到原点的距离：sqrt(2²+3²)=3.606 → 净 2.606m。
+    assert!((d - 2.606).abs() < 0.3, "侧向射线距离≈2.606m, got {}", d);
 }
 
 /// 近距盲区（视觉失效）：障碍紧贴机体（< blind_min），雷达回波淹没/相机糊脸 → `valid=false`。
@@ -545,8 +684,8 @@ fn ranger_near_blind_zone_invalid() {
     let world = ToyWorld::new(9.81);
     let mut plant = make_plant(world);
     plant.set_obstacles(vec![Obstacle::Sphere { center: [-1.2, 5.0, 0.0], radius: 1.0 }]);
-    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.5, 0.0, 0.0, 0.0, 0x1234)));
-    let s = plant.read_ranger().expect("应装备传感器");
+    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1, 0x1234)));
+    let s = plant.read_ranger().expect("应装备传感器").center().clone();
     assert!(!s.valid, "近距盲区(< blind_min)应判失效");
     // 失效时给错误饱和读数（把近障碍误报为远处），证明是"视觉失效"而非"无障碍"
     assert!((s.distance - 10.0).abs() < 1e-9, "失效应饱和到 max_range, got {}", s.distance);
@@ -558,8 +697,8 @@ fn ranger_no_obstacle_max_range() {
     let world = ToyWorld::new(9.81);
     let mut plant = make_plant(world);
     // 前方无障碍（机体在 (0,5,0)，前方 -X 方向无物体）。
-    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.0, 0.0, 0.0, 0.0, 0x5678)));
-    let s = plant.read_ranger().expect("应装备传感器");
+    plant.set_ranger(Some(RangeFinderModel::new(10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 0x5678)));
+    let s = plant.read_ranger().expect("应装备传感器").center().clone();
     assert!(!s.valid, "量程内无障碍时应判失效(饱和)");
     assert!((s.distance - 10.0).abs() < 1e-9, "量程外饱和到 max_range, got {}", s.distance);
 }
