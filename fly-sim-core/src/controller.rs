@@ -10,16 +10,24 @@ use flyctrl_core::estimator::EkfEstimator;
 use flyctrl_core::fdir::Health;
 use flyctrl_core::flightmode::{FlightMode, ModeContext, ModeGovernor};
 use flyctrl_core::hal::actuator::{MotorActuator, OutputProtocol};
-use flyctrl_core::hal::sensor::{AirspeedSensor, GpsSensor, ImuSensor, MagSensor};
+use flyctrl_core::hal::sensor::{AirspeedSensor, GpsSensor, ImuSensor, MagSensor, RtkSensor, VioSensor};
 use flyctrl_core::hil::HilContext;
 use flyctrl_core::units::{Airspeed, Meter, MeterPerSecondSquared, Radian, RadianPerSecond, Second};
-use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, RcInput, VehicleState};
+use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, RcInput, RtkSample, VehicleState, VioSample};
 
 use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
 use crate::physics::{ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld};
 use crate::wind::WindField;
-use crate::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig};
+use crate::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig, SensorFault};
+
+/// P3-B2 避障位置设定点横向偏移积分增益（m/s 每 m/s 横向避障速度）。
+/// 威胁期内位置目标随避障速度侧移的平滑速率；稳态偏移 ≈ av_lat * K / λ。
+/// 取值权衡：过小 → 位置外环把机体拉回原点、净位移不足；过大 → 位置目标骤移致翻滚掉高。
+const AV_EVADE_POS_K: f32 = 3.0;
+/// P3-B2 避障位置偏移泄漏率（1/s）。威胁结束后按 e^(-λt) 回零，
+/// 使位置外环把机体拉回原航线（自然释放）；时间常数 ≈ 1/λ。
+const AV_EVADE_POS_LAMBDA: f32 = 1.0;
 
 /// 生产路径便捷别名：用真实物理引擎（phy-sdk）的控制器。
 #[cfg(feature = "phy")]
@@ -92,6 +100,26 @@ impl AirspeedSensor for SimAirspeed {
     fn healthy(&self) -> bool { self.last.is_some() }
 }
 
+/// 物理引擎提供的 VIO（视觉里程计）：高频相对位置/速度（短期准、长期漂移）。
+pub struct SimVio {
+    last: Option<VioSample>,
+}
+
+impl VioSensor for SimVio {
+    fn read(&mut self) -> Option<VioSample> { self.last }
+    fn healthy(&self) -> bool { self.last.is_some() }
+}
+
+/// 物理引擎提供的 RTK-GPS：厘米级高精度绝对位置。
+pub struct SimRtk {
+    last: Option<RtkSample>,
+}
+
+impl RtkSensor for SimRtk {
+    fn read(&mut self) -> Option<RtkSample> { self.last }
+    fn healthy(&self) -> bool { self.last.is_some() }
+}
+
 /// 物理引擎提供的磁力计（机体系三轴磁场）。
 pub struct SimMag {
     last: [f32; 3],
@@ -130,8 +158,20 @@ pub struct FlyController<W> {
     imu: SimImu,
     gps: SimGps,
     air: SimAirspeed,
+    vio: SimVio,
+    rtk: SimRtk,
     mag: SimMag,
     motors: SimMotors,
+    /// P3-B1：GPS 可用开关（默认 true）。置 false 模拟 GPS 失锁（read 返回 None），
+    /// 用于验收"VIO/RTK 融合在 GPS 中断期间兜底位置估计"。`has_fix` 同步置 false，
+    /// 模式治理器据此在失锁期间拒绝定位/任务等依赖绝对位置的模式。
+    gps_ok: bool,
+    /// P3-B1：VIO 可用开关（默认 true）。置 false 模拟 VIO 失锁（不注入位置/速度观测），
+    /// 用于对比"仅 GPS"与"GPS+VIO+RTK"在 GPS 中断时的位置保持能力。
+    vio_ok: bool,
+    /// P3-B1：RTK 可用开关（默认 true）。置 false 模拟 RTK 无固定解（不注入厘米级位置观测），
+    /// 用于对比 VIO 单独与 VIO+RTK 的长期漂移抑制效果。
+    rtk_ok: bool,
     cfg: VehicleConfig,
     /// 解锁态：true=电机可转（默认 true，保证既有悬停/任务测试行为不变）；
     /// MAVLink DISARM 置 false 时停转。MAVLink ARM 置 true。
@@ -155,16 +195,20 @@ pub struct FlyController<W> {
     /// 损失（无论完全还是部分）均致姿控发散、不可恢复（见 sim.rs run_hover_degraded）。
     fail_mask: [f32; 4],
     /// P1-2 闭环联动：反应式避障配置。`None`=不装避障（默认，行为同前）。
-    /// 装备后，step 内读前向测距，危险时改写速度设定点（制动+横向闪避）。
+    /// 装备后，step 内读扇形多射线测距（P3-B2），危险时改写速度设定点（制动+横向闪避）。
     avoidance: Option<AvoidanceConfig>,
-    /// 控制周期（s），用于避障保持逻辑的计时。
+    /// P3-B2 避障横向锁存方向：0=未锁存；±1=威胁事件内保持的闪避方向（沿 `right_ned`，
+    /// +1=右，-1=左）。事件结束（`triggered` 变 false）重置。用于避免障碍近正前时
+    /// `lateral_comp≈0` 逐帧翻号 → 净横向位移为零（P3-B2 排查结论）。
+    av_evade_dir: f32,
+    /// P3-B2 避障位置设定点横向偏移（NED 水平，m）。威胁期内随
+    /// `锁存方向 × 横向避障速度幅度` 泄漏积分累积，威胁结束后指数泄漏回零，
+    /// 使位置外环把机体拉回原航线（自然释放）。
+    av_evade_int: [f32; 2],
+    /// 控制周期（s），用于仿真推进计时。
     dt: f64,
     /// 仿真已推进时间（s），每次 [`FlyController::step`] 累加 `dt`。
     time: f64,
-    /// 最近一次**确认危险**的时刻与避障指令（NED，m/s）：
-    /// `Some((time, vel))` 表示"已确认危险且尚在 `hold_time` 保持窗口内"。
-    /// 用于单射线 FOV 丢失后继续维持避障，避免位置环立即把机体拉回航线。
-    av_last: Option<(f64, [f64; 3])>,
 }
 
 impl<W> FlyController<W>
@@ -230,6 +274,8 @@ where
         };
         let gps = SimGps { last: None, has_fix: false };
         let air = SimAirspeed { last: None };
+        let vio = SimVio { last: None };
+        let rtk = SimRtk { last: None };
         let mag = SimMag { last: [0.0; 3] };
         let motors = SimMotors { last: ActuatorCmd::zero() };
 
@@ -239,8 +285,13 @@ where
             imu,
             gps,
             air,
+            vio,
+            rtk,
             mag,
             motors,
+            gps_ok: true,
+            vio_ok: true,
+            rtk_ok: true,
             cfg: cfg.clone(),
             armed: true,
             mode: 0,
@@ -252,9 +303,10 @@ where
             baro_alt: 5.0,
             fail_mask: [1.0; 4],
             avoidance: None,
+            av_evade_dir: 0.0,
+            av_evade_int: [0.0, 0.0],
             dt,
             time: 0.0,
-            av_last: None,
         }
     }
 
@@ -320,50 +372,75 @@ where
     /// `step` / `step_rc` 共用，保证两条路径（自主设定点 / RC 直通）的
     /// 设定点型控制律（Position/Mission/Rtl/Land 等）行为一致。
     fn run_setpoint(&mut self, setpoint: &Setpoint) -> VehicleState {
-        // P1-2 闭环联动：装备避障时，先读前向测距并把避障速度并入设定点。
+        // P1-2/P3-B2 闭环联动：装备避障时，先读扇形多射线测距并把避障速度并入设定点。
         // setpoint 是 immutable 引用，这里构造一个叠加过避障的本地副本。
         let mut sp = setpoint.clone();
         if let Some(av_cfg) = &self.avoidance {
-            if let Some(sample) = self.plant.read_ranger() {
+            if let Some(frame) = self.plant.read_ranger() {
                 let fwd = self.plant.forward_dir_ned();
                 let right = self.plant.right_dir_ned();
-                let (av_vel, triggered) = av_cfg.avoidance_velocity(&sample, fwd, right);
-                // 记录最近一次"确认危险"的时刻与避障指令（供 FOV 丢失后的保持窗口用）。
+                // 多射线聚合决策（P3-B2）：障碍横向滑出中央射线后侧向射线仍持续覆盖，
+                // 闪避方向随障碍横移连续翻转、危险度随距离连续衰减，无需单射线的
+                // `hold_time` 冻结保持；障碍彻底离开视场后避障自然释放。
+                let (av_vel, triggered, lat_comp) = av_cfg.avoidance_velocity(&frame, fwd, right);
                 if triggered {
-                    self.av_last = Some((self.time, av_vel));
+                    // P3-B2 横向投影（av_vel 沿 `right_ned` 的分量）用于取**幅度**：
+                    // 已乘完整闪避幅度（≈evade_lateral·√sev，量级 0.5~2.0），其符号不可靠。
+                    let lat_proj = av_vel[0] as f32 * right[0] as f32 + av_vel[1] as f32 * right[1] as f32;
+                    let lat_mag = lat_proj.abs();
+
+                    // 方向锁存：基于**原始排斥力横向分量** `lat_comp`（居中障碍时 ≈0，
+                    // 幅度远小于 lat_proj，符号才真正代表"障碍偏哪侧"）。障碍明显偏侧
+                    // （|lat_comp|>阈值）才更新方向；障碍近正前（≈0）时保持已锁存方向，
+                    // 首次触发且无明确方向时默认向右——正对场景左右对称，任何单侧都等价
+                    // 于远离障碍，关键是要**坚定单侧闪避**，避免逐帧翻号净位移为零
+                    // （P3-B2 排查：用 lat_proj 判据时 |lat_proj| 恒 >0.5，锁存形同虚设，
+                    // av_evade_dir 随噪声翻号 → 速度指令与 ev_int 净积累≈0，机体几乎不动）。
+                    if lat_comp.abs() > 0.25 {
+                        self.av_evade_dir = if lat_comp > 0.0 { 1.0 } else { -1.0 };
+                    } else if self.av_evade_dir == 0.0 {
+                        self.av_evade_dir = 1.0;
+                    }
+
+                    // 速度设定点（NED，m/s）：制动分量原样保留；横向分量改为沿
+                    // **锁存方向 × 横向幅度**规范化——与下方位置偏移积分同向，
+                    // 避免 av_vel 逐帧翻号时速度指令与位置设定点互相打架。
+                    sp.vel[0].0 += av_vel[0] as f32 - lat_proj * right[0] as f32
+                        + self.av_evade_dir * lat_mag * right[0] as f32;
+                    sp.vel[1].0 += av_vel[1] as f32 - lat_proj * right[1] as f32
+                        + self.av_evade_dir * lat_mag * right[1] as f32;
+
+                    // 位置偏移泄漏积分：威胁期内按"锁存方向 × 横向幅度"沿 `right_ned`
+                    // 累积位置设定点偏移，使串级 PID 的位置外环跟随侧移而非把机体拉回
+                    // 原点；取代旧的 `sp.pos += av_vel*10` 硬放大（后者每帧放大速度级
+                    // 目标、姿态/高度剧烈波动）。
+                    let dt = self.dt as f32;
+                    let lateral_speed = self.av_evade_dir * lat_mag;
+                    self.av_evade_int[0] += AV_EVADE_POS_K * lateral_speed * right[0] as f32 * dt;
+                    self.av_evade_int[1] += AV_EVADE_POS_K * lateral_speed * right[1] as f32 * dt;
+                } else {
+                    // 威胁结束：重置方向锁存，位置偏移按 e^(-λt) 指数泄漏回零，
+                    // 位置外环把机体拉回原航线（自然释放）。
+                    self.av_evade_dir = 0.0;
+                    let dt = self.dt as f32;
+                    let decay = (-AV_EVADE_POS_LAMBDA * dt).exp();
+                    self.av_evade_int[0] *= decay;
+                    self.av_evade_int[1] *= decay;
                 }
-                // 单射线 FOV 丢失（障碍滑出射线 → 读数失效）时，避障不会立即释放，
-                // 而是在最近一次确认危险后的 hold_time 内继续维持指令，让横向分离
-                // 距离积累足够；否则位置外环会把机体拉回原航线，净间隙不足（实测
-                // 机体在射线边缘形成极限环，横向位移被封顶在障碍半径附近）。
-                let held = triggered
-                    || self
-                        .av_last
-                        .map_or(false, |(t, _)| self.time - t <= av_cfg.hold_time);
-                if held {
-                    // 保持窗口内沿用最近一次确认危险的避障指令（方向恒定，避免随
-                    // 失效读数抖动）；本轮触发时即为新计算的指令。
-                    let vel = self.av_last.map_or(av_vel, |(_, v)| v);
-                    // 速度设定点（NED，m/s）叠加避障指令。
-                    sp.vel[0].0 += vel[0] as f32;
-                    sp.vel[1].0 += vel[1] as f32;
-                    // 同时偏移位置设定点的水平分量，使位置外环目标跟随横向闪避
-                    // 脱离航线——否则串级 PID 的位置环会把机体拉回原点，抵消避障
-                    // 速度指令（诊断实测：仅注入速度时机体横向位移被压制，避障几乎无效）。
-                    sp.pos[0].0 += vel[0] as f32 * 10.0;
-                    sp.pos[1].0 += vel[1] as f32 * 10.0;
-                    // 注意：setpoint 竖向/偏航不动，仅水平被规避层接管。
-                }
+
+                // 应用位置偏移（叠加到原设定点水平分量）。
+                sp.pos[0].0 += self.av_evade_int[0];
+                sp.pos[1].0 += self.av_evade_int[1];
             }
         }
-        // 推进仿真时钟（避障保持窗口的计时基准）。
+        // 推进仿真时钟。
         self.time += self.dt;
         let setpoint_ref = &sp;
         match &mut self.hil {
-            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Tecs(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, setpoint_ref, &mut self.motors, &self.cfg),
+            CtrlVariant::Tecs(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, setpoint_ref, &mut self.motors, &self.cfg),
         }
     }
 
@@ -374,10 +451,10 @@ where
     fn run_cmd(&mut self, cmd_fn: impl FnOnce(&VehicleState) -> ActuatorCmd) -> VehicleState {
         self.time += self.dt;
         match &mut self.hil {
-            CtrlVariant::Pid(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, cmd_fn, &mut self.motors, &self.cfg),
-            CtrlVariant::Indi(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, cmd_fn, &mut self.motors, &self.cfg),
-            CtrlVariant::Lqr(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, cmd_fn, &mut self.motors, &self.cfg),
-            CtrlVariant::Tecs(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, cmd_fn, &mut self.motors, &self.cfg),
+            CtrlVariant::Pid(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, cmd_fn, &mut self.motors, &self.cfg),
+            CtrlVariant::Indi(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, cmd_fn, &mut self.motors, &self.cfg),
+            CtrlVariant::Lqr(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, cmd_fn, &mut self.motors, &self.cfg),
+            CtrlVariant::Tecs(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, cmd_fn, &mut self.motors, &self.cfg),
         }
     }
 
@@ -501,9 +578,11 @@ where
     fn sample_sensors(&mut self) {
         let (imu_sample, pos_sample) = self.plant.read_sensors();
         self.imu.last = imu_sample;
-        self.gps.last = pos_sample;
+        // P3-B1：GPS 可用门控——`gps_ok=false` 时强制失锁（read 返回 None），
+        // 验证 VIO/RTK 融合在 GPS 中断期间兜底位置估计。
+        self.gps.last = if self.gps_ok { pos_sample } else { None };
         // GPS 定位锁定：收到有效样本即置位（仿真 GPS 一经锁定持续有效）。
-        if pos_sample.is_some() {
+        if self.gps.last.is_some() {
             self.gps.has_fix = true;
         }
         let vg = self.plant.ground_airspeed_ned();
@@ -512,6 +591,11 @@ where
             speed: Airspeed(vh as f32),
             timestamp_s: 0.0,
         });
+        // P3-B1：VIO（高频相对位置/速度）与 RTK-GPS（厘米级绝对位置）样本，
+        // 由 plant 真值 + 噪声模型生成，经 HilContext 注入 EKF 多源融合。
+        // 可用开关用于验收对比（GPS 中断时 VIO 桥接 / VIO 单独 vs VIO+RTK 漂移）。
+        self.vio.last = if self.vio_ok { self.plant.read_vio() } else { None };
+        self.rtk.last = if self.rtk_ok { self.plant.read_rtk() } else { None };
         // 相对空速矢量（NED 水平）= v_ground - wind：每周期注入控制器，供 TECS
         // 空速拖拽前馈定向（其它控制器默认忽略）。
         let v_rel = self.plant.relative_airspeed_ned();
@@ -629,6 +713,55 @@ where
         self.plant.step();
     }
 
+    /// P3-B1：运行时注入 GPS 失锁（false）或恢复（true）。
+    /// 失锁期间 `read()` 返回 None、`has_fix=false`（模式治理器拒绝依赖绝对位置的
+    /// 模式），位置估计由 VIO/RTK 融合兜底——验收场景（vio_rtk.rs）用。
+    pub fn set_gps_available(&mut self, ok: bool) {
+        self.gps_ok = ok;
+        if !ok {
+            self.gps.last = None;
+            self.gps.has_fix = false;
+        }
+    }
+
+    /// P3-B1：运行时注入 VIO 失锁（false）或恢复（true）。
+    /// 失锁期间不注入位置/速度观测，用于验收对比（GPS 中断时 VIO 桥接能力）。
+    pub fn set_vio_available(&mut self, ok: bool) {
+        self.vio_ok = ok;
+        if !ok {
+            self.vio.last = None;
+        }
+    }
+
+    /// P3-B1：运行时注入 RTK 无固定解（false）或恢复（true）。
+    /// 无固定解期间不注入厘米级位置观测，用于验收对比（VIO+RTK vs VIO 单独漂移）。
+    pub fn set_rtk_available(&mut self, ok: bool) {
+        self.rtk_ok = ok;
+        if !ok {
+            self.rtk.last = None;
+        }
+    }
+
+    /// P3-B3：运行时向传感器模型注入硬/软故障（偏置突变/卡死/漂移，见 [`SensorFault`]）。
+    /// 故障在"物理真值 → 传感器读数"处生效，随后喂给 EKF 与 FDIR，实现全链路故障注入。
+    /// 例子：`AccelBias([0.3,0,0])` 软偏置；`AccelStuck(Some([0,0,0]))` 硬卡死（FDIR 判
+    /// Critical → 失控保护归零执行器）；`GpsStuck(Some([...]))` GPS 冻结（软/硬均不退化为
+    /// 失锁，`has_fix` 保持 true，位置估计被卡死值牵制）。
+    pub fn inject_sensor_fault(&mut self, fault: SensorFault) {
+        self.plant.inject_sensor_fault(fault);
+    }
+
+    /// P3-B3：是否已触发失控保护（FDIR Critical 单向置位，执行器归零）。
+    /// 供验收测试确认硬故障（IMU 卡死）被 FDIR 检测并降级。
+    pub fn failsafe_engaged(&self) -> bool {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.failsafe_engaged,
+            CtrlVariant::Indi(h) => h.failsafe_engaged,
+            CtrlVariant::Lqr(h) => h.failsafe_engaged,
+            CtrlVariant::Tecs(h) => h.failsafe_engaged,
+        }
+    }
+
     /// P1-2：运行时设置/清除地面接触（自由落体能量守恒场景用 None 关闭地面）。
     pub fn plant_set_contact(&mut self, contact: Option<ContactModel>) {
         self.plant.set_contact(contact);
@@ -654,9 +787,24 @@ where
         self.plant.debug_up()
     }
 
-    /// 调试：返回最近一次测距采样（避障诊断用）。
-    pub fn dbg_ranger(&mut self) -> Option<crate::sensor::RangeFinderSample> {
+    /// 调试：返回最近一次扇形多射线测距帧（避障诊断用）。
+    pub fn dbg_ranger(&mut self) -> Option<crate::sensor::RangeFinderFrame> {
         self.plant.read_ranger()
+    }
+
+    /// 调试：机体前向 / 右向 NED 单位向量（P3-B2 诊断用）。
+    pub fn debug_fwd_ned(&self) -> [f64; 3] {
+        self.plant.forward_dir_ned()
+    }
+
+    /// 调试：机体右向 NED 单位向量（P3-B2 诊断用）。
+    pub fn debug_right_ned(&self) -> [f64; 3] {
+        self.plant.right_dir_ned()
+    }
+
+    /// 调试：P3-B2 避障位置偏移泄漏积分（NED 水平，m）。
+    pub fn debug_av_evade(&self) -> [f32; 2] {
+        self.av_evade_int
     }
 
     /// 阶段 8：动力系统状态（电池端电压 V，4 路电机转速 rad/s）。
