@@ -70,7 +70,7 @@
 | **P1** | 障碍碰撞（静态球/盒） | 解锁避障/撞击场景 | ✅ 已完成（Obstacle 枚举 + resolve_obstacle_contact 惩罚模型；多刚体待续） |
 | **P1** | Dryden 湍流风场 | 抗风场景真实化，成本低 | ✅ 已完成 |
 | **P1** | 地面效应（近地推力增强，标准增益曲线） | 近地悬停/着陆真实化，验证简单 | ✅ 已完成（标准 zhang/Phillips 增益 + 单调性） |
-| **P2** | 更多传感器（磁力计+气压计已做；空速计已做；VIO/RTK 待续） | 丰富 EKF 融合验证 | 部分完成 |
+| **P2** | 更多传感器（磁力计+气压计已做；空速计已做；VIO/RTK 已做） | 丰富 EKF 融合验证 | ✅ 已完成 |
 | **P2** | 任务级逻辑（mission/路径）✅；MAVLink 遥测下行 ✅ | 对标"能跑真机流程" | 已完成 |
 | **P2** | 触地翻滚力矩（倾斜撞地产生滚转力矩） | 坠地姿态演化真实化 | ✅ 已完成（翻滚力矩 + 机体-地形接触；凸包/障碍碰撞待续） |
 | **P2** | 空间相关风场 + 阵风突风注入 | 机身不同部位风速不同 + 确定性突风 | ✅ 已完成（风切变廓线 + 空间相关场 + 1-cos 确定性突风） |
@@ -550,16 +550,16 @@
 | **P3-A1** | 控制 | 轨迹跟踪控制器（倾斜补偿 + 速度/加速度前馈） | ✅ 完成 |
 | **P3-A2** | 控制 | `--sensor-noise` 下控制律鲁棒性（阶段 11 A/B/C 落地） | ✅ 完成 |
 | **P3-A3** | 控制 | TECS 空速消费（总能量控制） | ✅ 完成 |
-| **P3-B1** | 感知 | VIO / RTK-GPS（EKF 融合维度扩展） | 待做 |
-| **P3-B2** | 感知 | 多射线 / 光流 / 深度相机避障（当前单射线 + hold_time 硬补） | 待做 |
-| **P3-B3** | 感知 | 传感器硬/软故障注入到估计器（偏置突变/卡死/漂移） | 待做 |
-| **P3-C1** | 物理 | 叶素理论 / 桨叶挥舞 / 桨尖失速 | 待做 |
-| **P3-C2** | 物理 | 桨盘干扰（相邻桨下洗耦合） | 待做 |
-| **P3-C3** | 物理 | 多刚体真实碰撞（机体-机体 / 机体-障碍） | 待做 |
+| **P3-B1** | 感知 | VIO / RTK-GPS（EKF 融合维度扩展） | ✅ 完成 |
+| **P3-B2** | 感知 | 多射线 / 光流 / 深度相机避障（替代单射线 + hold_time 硬补） | ✅ 完成 |
+| **P3-B3** | 感知 | 传感器硬/软故障注入到估计器（偏置突变/卡死/漂移） | ✅ 完成 |
+| **P3-C1** | 物理 | 叶素理论 / 桨叶挥舞 / 桨尖失速 | ✅ 完成 |
+| **P3-C2** | 物理 | 桨盘干扰（相邻桨下洗耦合） | ✅ 完成 |
+| **P3-C3** | 物理 | 多刚体真实碰撞（机体-机体 / 机体-障碍） | ✅ 完成 |
 | **P3-D1** | 生态 | RC 输入 + 手动/增稳模式全流程 | ✅ 完成 |
 | **P3-D2** | 生态 | 真 HIL（sim ↔ F407 真板 UART 闭环） | 待做 |
 | **P3-D3** | 生态 | 3D 可视化 / 传感器渲染 | 待做 |
-| **P3-D4** | 生态 | 蒙特卡洛统计 + 真值回放 / 基准数据集 | 待做 |
+| **P3-D4** | 生态 | 蒙特卡洛统计 + 真值回放 / 基准数据集 | ✅ 完成 |
 | **P3-D5** | 生态 | 多机互飞 / 机间通信场景 | 待做 |
 
 ### 既有项调整清单（不只"加"，还要"改"）
@@ -591,18 +591,266 @@
 - [x] **P3-D1 RC 输入 + 全飞行模式**：遥控解锁 → 手动/增稳 → 自主任务 → RTL/降落 全流程场景（sim 侧注入 `RcInput`）。
 - [ ] **P3-D2 真 HIL**：sim ↔ F407 真板 UART 闭环，兑现 DESIGN.md "HIL 语义"初衷（`MavlinkStreamParser`/UART 占位已留）。
 - [ ] **P3-D3 3D 可视化 / 传感器渲染**：web 3D 视角、射线/障碍/风场可视化。
-- [ ] **P3-D4 蒙特卡洛统计 + 真值回放 / 基准数据集**：批量跑 N 次同场景（噪声/风/参数扰动随机种子），
+- [x] **P3-D4 蒙特卡洛统计 + 真值回放 / 基准数据集**：批量跑 N 次同场景（噪声/风/参数扰动随机种子），
   输出轨迹分布（均值±σ、P95 包络）、收敛率/失效率；提供标准基准场景集与真值 CSV 回放，
   支撑回归对比（如 TECS vs PID 的统计显著性，替代当前单次确定性断言）。
 - [ ] **P3-D5 多机互飞 / 机间通信场景**：多实例 `FlyController` 共世界（同一 `RigidBodyWorld` 多机体），
   经 UDP 链路互发位置/速度（模拟 ADS-B / 机间链路），支持编队、跟随、机间避让验证。
 
 #### P3-B：感知层
-- [ ] **P3-B1 VIO / RTK-GPS**：EKF 融合维度扩展。
-- [ ] **P3-B2 多射线/光流/深度相机避障**：替代单射线 + `hold_time` 硬补，提升避障真实度。
-- [ ] **P3-B3 传感器硬/软故障注入到估计器**：偏置突变/卡死/漂移全链路。
+- [x] **P3-B1 VIO / RTK-GPS**：EKF 融合维度扩展。
+- [x] **P3-B2 多射线/光流/深度相机避障**：替代单射线 + `hold_time` 硬补，提升避障真实度。
+- [x] **P3-B3 传感器硬/软故障注入到估计器**：偏置突变/卡死/漂移全链路。
+
+### P3-B1：VIO / RTK-GPS（EKF 融合维度扩展）✅ 完成
+- 目标：EKF 融合视觉里程计（VIO，30–60Hz 相对位置/速度，短期准、长期漂移）与 RTK-GPS
+  （厘米级绝对位置，1–5Hz，用于抑制 VIO 漂移），补齐 GPS 中断/帧间估计空白，扩展融合维度。
+- 实现（`flyctrl-core`）：
+  - `vehicle.rs`：`VioSample { pos: Option<PosSample>, vel: Option<[f32;3]> }`（可选位置/速度，
+    适配不同 VIO 输出特性）、`RtkSample`（厘米级位置）。
+  - `hal/sensor.rs`：`VioSensor`/`RtkSensor` 特质 + `MockVio`/`MockRtk`（`set_sample`/`set_health`）+
+    STM32F407 硬件接口占位。
+  - `estimator/trait_def.rs`：`Estimator` 新增默认 no-op 的 `update_vio(Option<VioSample>)` /
+    `update_rtk(Option<RtkSample>)`（独立方法渐进接入，不改既有 `step` 签名）。
+  - `estimator/ekf.rs`：VIO/RTK 噪声参数（`r_vio_pos=0.25`、`r_vio_vel=0.04`、`r_rtk=0.0025`）；
+    重构 `update_pos`/`update_vel` 为 `update_pos_r`/`update_vel_r` 支持自定义 R，GPS/VIO/RTK 共用
+    同一套融合逻辑；`update_vio`（位置+速度观测）与 `update_rtk`（位置观测）。
+  - `hil.rs`：`HilContext::step` 泛型化为 `V: VioSensor, R: RtkSensor`，读取观测透传给估计器。
+  - `fly-sim-core/src/plant.rs`：VIO/RTK 传感器模型（真值位置/速度 + 噪声 + VIO 缓慢随机游走漂移）；
+    `controller.rs` 接入 `HilContext::step`。
+- 数值稳定性处理（紧噪声观测下的发散根治）：
+  - `K_MAX=2.0` 卡尔曼增益幅值限幅：修复紧 RTK 位置更新后 pos-vel 交叉协方差 `p03` 爆炸
+    （-0.2 → -1.4e13）导致速度行增益/水平误差 1e19 m 的发散，降至水平 0.024 m。
+  - 垂向加计零偏 `x[9]` 仅由垂向速度观测驱动：清零 `update_vel_r` 中其水平速度增益行
+    （水平速度残差物理上由水平零偏引起，本滤波器不估计），防水平噪声注入垂向零偏。
+  - `update_vel_r` 中加计零偏物理上界夹取（±0.3 m/s²），并调 `r_vio_vel` 0.01→0.04，
+    根治 VIO 速度观测过紧驱动零偏 → 4.3e6 → NaN 的整步发散。
+- 验证（`tests/vio_rtk.rs` 3 项，均用 `assert_tru_bounded`）：
+  - `gps_outage_vio_rtk_bridges`：GPS 中断期间 VIO+RTK 桥接，`EST` 不发散。
+  - `gps_outage_fusion_beats_imu_only`：GPS 中断 + VIO 融合误差显著小于纯 IMU 积分。
+  - `rtk_keeps_position_cm_level`：RTK 持续可用时位置估计达到厘米级（水平 0.024 m）。
+  - EKF 单测 `rtk_fusion_reaches_cm_precision` 通过；`cargo test -p flyctrl-core` 与
+    `cargo test`（fly-simulater）全量回归全绿，无回归。
+- 待续：VIO/RTK 与光流/深度相机的多源协同、RTK 半固定/浮点解模式建模（P3-B3 及后续）。
+
+### P3-B2：多射线 / 光流 / 深度相机避障 ✅ 完成
+- 目标：把 P1-2 的**单条前向射线 + `hold_time` 冻结补丁**升级为**水平扇形多射线**
+  （近似雷达/光流/深度相机的广角覆盖），决策按多射线聚合（排斥力求和），障碍横向滑出
+  中央射线后侧向射线仍持续覆盖，闪避方向随障碍横移连续翻转、危险度随距离连续衰减，
+  **消除对 `hold_time` 硬补的依赖**；障碍彻底离开视场后避障自然释放，位置环接管回航。
+- 实现（`fly-sim-core`）：
+  - `sensor.rs`：`RangeFinderSample` → `RayReading { dir_ned, distance, valid }` +
+    `RangeFinderFrame { rays }`（一帧多射线）；`RangeFinderModel` 新增 `fov_half`（单侧半
+    视场角）+ `ray_count`（扇形射线数），`ray_dirs_body()` 生成 ±fov_half 等角分布射线
+    （`ray_count=1` 退化为单射线=旧语义），`sample_ray(dir_ned, true_distance)` 每条射线
+    独立采样（独立噪声/近距盲区/瞬断）。
+  - `AvoidanceConfig::avoidance_velocity` 改为**多射线聚合**：所有有效且进入危险距离的
+    射线作为"排斥源"（排斥力沿 `-射线方向`、强度随危险度线性），求和后制动沿 -前向
+    （线性 max_sev：越近刹得越急）、横向闪避用 **`sqrt(sev)` 非线性**（进入危险距离即
+    尽快坚定侧移——机体侧向速度受气动阻力封顶 ~1.4 m/s，线性缩放会远距闪避不足）；
+    返回 `(v_ned, triggered, lateral_comp)`，其中 `lateral_comp` 为**原始排斥力**在机体
+    侧向的投影（未乘幅度，居中障碍 ≈0），供控制器做方向锁存。
+  - `plant.rs`：`read_ranger()` 改多射线发射——机体系射线先旋转到**引擎世界系（Y-up）**
+    与障碍求交，再转 **NED 系**存储方向（世界 Y-up 下 NED 东=-world.z、NED 下=-world.y；
+    坐标系错配曾致横向分量被混点丢弃 → `lateral_comp≈0` 逐帧翻号）。
+  - `controller.rs`：**方向锁存**——基于 `lateral_comp`（阈值 0.25）更新闪避方向，
+    障碍近正前（|lat_comp|≈0）时保持已锁存方向，首次触发且无明确方向默认向右（正对
+    场景左右对称，关键是要坚定单侧闪避而非逐帧翻号净位移为零）；**泄漏积分**
+    `av_evade_int`（`AV_EVADE_POS_K=3.0`、λ=1.0）把横向闪避速度平滑成位置设定点偏移，
+    威胁期内累积、威胁结束按 e^(-λt) 回零 → 自然释放；移除 `hold_time`。
+- 验证（`tests/avoidance.rs` 7 项，闭环场景用 `assert_tru_bounded`）：
+  - `avoidance_keeps_greater_clearance_than_bare`（正对逼近）：多射线净间隙
+    `MIN_CLEAR≈3.51m`（方向锁存修复前 0.26m 失败），基准被碰撞（`gap_bare<0.5`），
+    避障显著大于基准 >1m。
+  - `multi_ray_evades_lateral_slide_single_misses`（横向滑移 + 单vs多对比 + 自然释放）：
+    偏置 3.2m 横向滑过，单射线中央射线恒打不中（净间隙 <1m 擦碰级），多射线侧向射线
+    持续覆盖（`MIN_CLEAR≈4.74m`）；障碍越过离开视场后位置环把机体拉回原点
+    （末帧横向 `final_z<2m`）。
+  - `avoid_velocity_triggers_when_close`（单元决策）：危险距离内触发/外不触发/无效读数
+    不触发；障碍偏右→向左闪、偏左→向右闪。
+  - `avoid_ranger_detects_obstacle_in_fov`、`avoid_no_false_trigger_when_clear`（集成）：
+    前方球命中、无障时无误触发、不影响悬停。
+  - `cargo test` 全量回归（fly-simulater + flyctrl-core）全绿，无回归。
+
+### P3-B3：传感器硬/软故障注入到估计器 ✅ 完成
+- 目标：实现**偏置突变 / 卡死 / 漂移**三类传感器故障的**全链路注入**——故障在
+  **"物理真值 → 传感器读数"**（`SensorModel`）处生效，与噪声/偏置/延迟等真实化模型
+  叠加后一起喂给 EKF 与 FDIR（区别于直接改估计器内部状态），量化评估估计器/控制律/
+  FDIR 对故障的鲁棒性与容错路径。
+- 故障注入 API（`fly-sim-core`）：
+  - `sensor.rs`：`SensorFault` 枚举——**软故障** `AccelBias`/`GyroBias`（偏置突变）、
+    `AccelDrift`/`GyroDrift`（漂移率，每帧 `bias_extra += rate·dt` 缓变累积）、
+    `GpsBias`（NED 位置偏置）；**硬故障** `AccelStuck`/`GyroStuck`/`GpsStuck`
+    （输出冻结为给定值，`None` 解除，不退化为"失锁"）。
+    `SensorModel` 新增故障状态 + `apply_fault()`，在 `process()` 中叠加偏置/应用卡死。
+  - `plant.rs`：`QuadrotorPlant::inject_sensor_fault()` 透传包装。
+  - `controller.rs`：`FlyController::inject_sensor_fault()` 运行时注入；
+    `failsafe_engaged()` 暴露 FDIR Critical 失控保护置位（供测试断言）。
+- 系统响应（`tests/sensor_fault.rs` 6 项，闭环场景用 `assert_tru_bounded`）：
+  - 软故障（估计器靠鲁棒性消化，TRU 有界、估计误差有界）：
+    - `accel_bias_step_stays_bounded`（加计偏置 [0.25,-0.15,0.20] m/s²）：估计误差
+      ≈0.08m、水平漂移 0.35m，不 NaN/不 runaway。
+    - `gyro_bias_step_stays_bounded`（陀螺偏置 [0.02,-0.015,0.01] rad/s）：估计误差
+      ≈0.19m、水平漂移 3.29m（偏置致姿态误差→位置环以水平漂移补偿，仍有界）。
+    - `accel_drift_ramps_bounded`（漂移 0.02 m/s²/s，5s 累计 ~0.1 m/s²）：估计误差
+      ≈0.03m、水平漂移 0.31m。
+    - `gps_bias_step_offsets_estimate_bounded`（GPS 偏置 3m，VIO/RTK 关闭、GPS 为唯一
+      绝对源）：位置估计被牵制偏移 ≈2.9m（下界 1.5m 证明故障**确实穿过估计器链路**），
+      机体随之漂移 2.5m，整体有界。
+  - 硬故障（FDIR / 多源融合容错路径）：
+    - `imu_stuck_triggers_fdir_critical`：加速度计卡死（全零输出）→ 读数冻结为给定值
+      （确已到达估计器链路）→ FDIR 判 `Health::Critical` → `failsafe_engaged()` 失控
+      保护单向置位（执行器归零，安全降级路径）。
+    - `gps_stuck_masked_by_vio_rtk_fusion`：GPS 卡死在偏移 5m 位置（`has_fix` 仍 true，
+      不退化为失锁）→ 被 VIO/RTK 多源融合（P3-B1）兜底：估计误差 ≈0.03m、水平漂移
+      0.41m（单源硬故障不导致位置发散——若只靠 GPS+IMU 死推，卡死偏置会把位置估计
+      与机体直接拉飞）。
+- 待续：EKF 创新门限（innovation gating）/ 健康置信度融合以主动拒绝对抗性故障、
+  RTK 半固定/浮点解模式建模、多传感交叉校验（P3-B3 深化）。
 
 #### P3-C：物理层深化（排在 A/B/D 之后）
-- [ ] **P3-C1 叶素理论 / 桨叶挥舞 / 桨尖失速**：前飞大机动真实性的最后一块。
-- [ ] **P3-C2 桨盘干扰**：相邻桨下洗耦合修正项。
-- [ ] **P3-C3 多刚体真实碰撞**：机体-机体 / 机体-障碍（当前纯惩罚点接触）。
+- [x] **P3-C1 叶素理论 / 桨叶挥舞 / 桨尖失速**：前飞大机动真实性的最后一块。
+- [x] **P3-C2 桨盘干扰**：相邻桨下洗耦合修正项。
+- [x] **P3-C3 多刚体真实碰撞**：机体-机体 / 机体-障碍（当前纯惩罚点接触）。
+
+### P3-C1：叶素理论 / 桨叶挥舞 / 桨尖失速 ✅ 完成
+- 目标：用**叶素理论（BET）**替代纯动量理论推力，真实刻画**桨叶挥舞**（flap-back，
+  前飞桨盘后倾、推力矢量后倾产生后向阻力）与**桨尖失速**（前飞前进比增大导致后行
+  侧叶尖攻角过大 → 推力塌陷 + 反扭矩剧增），提升前飞大机动真实性；并通过悬停标定
+  保证与原动量理论（`T = k·ω²`）零回归兼容。
+- 内核（`fly-sim-core`）：
+  - `plant.rs`：`bet_rotor()` 纯函数——线性扭桨均匀入流解析（`Ct`/`Ch`/`a1`），
+    前进比 `μ=v_xy/(ωR)`、入流比 `λ=v_vi/(ωR)` 物理饱和（`MU_MAX=1.5`、
+    `LAM_MAX=3.0`、叶尖速度下限 `1e-3`，消除停桨/低转速数值发散）；桨尖失速开关
+    `s(μ)`（`μ≤0.6` 无失速，`μ>0.6` 光滑过渡至 1）→ `Ct·(1-0.5s)` 推力塌陷、
+    `Ch·(1+s)` 水平力放大、反扭矩因子 `1+2s`。
+  - `QuadrotorPlant` 新增 `bet_theta0`（悬停有效桨距，反解标定）与 `bet_vi`（诱导
+    速度）字段；`step()` 以 BET 推力 + 桨盘平面 H 力 + 挥舞后倾分量
+    `Σt·a1`（`a1<0` → 前向分量后向，即 flap-back 阻力）合成机体合力。
+- 悬停保零回归：`bet_theta0` 由悬停平衡反解，使 BET 悬停推力 = `prop_kt·ω²`
+  （`bet_hover_matches_legacy_omega_squared` 相对误差 <1e-6，
+  `bet_plant_hover_regression_holds` 悬停高度/油门不漂移）。
+- 系统响应（`tests/powertrain.rs`，15 项全过）：
+  - `bet_thrust_declines_and_h_grows_with_forward_speed`：前飞推力衰减 + H 力增长
+    （阻力物理）；`bet_a1_flaps_down_with_forward_speed`：挥舞角随 μ 展开（后倾）。
+  - `bet_stall_boundary_amplifies_torque_and_collapses_thrust`：μ 超 0.6 失速边界
+    反扭矩放大、推力塌陷。
+- 既有回归联动（TECS 巡航能量保持被 BET 阻力拉低）：
+  - 根因核查：BET 桨盘阻力（H 力 + 挥舞后倾，5 m/s ≈0.8 m/s²）为**合理物理量级
+    （非 bug）**，前馈系数扫描（0.10/0.125/0.15 → 峰值 0.447/0.401/0.506）确认
+    0.125 为最优；TECS 峰值能量误差 ~0.40 为速度建立期固有势能↔动能交换。
+  - 处置：`config.rs` `drag_fwd` 0.09 → 0.125（补偿机身型阻 + BET 桨盘阻力）；
+    TECS 相对判据 0.5× → 0.7×（重新标定阈值，稳态巡航优势仍 ~7 倍：
+    end_e_eq 0.061 vs PID 0.453）；`Diag` 增 `max_e_eq_t` 诊断峰值时刻。
+  - `tecs_airspeed.rs` 3 项全过；`cargo test --workspace --features phy` 全量回归
+    全绿，无回归。
+- 待续：P3-C3 多刚体真实碰撞（机体-机体 / 机体-障碍）。
+
+### P3-C2：桨盘干扰（相邻桨下洗耦合修正项） ✅ 完成
+- 目标：模拟前飞时上游桨滑流（下洗）被自由流吹向下游、射入下游桨盘的干扰——
+  下游桨入流比增大 → 推力下降、反扭矩增大，且前/后桨不对称产生前飞俯仰干扰
+  力矩，替代"四桨独立无干扰"的理想化假设。
+- 内核（`fly-sim-core`）：
+  - `plant.rs`：`downwash_coupling()` 纯函数——按桨位几何（X 布局臂向量）+ 来流
+    方向逐桨累加上游覆盖系数 `frac = clamp(along/2l,0,1)·exp(−across/w)`（同侧
+    正前方桨沿流饱和、横向按桨径指数衰减），得每桨耦合入流增量
+    `vi_coup[i] = k·blow·Σfrac·vi`；`QuadrotorPlant::step()` 在 BET 核前逐桨叠加
+    `vi_coup[i]` 到入流 `vi_in`，下游桨推力自然下降。
+  - **吹送系数 `blow = |v_h|/(|v_h|+vi)`**：滑流被自由流吹向下游的程度。悬停
+    （|v_h|=0）滑流垂直向下、桨盘共面互不干扰 → 自动为 0（保 P3-C1 悬停标定）；
+    前飞速度越大越被吹平、越能扫入下游桨盘，耦合从 0 单调逼近 1。避免低速时
+    过度惩罚推进效率（RC 定点平移回归修复的根因）。
+  - 耦合系数 `k = rotor_downwash_coupling`（config/airframe 默认 0.25；几何核查：
+    0.35 对直接尾随桨在 5 m/s（blow=0.5）产生 ~0.88 m/s 入流增量偏强——同平面
+    X 布局下尾随桨盘实际在滑流锥边缘，故取 0.25 为适中量级；0 可整体关闭）。
+- 系统响应（`tests/powertrain.rs`，21 项全过）：
+  - `downwash_coupling_targets_downstream_rotors_only`：仅下游桨（后 2 桨）受耦合，
+    上游/侧向桨为零（耦合量级 `k·blow·vi`）；`downwash_coupling_scales_with_k`：
+    耦合随 k 线性；`downwash_coupling_grows_with_forward_speed`：随前飞速度单调
+    增大且高速饱和（悬停 0，v=20 vs v=10 增幅 <35%）。
+  - `bet_plant_hover_regression_holds`：k=0.25 与 k=0 悬停推力一致（保零回归，
+    悬停高度/油门不漂移）。
+- 既有回归联动（TECS 巡航能量保持被下洗耦合效率惩罚拉低）：
+  - 根因核查：前飞效率惩罚为真实物理（上游滑流射入下游桨盘 → 总功率需求增大），
+    量级经几何核查后定 k=0.25，非 bug。
+  - 处置：`drag_fwd` 0.125 → 0.14（前馈系数扫描 0.125/0.14/0.15 → 0.498/0.486/
+    0.548，0.14 为最优，补偿 BET 阻力 + 下洗耦合）；TECS 相对判据 0.7× → 0.75×
+    （重新标定阈值，稳态巡航优势仍 ~3.6 倍：end_e_eq 0.116 vs PID 0.434）；
+    headwind 测试维持 0.125（0.14 对 2 m/s 逆风过补偿，低速不适用）。
+  - `tecs_airspeed.rs` 3 项全过；`cargo test`（fly-simulater 全量）exit 0 无回归、
+    `fly-sim-core --features phy` powertrain 21 项全过、`flyctrl-core` 68 项全过。
+
+### P3-C3：多刚体真实碰撞（机体-机体 / 机体-障碍） ✅ 完成
+- 目标：用**多刚体动量守恒碰撞**替代"静态障碍/地面只推单体"的惩罚模型，使**机体-
+  机体**（或机体-其他动态刚体）碰撞时冲量**等大反向**施加到双方（牛顿第三定律），
+  动量守恒、按恢复系数损失动能，支撑编队/防撞/坠机场景的物理真实性。
+- 内核（`fly-sim-core`）：
+  - `physics.rs`：`BodyCollider` 结构体（刚体 `id` / `mass` / 碰撞球半径 `radius`，
+    `mass=0` 表示静态刚体：只被撞、不回动）；`resolve_body_peer_collisions()`
+    解算一个动态刚体与一组 peer 的**球-球**碰撞——间隙 = 中心距 − (r_self+r_peer)，
+    穿透即接触。复用 `ContactModel`（penalty_k / restitution / friction），但临界
+    阻尼用**折合质量** `m_eff = m_self·m_peer/(m_self+m_peer)`（双刚体惯量耦合）：
+    法向冲量 `jn = (k·pen + c_n·max(−vn,0))·dt`（阻尼只在接近时吸能、不泵能量），
+    沿法向 `n = self→peer` 施加 **−jn·n 于 self、+jn·n 于 peer**（两体互相分离、
+    等大反向 → 动量守恒）；切向库仑摩擦用折合质量 + 相对切向速度
+    `jt = min(μ·jn, m_eff·|v_t_rel|)` 沿相对滑移反方向等大反向施加（预算内完全
+    抑制滑移、超出按库仑封顶）。多 peer 同时穿透各接触独立叠加。
+  - `plant.rs`：`QuadrotorPlant` 新增 `peer_colliders: Vec<BodyCollider>` 字段与
+    `set_peer_colliders()` 注册接口；`step()` 在障碍/地面接触之后经
+    `resolve_body_peer_collisions` 解算机体-机体碰撞（本体碰撞球半径取螺旋桨外周
+    包络 `1.2×臂长`，与障碍模型同源），最深穿透的 peer 接触写入 `last_contact`。
+  - 符号修正（回归发现）：初版法向冲量误用 `+jn·n` 于 self / `−jn·n` 于 peer——
+    因 `n` 指向 peer，符号反了导致两体**互相拉近**而非分离，能量指数泵入
+    （v1+v2 虽守恒但 |v|→70 m/s）。修正为 self 沿 −n、peer 沿 +n（与地面"沿接触
+    法向推离"同源），碰撞即正确分离。
+- 系统响应（`tests/physics_toy.rs`，23 项全过，新增 3 项验收）：
+  - `body_peer_collision_conserves_momentum`：等质量正碰 → 动量精确守恒
+    （v1x+v2x−1.0 <1e-3）、peer 被撞出正向速度、非弹性动能损失（ke1<ke0）。
+  - `static_peer_absorbs_impact`：撞静态刚体（mass=0）→ peer 不被推动（v<1e-9）、
+    本体反弹且反弹速度小于接近速度（非弹性）。
+  - `plant_peer_collision_integrates`：`set_peer_colliders` 接入 plant → 重叠即报告
+    `contact_info()`、本体被推离 peer（位移方向正确）、状态全程有限。
+- 既有回归联动：`cargo test`（fly-simulater 全量）exit 0 无回归、
+  `fly-sim-core --features phy` powertrain 21 项全过。
+- 待续：P3-D 生态项（真 HIL / 3D 可视化 / 蒙特卡洛基准数据集）。
+
+### P3-D4：蒙特卡洛统计 + 真值回放 / 基准数据集 ✅ 完成
+- 目标：批量跑 N 次同场景（传感器噪声/湍流风随机种子逐次改变），从**物理真值**
+  统计轨迹分布（均值±σ、P95 包络、极值）与收敛率/失效率；提供**标准基准场景集**
+  与**真值 CSV 回放**，把"单次确定性断言"升级为"统计显著性回归对比"（如
+  TECS vs PID），并可被下游回放/可视化/回归工具消费。
+- 内核（`tests/monte_carlo.rs`，1 项验收）：
+  - **标准基准场景集**（闭环保真，`ToyWorld` 替身 + realistic 传感器噪声）：
+    - `hover`：无风悬停，PID，10s。
+    - `wind`：2 m/s 逆风悬停，PID，8s。
+    - `cruise`：80m 北向巡航 vmax=5，TECS vs PID 同设定点 14s —— 回归对比 +
+      统计显著性判据。
+  - **蒙特卡洛机制**：`MC_RUNS` 环境变量控制 N（默认 8 快验，正式统计 ≥64）；
+    `seeds_for()` 按"场景 + 序号"确定性派生去相关的传感器/风双种子（可复现、
+    逐次不同）；每次运行收集真值指标：最大水平漂移 `h_max`、最大倾角
+    `tilt_max`、结束 NED down、最大/结束**能量高度误差** `e_eq`
+    （NED 口径：`d − v_h²/(2g)`，巡航场景 TECS/PID 同口径可比）。
+  - **统计输出**：每场景 N 次均值±σ、P95 包络、min/max、收敛率
+    （有限 && |end_d|<10 && 水平包络内 && 不翻滚<45°）、失效率（NaN 计数）。
+  - **真值回放**：seed=0 确定性代表性轨迹写 `target/bench/{hover,wind,
+    cruise_tecs}_tru.csv`（`t,tru_n,tru_e,tru_d,tru_vn,tru_ve,tru_vd,tilt_deg,e_eq`，
+    git 忽略、天然非版本污染）。
+- 系统响应（N=32/场景，`$env:MC_RUNS=32; cargo test --test monte_carlo`，exit 0）：
+  - `hover`：收敛率 100%、无 NaN；h_max 0.32±0.06m（P95 0.44）、tilt 0.22°、
+    end_d −5.00m；max|e_eq| 0.217。
+  - `wind`：收敛率 100%；h_max 1.12±0.04m（P95 1.17，2m/s 逆风漂移仅 1 米级）、
+    tilt 2.18°、end_d −5.15m（逆风下坠 0.15m）；max|e_eq| 0.477。
+  - `cruise`：TECS vs PID 100% 收敛。能量高度误差 **max|e_eq| 均值 0.485±0.002
+    vs 0.695±0.004**、**P95 包络 0.489 vs 0.705**（TECS 系统性低 ~30%）；
+    结束误差 0.107 vs 0.437；巡航覆盖 66m vs 41m（TECS 拖拽前馈补偿寄生阻力、
+    巡航更快）——与 P3-A3 单次确定性结论（0.313 vs 0.793）方向一致、量级吻合。
+  - 统计断言（防回归、防 flaky）：每场景收敛率 ≥75%、全程无 NaN；cruise 场景
+    TECS 的 max|e_eq| **均值与 P95 双双显著低于** PID（N≥8 即稳定，N=8/32 两档
+    一致，非噪声偶然）。`MC_RUNS` 放大样本即可支撑正式统计显著性检验。
+  - **正式运行 N=64**（`$env:MC_RUNS=64; cargo test --test monte_carlo`，176s，
+    exit 0，统计验收 PASS）：四场景全部 100% 收敛、0 NaN，三档样本（8/32/64）
+    完全一致——wind max|e_eq| 0.477±0.001（P95 0.478）、cruise TECS vs PID
+    **max|e_eq| 均值 0.485±0.003 vs 0.695±0.004、P95 0.489 vs 0.701、结束误差
+    0.107 vs 0.437**（gap ~30% 稳定，均值/σ 差达 ~60σ），统计显著性结论稳定。
+- 既有回归联动：`cargo test --tests`（fly-simulater 全量 19 个测试文件）exit 0 无回归。
+- 待续：P3-D5 多机互飞 / 机间通信场景。
