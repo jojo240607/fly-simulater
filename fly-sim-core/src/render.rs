@@ -19,6 +19,38 @@ use phy_demo::{Camera, Framebuffer};
 use phy_math::na::{Matrix4, Vector4};
 use std::sync::OnceLock;
 
+/// P3-D3：可渲染障碍（渲染世界系 = 引擎世界系，Y-up：x=北、y=上、z=-东）。
+///
+/// 由调用方把 `physics::Obstacle`（含 `ConvexHull`）展平/转换为本轻量表示，
+/// 避免渲染模块依赖碰撞解算模块。
+#[derive(Clone, Debug)]
+pub enum RenderObstacle {
+    /// 球：中心 + 半径（m）。
+    Sphere { center: [f64; 3], radius: f64 },
+    /// 轴对齐盒：最小角 + 最大角（m）。
+    Box { min: [f64; 3], max: [f64; 3] },
+}
+
+/// P3-D3：一条测距射线（渲染世界系，方向为单位向量，从机体中心发出）。
+#[derive(Clone, Debug)]
+pub struct RenderRay {
+    /// 渲染世界系单位方向。
+    pub dir: [f64; 3],
+    /// 读数距离（m）。`valid=false` 时通常为量程饱和值（用于画满量程的暗淡射线）。
+    pub distance: f64,
+    /// 读数是否有效。
+    pub valid: bool,
+}
+
+/// P3-D3：一个风场采样箭头（渲染世界系，位置 + 风速矢量）。
+#[derive(Clone, Debug)]
+pub struct RenderWind {
+    /// 采样点（渲染世界系坐标，m）。
+    pub pos: [f64; 3],
+    /// 该点风速矢量（m/s，渲染世界系）。
+    pub vec: [f64; 3],
+}
+
 /// 一帧渲染所需的全部输入（渲染世界 = 物理引擎世界系，右手 Y-up，上=+Y）。
 ///
 /// 注意：**渲染直接使用引擎位姿，不做任何坐标/四元数变换**。调用方应直接填
@@ -48,6 +80,12 @@ pub struct RenderInput {
     pub cam_distance: f32,
     /// 闪烁相位（完全停转电机高亮用）。
     pub blink: f64,
+    /// P3-D3：障碍物列表（渲染世界系坐标）。空则不画。
+    pub obstacles: Vec<RenderObstacle>,
+    /// P3-D3：测距射线列表（渲染世界系，从机体中心发出）。空则不画。
+    pub rays: Vec<RenderRay>,
+    /// P3-D3：风场采样箭头（渲染世界系，位置 + 风速矢量）。空则不画。
+    pub wind: Vec<RenderWind>,
 }
 
 impl Default for RenderInput {
@@ -65,6 +103,9 @@ impl Default for RenderInput {
             cam_pitch: 0.45,
             cam_distance: 28.0,
             blink: 0.0,
+            obstacles: Vec::new(),
+            rays: Vec::new(),
+            wind: Vec::new(),
         }
     }
 }
@@ -618,6 +659,141 @@ fn draw_compass(fb: &mut Framebuffer, _vp: &Matrix4<f32>, _w: u32, h: u32) {
     }
 }
 
+// ================= P3-D3：障碍 / 射线 / 风场可视化 =================
+
+/// 画一个世界系线段（模型空间两点，恒等模型矩阵）。
+fn draw_world_seg(
+    fb: &mut Framebuffer,
+    vp: &Matrix4<f32>,
+    a: [f64; 3],
+    b: [f64; 3],
+    col: [u8; 3],
+) {
+    let model = Matrix4::<f32>::identity();
+    draw_line_world(fb, vp, &model, [a[0] as f32, a[1] as f32, a[2] as f32], [b[0] as f32, b[1] as f32, b[2] as f32], col);
+}
+
+/// 画一个世界系线框圆（`plane`：0=YZ 面、1=XZ 面、2=XY 面），`center`/`radius` 单位 m。
+fn draw_world_circle(
+    fb: &mut Framebuffer,
+    vp: &Matrix4<f32>,
+    center: [f64; 3],
+    radius: f64,
+    plane: usize,
+    col: [u8; 3],
+) {
+    let segs = 24;
+    let mut prev: Option<[f64; 3]> = None;
+    for i in 0..=segs {
+        let ang = (i as f64 / segs as f64) * std::f64::consts::TAU;
+        let mut p = center;
+        let (u, v) = match plane {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        p[u] += radius * ang.cos();
+        p[v] += radius * ang.sin();
+        if let Some(pp) = prev {
+            draw_world_seg(fb, vp, pp, p, col);
+        }
+        prev = Some(p);
+    }
+}
+
+/// 画所有障碍：球=三向线框圈（视觉近似线框球），盒=12 条棱边。
+fn draw_obstacles(fb: &mut Framebuffer, vp: &Matrix4<f32>, obs: &[RenderObstacle]) {
+    let col = [230, 160, 70]; // 暖橙警示色
+    let edge = [200, 130, 55];
+    for o in obs {
+        match o {
+            RenderObstacle::Sphere { center, radius } => {
+                let r = *radius;
+                draw_world_circle(fb, vp, *center, r, 2, col); // XY 面
+                draw_world_circle(fb, vp, *center, r, 0, col); // YZ 面
+                draw_world_circle(fb, vp, *center, r, 1, col); // XZ 面
+            }
+            RenderObstacle::Box { min, max } => {
+                let (x0, y0, z0) = (min[0], min[1], min[2]);
+                let (x1, y1, z1) = (max[0], max[1], max[2]);
+                let c = [
+                    [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+                    [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+                ];
+                // 12 条棱：底 4、顶 4、竖 4
+                for (i, j) in [
+                    (0, 1), (1, 2), (2, 3), (3, 0),
+                    (4, 5), (5, 6), (6, 7), (7, 4),
+                    (0, 4), (1, 5), (2, 6), (3, 7),
+                ] {
+                    draw_world_seg(fb, vp, c[i], c[j], if i < 4 { col } else { edge });
+                }
+            }
+        }
+    }
+}
+
+/// 画测距射线：有效=亮青线 + 命中端点圆点；无效（失效/量程饱和）=暗淡灰线。
+/// 射线起点统一取机体中心（`origin`，渲染世界系）。
+fn draw_rays(
+    fb: &mut Framebuffer,
+    vp: &Matrix4<f32>,
+    origin: [f64; 3],
+    rays: &[RenderRay],
+) {
+    let on = [80, 230, 160];   // 有效：亮青绿
+    let off = [95, 100, 110];  // 无效：暗淡灰
+    for r in rays {
+        let (col, hit) = if r.valid { (on, true) } else { (off, false) };
+        let end = [
+            origin[0] + r.dir[0] * r.distance,
+            origin[1] + r.dir[1] * r.distance,
+            origin[2] + r.dir[2] * r.distance,
+        ];
+        draw_world_seg(fb, vp, origin, end, col);
+        if hit {
+            // 命中端点小圆点
+            if let Some(p) = project(
+                [end[0] as f32, end[1] as f32, end[2] as f32],
+                vp,
+                &Matrix4::<f32>::identity(),
+                fb.width,
+                fb.height,
+            ) {
+                fb.fill_circle(p.0, p.1, 2, p.2, on);
+            }
+        }
+    }
+}
+
+/// 画风场箭头：从 `pos` 到 `pos+vec` 画浅蓝线 + 三角箭头。
+fn draw_wind_vectors(fb: &mut Framebuffer, vp: &Matrix4<f32>, wind: &[RenderWind]) {
+    let col = [110, 185, 255];
+    for w in wind {
+        let a = w.pos;
+        let b = [a[0] + w.vec[0], a[1] + w.vec[1], a[2] + w.vec[2]];
+        let len = (w.vec[0].hypot(w.vec[1]).hypot(w.vec[2])).max(1e-6);
+        let d = [
+            w.vec[0] / len, w.vec[1] / len, w.vec[2] / len,
+        ];
+        draw_world_seg(fb, vp, a, b, col);
+        // 箭头：尾端两侧短翼
+        let back = 0.35f64 * len.min(2.0);
+        let wing = 0.22f64 * len.min(2.0);
+        let base = [b[0] - d[0] * back, b[1] - d[1] * back, b[2] - d[2] * back];
+        let up = [0.0f64, 1.0, 0.0];
+        let n = [
+            d[1] * up[2] - d[2] * up[1],
+            d[2] * up[0] - d[0] * up[2],
+            d[0] * up[1] - d[1] * up[0],
+        ];
+        let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+        let n = [n[0] / nl, n[1] / nl, n[2] / nl];
+        draw_world_seg(fb, vp, b, [base[0] + n[0] * wing, base[1] + n[1] * wing, base[2] + n[2] * wing], col);
+        draw_world_seg(fb, vp, b, [base[0] - n[0] * wing, base[1] - n[1] * wing, base[2] - n[2] * wing], col);
+    }
+}
+
 /// 渲染一帧：返回 `width*height` 个 `0xAARRGGBB` 像素（`Vec<u32>`）。
 /// 像素内存布局为小端 B,G,R,A，可直接作为 canvas `ImageData` 的字节源。
 pub fn render_frame(width: u32, height: u32, inp: &RenderInput) -> Vec<u32> {
@@ -634,7 +810,10 @@ pub fn render_frame(width: u32, height: u32, inp: &RenderInput) -> Vec<u32> {
 
     draw_ground(&mut fb, &vp);
     draw_ground_marker(&mut fb, &vp, width, height);
+    draw_obstacles(&mut fb, &vp, &inp.obstacles);
+    draw_wind_vectors(&mut fb, &vp, &inp.wind);
     draw_trail(&mut fb, &vp, &inp.trail, width, height);
+    draw_rays(&mut fb, &vp, inp.pos, &inp.rays);
     draw_quad(&mut fb, &vp, inp, aspect);
     draw_compass(&mut fb, &vp, width, height);
 

@@ -13,7 +13,7 @@ use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
 
 use crate::controller::{hover_setpoint, FlyController};
 use crate::mavlink::MavlinkBridge;
-use crate::physics::{ContactModel, Obstacle, RigidBodyWorld};
+use crate::physics::{ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld};
 use flyctrl_core::config::VehicleConfig;
 use crate::wind::{WindConfig, WindField};
 use crate::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig};
@@ -454,6 +454,16 @@ where
         self.ctrl.set_motor_eff(eff);
     }
 
+    /// P1-2 联动：装备"测距传感器 + 避障控制器"闭环（扇形式避障场景用）。
+    pub fn configure_avoidance(&mut self, ranger: RangeFinderModel, avoidance: AvoidanceConfig) {
+        self.ctrl.configure_avoidance(ranger, avoidance);
+    }
+
+    /// P1-2 联动：注册动态障碍（匀速逼近，避障/碰撞可视化场景用）。
+    pub fn plant_set_dynamic_obstacles(&mut self, obs: Vec<DynamicObstacle>) {
+        self.ctrl.plant_set_dynamic_obstacles(obs);
+    }
+
     /// P1 扩展：覆盖接触模型（含地形高度图）。在 `run_*` 之前调用以切换到带地形的接触面。
     pub fn set_contact(&mut self, c: Option<ContactModel>) {
         self.ctrl.plant_set_contact(c);
@@ -482,6 +492,21 @@ where
     /// 供渲染直接使用（渲染世界系与引擎同为 Y-up，仅 z 轴反号）。
     pub fn debug_up(&self) -> ([f64; 3], [f64; 4]) {
         self.ctrl.debug_up()
+    }
+
+    /// P3-D3：当前生效障碍（引擎世界系，静态 + 动态展平），供渲染可视化。
+    pub fn current_obstacles(&self) -> Vec<Obstacle> {
+        self.ctrl.current_obstacles()
+    }
+
+    /// P3-D3：最近一次扇形多射线测距帧（供射线可视化；`None`=未装测距）。
+    pub fn ranger_frame(&mut self) -> Option<crate::sensor::RangeFinderFrame> {
+        self.ctrl.dbg_ranger()
+    }
+
+    /// P3-D3：在引擎世界系任意点读风（可视化采样，只读，不扰动物理风）。
+    pub fn wind_at(&self, pos: [f64; 3]) -> [f64; 3] {
+        self.ctrl.wind_at(pos)
     }
 
     /// 阶段 11-A 诊断：取 EKF 估计状态（NED），用于对比真值定位噪声下发散源。

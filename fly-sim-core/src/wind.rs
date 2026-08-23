@@ -258,4 +258,86 @@ impl WindField {
         }
         wind
     }
+
+    /// P3-D3：**只读**采样某点风的确定性分量（base + 阵风 + 突风 + 切变 +
+    /// 空间相关 + 热气流），用于可视化风场箭头。
+    ///
+    /// 与 [`WindField::sample_at`] 的区别：**不推进时间、不更新湍流滤波状态、
+    /// 不消耗随机流**（湍流是微小幅值抖动，对可视化箭头可忽略）。因此多格点
+    /// 采样不会改变仿真物理风的时间演化——纯粹只读。
+    pub fn sample_static_at(&self, pos: &[f64; 3]) -> WindVec {
+        let t = self.time;
+        let x = pos[0];
+        let z = pos[2]; // UP 系 z = 高度
+
+        // 阵风（与 sample_at 同一公式）。
+        let mut gust = [0.0f64; 3];
+        for i in 0..3 {
+            let phase = (i as f64) * 1.7;
+            let f = self.cfg.gust_freq;
+            gust[i] = self.cfg.gust_amp[i]
+                * (f64::sin(2.0 * std::f64::consts::PI * f * t + phase)
+                    + 0.5 * f64::sin(2.0 * std::f64::consts::PI * 2.0 * f * t + 2.0 * phase)
+                    + 0.25 * f64::sin(2.0 * std::f64::consts::PI * 3.0 * f * t + 3.0 * phase));
+        }
+
+        // 确定性阵风突风（1-cos 包络）。
+        let mut burst = [0.0f64; 3];
+        if self.cfg.gust_burst_hw > 0.0 {
+            let dt_b = (t - self.cfg.gust_burst_t0) / self.cfg.gust_burst_hw;
+            if dt_b > -1.0 && dt_b < 1.0 {
+                let env = 0.5 * (1.0 - f64::cos(std::f64::consts::PI * (dt_b + 1.0)));
+                for i in 0..3 {
+                    burst[i] = self.cfg.gust_burst_amp[i] * env;
+                }
+            }
+        }
+
+        // 热气流（使用当前已推进的 thermal_center，只读）。
+        let mut thermal = [0.0f64; 3];
+        if self.cfg.thermal_strength > 0.0 && self.cfg.thermal_radius > 0.0 {
+            let cx = self.thermal_center[0];
+            let cz = self.thermal_center[1];
+            let dx = x - cx;
+            let dz = z - cz;
+            let r2 = dx * dx + dz * dz;
+            let rad = self.cfg.thermal_radius.max(1e-3);
+            let height_factor = if self.cfg.thermal_height > 0.0 && z > self.cfg.thermal_height {
+                0.0
+            } else {
+                1.0
+            };
+            let sigma3 = (3.0 * rad).powi(2);
+            if r2 < sigma3 {
+                thermal[2] += self.cfg.thermal_strength
+                    * f64::exp(-r2 / (2.0 * rad * rad))
+                    * height_factor;
+            }
+        }
+
+        // 风切变 + 空间相关（与 sample_at 同一公式）。
+        let shear = if self.cfg.shear_exponent > 0.0 && z > 1e-6 {
+            let zr = self.cfg.shear_ref_height.max(1e-3);
+            (z / zr).max(0.0).powf(self.cfg.shear_exponent)
+        } else {
+            1.0
+        };
+        let spatial = if self.cfg.spatial_scale > 0.0 {
+            let k = 2.0 * std::f64::consts::PI / self.cfg.spatial_scale;
+            [
+                f64::sin(k * x),
+                f64::sin(k * z * 0.8 + 1.3),
+                f64::sin(k * (x + z) * 0.5 + 2.1),
+            ]
+        } else {
+            [0.0, 0.0, 0.0]
+        };
+
+        let mut wind = [0.0f64; 3];
+        for i in 0..3 {
+            let base_spat = self.cfg.base[i] * shear * (1.0 + 0.3 * spatial[i].max(-0.9));
+            wind[i] = base_spat + gust[i] + burst[i] + thermal[i];
+        }
+        wind
+    }
 }

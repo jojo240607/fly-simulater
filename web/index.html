@@ -54,6 +54,7 @@
         <option value="hover">悬停 (hover)</option>
         <option value="wind">抗风 (wind)</option>
         <option value="degraded">退化故障 (degraded)</option>
+        <option value="avoidance">避障 (avoidance)</option>
       </select>
       <label>控制律</label>
       <select id="controller">
@@ -102,7 +103,8 @@
     <div class="group">
       <div class="hint">
         拖拽画面：旋转视角 · 滚轮：缩放<br/>
-        退化场景：先 4s 稳态再注入故障，发散后自动重演。
+        退化场景：先 4s 稳态再注入故障，发散后自动重演。<br/>
+        避障场景：橙色=障碍（球/盒），青色射线=测距（绿=有效命中），蓝箭头=风场。
       </div>
     </div>
   </div>

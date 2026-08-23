@@ -23,11 +23,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fly_sim_core::controller::{hover_setpoint, ControllerKind};
-use fly_sim_core::physics::{ContactModel, PhySdkWorld};
-use fly_sim_core::sensor::SensorConfig;
+use fly_sim_core::physics::{ContactModel, DynamicObstacle, Obstacle, PhySdkWorld};
+use fly_sim_core::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig};
 use fly_sim_core::sim::SimLoop;
 use fly_sim_core::wind::{WindConfig, WindField};
-use fly_sim_core::render::RenderInput;
+use fly_sim_core::render::{RenderInput, RenderObstacle, RenderRay, RenderWind};
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::controller::Setpoint;
 
@@ -41,7 +41,7 @@ const DEGRADE_STABILIZE_STEPS: u64 = 1000; // 退化场景先稳态 4s
 /// 前端→后端 的控制状态（由 WS 文本消息更新，仿真线程读取）。
 #[derive(Clone)]
 struct ControlState {
-    scenario: String,  // "hover" | "wind" | "degraded"
+    scenario: String,  // "hover" | "wind" | "degraded" | "avoidance"
     controller: String, // "pid" | "lqr" | "indi"
     wind: f64,          // 北向基础风速 m/s
     fail_motor: Option<u8>,
@@ -111,6 +111,13 @@ impl SimDriver {
             None
         };
         let kind = Self::controller_kind(&c.controller);
+        // 场景障碍：avoidance 场景放"静态矮墙 + 动态逼近球"（渲染可视化 + 真实碰撞/避障）。
+        let mut obstacles: Vec<Obstacle> = Vec::new();
+        if c.scenario == "avoidance" {
+            // 北侧一道矮墙（盒）与西北角一个球，丰富场景；机体悬停原点 (0,5,0)。
+            obstacles.push(Obstacle::Box { min: [14.0, 0.0, -10.0], max: [16.0, 3.0, 10.0] });
+            obstacles.push(Obstacle::Sphere { center: [-4.0, 5.0, -13.0], radius: 2.5 });
+        }
         let mut sim = SimLoop::new(
             PhySdkWorld::create_empty(),
             &self.cfg,
@@ -119,8 +126,29 @@ impl SimDriver {
             self.sensor_cfg.clone(),
             kind,
             Some(ContactModel::default()),
-            Vec::new(),
+            obstacles,
         );
+        if c.scenario == "avoidance" {
+            // 动态障碍：南侧球匀速向北逼近（与 avoidance 测试同构）。
+            sim.plant_set_dynamic_obstacles(vec![DynamicObstacle {
+                base: Obstacle::Sphere { center: [-26.0, 5.0, 0.0], radius: 3.0 },
+                velocity: [2.0, 0.0, 0.0],
+            }]);
+            // 扇式多射线测距（±60°×5 条，量程 12m）+ 避障闭环（危险距离 11m，横向闪避 2m/s）。
+            sim.configure_avoidance(
+                RangeFinderModel::new(
+                    12.0,
+                    0.5,
+                    0.02,
+                    0.0,
+                    0.0,
+                    std::f64::consts::PI / 3.0,
+                    5,
+                    0xABCD,
+                ),
+                AvoidanceConfig::new(11.0, 0.0, 2.0),
+            );
+        }
         // 故障注入
         if let Some(m) = c.fail_motor {
             let mut mask = [false; 4];
@@ -210,6 +238,47 @@ impl SimDriver {
             self.trail.remove(0);
         }
 
+        // ---- P3-D3：障碍 / 射线 / 风场可视化数据（引擎世界系 = 渲染世界系）----
+        // 1) 障碍：当前生效（静态 + 动态展平），转轻量渲染表示。
+        let obstacles: Vec<RenderObstacle> = sim
+            .current_obstacles()
+            .iter()
+            .filter_map(|o| match o {
+                Obstacle::Sphere { center, radius } => {
+                    Some(RenderObstacle::Sphere { center: *center, radius: *radius })
+                }
+                Obstacle::Box { min, max } => {
+                    Some(RenderObstacle::Box { min: *min, max: *max })
+                }
+                Obstacle::ConvexHull { .. } => None, // 已展平，不应出现
+            })
+            .collect();
+
+        // 2) 射线：最近一次扇式测距帧。读数方向是 NED，转引擎世界系与渲染一致。
+        let mut rays: Vec<RenderRay> = Vec::new();
+        if let Some(frame) = sim.ranger_frame() {
+            for r in frame.rays {
+                let d = r.dir_ned;
+                // NED (n,e,d) → 引擎 (x=n, y=-d, z=-e)
+                let dir = [d[0], -d[2], -d[1]];
+                rays.push(RenderRay { dir, distance: r.distance, valid: r.valid });
+            }
+        }
+
+        // 3) 风场：机体周围水平面 5×5 网格只读采样箭头（有风场景才画）。
+        let mut wind: Vec<RenderWind> = Vec::new();
+        if c.wind > 0.0 {
+            for ix in -2i32..=2 {
+                for iz in -2i32..=2 {
+                    let p = [pos[0] + ix as f64 * 4.0, pos[1], pos[2] + iz as f64 * 4.0];
+                    let vec = sim.wind_at(p);
+                    if vec[0] != 0.0 || vec[1] != 0.0 || vec[2] != 0.0 {
+                        wind.push(RenderWind { pos: p, vec });
+                    }
+                }
+            }
+        }
+
         let inp = RenderInput {
             pos,
             quat,
@@ -223,6 +292,9 @@ impl SimDriver {
             cam_pitch: c.cam_pitch,
             cam_distance: c.cam_distance,
             blink: self.phase_steps as f64 * 0.05,
+            obstacles,
+            rays,
+            wind,
         };
 
         let tele = telemetry_json(&st, &cmd, c, self.phase_steps, diverged);
@@ -526,7 +598,7 @@ fn handle_http(stream: &mut TcpStream) {
 fn main() {
     let listener = TcpListener::bind(("127.0.0.1", PORT)).expect("无法绑定端口");
     println!("[server] Fly Simulator Web 后端已启动: http://127.0.0.1:{}/", PORT);
-    println!("[server] 控制: 场景(hover/wind/degraded) 控制律(pid/lqr/indi) 故障(fail_motor/degrade) 风(wind) 相机(cam_*)");
+    println!("[server] 控制: 场景(hover/wind/degraded/avoidance) 控制律(pid/lqr/indi) 故障(fail_motor/degrade) 风(wind) 相机(cam_*)");
 
     // 预热：探测静态目录是否存在
     let base = std::env::current_dir().unwrap_or_default().join("web");
