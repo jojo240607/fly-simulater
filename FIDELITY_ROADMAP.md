@@ -56,8 +56,9 @@
 - **商用**：传感器硬/软故障（偏置突变/卡死/漂移）、执行器卡死/效率损失、结构损伤（惯量突变）。
 
 ### 8. 系统/生态差距（非纯仿真算法）
-- 无标准消息协议（MAVLink）、无 HIL（真实板子）、无 RT 调度模拟、无多机/通信链路、
-  无任务规划器（mission）、无基准数据集/真值回放、无 Monte Carlo 统计、无更完善的可视化分析。
+- 无标准消息协议（MAVLink 兼容层）、无真 HIL（真实板子）、无 RT 调度模拟；多机/通信链路、
+  任务规划器（mission）、基准数据集/真值回放、Monte Carlo 统计、3D 可视化等 P3 系列已落地
+  （见三、推进记录）。
 
 ## 三、优先级计划
 
@@ -558,7 +559,7 @@
 | **P3-C3** | 物理 | 多刚体真实碰撞（机体-机体 / 机体-障碍） | ✅ 完成 |
 | **P3-D1** | 生态 | RC 输入 + 手动/增稳模式全流程 | ✅ 完成 |
 | **P3-D2** | 生态 | 真 HIL（sim ↔ F407 真板 UART 闭环） | 待做 |
-| **P3-D3** | 生态 | 3D 可视化 / 传感器渲染 | 待做 |
+| **P3-D3** | 生态 | 3D 可视化 / 传感器渲染 | ✅ 完成 |
 | **P3-D4** | 生态 | 蒙特卡洛统计 + 真值回放 / 基准数据集 | ✅ 完成 |
 | **P3-D5** | 生态 | 多机互飞 / 机间通信场景 | 待做 |
 
@@ -590,11 +591,11 @@
 #### P3-D：使用场景/生态层（Top 2/3）
 - [x] **P3-D1 RC 输入 + 全飞行模式**：遥控解锁 → 手动/增稳 → 自主任务 → RTL/降落 全流程场景（sim 侧注入 `RcInput`）。
 - [ ] **P3-D2 真 HIL**：sim ↔ F407 真板 UART 闭环，兑现 DESIGN.md "HIL 语义"初衷（`MavlinkStreamParser`/UART 占位已留）。
-- [ ] **P3-D3 3D 可视化 / 传感器渲染**：web 3D 视角、射线/障碍/风场可视化。
+- [x] **P3-D3 3D 可视化 / 传感器渲染**：web 3D 视角、射线/障碍/风场可视化。
 - [x] **P3-D4 蒙特卡洛统计 + 真值回放 / 基准数据集**：批量跑 N 次同场景（噪声/风/参数扰动随机种子），
   输出轨迹分布（均值±σ、P95 包络）、收敛率/失效率；提供标准基准场景集与真值 CSV 回放，
   支撑回归对比（如 TECS vs PID 的统计显著性，替代当前单次确定性断言）。
-- [ ] **P3-D5 多机互飞 / 机间通信场景**：多实例 `FlyController` 共世界（同一 `RigidBodyWorld` 多机体），
+- [x] **P3-D5 多机互飞 / 机间通信场景**：多实例 `FlyController` 共世界（同一 `RigidBodyWorld` 多机体），
   经 UDP 链路互发位置/速度（模拟 ADS-B / 机间链路），支持编队、跟随、机间避让验证。
 
 #### P3-B：感知层
@@ -814,6 +815,42 @@
   `fly-sim-core --features phy` powertrain 21 项全过。
 - 待续：P3-D 生态项（真 HIL / 3D 可视化 / 蒙特卡洛基准数据集）。
 
+### P3-D3：3D 可视化 / 传感器渲染 ✅ 完成
+- 目标：把渲染从"纯机体 + 轨迹 + 电机"扩展为**传感器/环境可视化**——障碍（球/盒）、
+  测距射线（有效性着色）、风场矢量箭头，全部与真值物理同源；并在 web 端新增
+  **avoidance 避障场景**（静态障碍 + 动态逼近障碍 + 扇式多射线闭环），可直观看到
+  P3-B2 多射线避障、P3-C3 碰撞、风扰动在 3D 视图中的实时表现。
+- 实现（`fly-sim-core/src/render.rs`）：
+  - 新增 `RenderObstacle::{Sphere, Box}`（轻量渲染障碍）、`RenderRay { dir, distance,
+    valid }`（测距射线）、`RenderWind { pos, vec }`（风场采样箭头）。
+  - `RenderInput` 扩展 `obstacles/rays/wind` 字段；新增 `draw_obstacles`（球=线框圆 +
+    底部椭圆，盒=6 面线框）、`draw_rays`（有效=绿实线 + 命中端亮圆，无效=红虚线、
+    按 max_range 长度）、`draw_wind_vectors`（蓝→深蓝箭头），在 `render_frame` 中
+    顺序叠加绘制（风场最底层 → 障碍 → 射线 → 机体）。
+- 数据源（只读、不扰动仿真）：
+  - `plant.rs`：`current_obstacles()`（静态 + 动态障碍合并、展平 ConvexHull）、
+    `wind_at()`（只读采样）。
+  - `wind.rs`：`WindField::sample_static_at()` —— 只计算确定性风分量
+    （base 切变 + 阵风 + 突风 + 热气流 + 空间相关），**不推进时间 / 不更新湍流
+    滤波状态 / 不消耗随机流**，可视化与物理采样同公式同值。
+  - `controller.rs` / `sim.rs`：`current_obstacles` / `wind_at` / `ranger_frame` 访问器；
+    `sim.rs` 新增 `configure_avoidance`、`plant_set_dynamic_obstacles` 场景配置入口。
+- 场景与联动（`fly-sim-server` + `web/`）：
+  - `fly-sim-server` `rebuild()`：avoidance 场景装配"静态矮墙盒 + 西北角球" + 动态
+    球（南侧 -26m 以 2 m/s 北向逼近）+ 扇式测距（±60°×5、量程 12m）+ 避障闭环
+    （危险 11m / 横向闪避 2 m/s）。
+  - `advance()` 每帧收集：`current_obstacles()` → `RenderObstacle`；
+    `ranger_frame()` → `RenderRay`（NED → 引擎系换算 x=n/y=-d/z=-e）；
+    机体周围 5×5 水平网格 `wind_at()` → `RenderWind`（仅风场景绘制）。
+  - `web/index.html` 新增 `avoidance` 场景选项与提示文案。
+- 验证：
+  - `cargo build --workspace --features phy` 与 `cargo test --workspace` 全量回归
+    exit 0 无失败。
+  - 启动 `fly-sim-server --features phy`（http://127.0.0.1:8080/）：HTTP 200 且页面
+    含 avoidance 选项；WS 客户端发送 `{"scenario":"avoidance",...}` 后遥测场景即时
+    切换为 `avoidance`、机体稳态悬停（alt≈4.9m、diverged=false），完整推帧
+    binary=10 / text=10 无崩溃（渲染输入已含障碍/射线，风=0 时不绘风箭头）。
+
 ### P3-D4：蒙特卡洛统计 + 真值回放 / 基准数据集 ✅ 完成
 - 目标：批量跑 N 次同场景（传感器噪声/湍流风随机种子逐次改变），从**物理真值**
   统计轨迹分布（均值±σ、P95 包络、极值）与收敛率/失效率；提供**标准基准场景集**
@@ -853,4 +890,22 @@
     **max|e_eq| 均值 0.485±0.003 vs 0.695±0.004、P95 0.489 vs 0.701、结束误差
     0.107 vs 0.437**（gap ~30% 稳定，均值/σ 差达 ~60σ），统计显著性结论稳定。
 - 既有回归联动：`cargo test --tests`（fly-simulater 全量 19 个测试文件）exit 0 无回归。
-- 待续：P3-D5 多机互飞 / 机间通信场景。
+- 验证（P3-D5，`fly-simulater` `fly-sim-core/src/multi.rs` + `tests/multi_drone.rs` 3 项）：
+  - 实现点：`RigidBodyWorld` 增加 `Rc<RefCell<W>>` 共享世界包装（多机同一物理世界、`body_id`
+    独立建刚体）；`QuadrotorPlant` 新增 `new_at`（指定初始 NED 位置）+ `body_id()` +
+    `external_world_step` 开关（每帧各机只注入冲量、共享世界统一 `step(dt)` 一次，避免
+    N 机各步一次导致世界时间膨胀 N 倍）；`FlyController` 新增 `new_at`/`plant_set_peer_colliders`
+    透传；机间碰撞 j>i 单向注册 `BodyCollider`（每对只由较小 id 机体解算一次，等大反向冲量
+    动量守恒、不翻倍）；`DroneLink` 内存邮箱模拟 ADS-B/机间 UDP 链路（每帧广播真值遥测
+    `DroneTelemetry{id,pos,vel,t}`，下一帧读取含一帧链路延迟）；编队 `formation_setpoint`
+    （leader 遥测 + 速度前馈，消除 PD 位置环随动稳态滞后）、机间避让 `inter_drone_avoid_vel`
+    （制动 + 横向让行复合，解决对头冲突纯径向排斥退化）、`target_with_avoid`。
+  - 实测（`tests/multi_drone.rs`，ToyWorld 9.81，DT=4ms，全 PASS）：
+    - **编队跟随**：3 机 Leader-Follower，leader 北向 2 m/s 平移 15 m 后悬停，follower
+      保持偏移 [0,±4] m——收敛期末端队形偏移误差 **f1=f2=0.271 m（<0.5 m）**；三机
+      TRU 无 NaN、高度保持、倾角 <20°。leader 位置环受 `vmax_xy=2` 限幅，停坡后以
+      kp=0.3 渐近到位（t=16s 时 n=14.56 m），故总时长取 16 s、收敛窗口取末端 2 s。
+    - **遥测精度**：drone1 收到的 drone0 遥测与真值位置/速度逐分量 **≤1e-3 m 级一致**。
+    - **机间避让**：对头接近两机（n=0 北向 vs n=12 南向）经制动+横向让行，**最小间距
+      1.528 m**（碰撞球半径和 ≈0.54 m，不触发物理碰撞，间距显著大于 2×0.27）。
+  - 既有回归联动：`cargo test --workspace` exit 0 无回归。

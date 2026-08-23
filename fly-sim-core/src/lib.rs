@@ -15,6 +15,7 @@ pub mod alloc;
 pub mod controller;
 pub mod log;
 pub mod mavlink;
+pub mod multi;
 pub mod physics;
 pub mod plant;
 pub mod render;
@@ -28,6 +29,7 @@ pub use controller::{ControllerKind, FlyController};
 pub use controller::RealFlyController;
 pub use log::LogRow;
 pub use mavlink::{loopback_telemetry, MavlinkBridge, MavlinkStreamParser};
+pub use multi::{formation_setpoint, inter_drone_avoid_vel, target_with_avoid, DroneLink, DroneTelemetry, MultiDroneSim};
 #[cfg(feature = "phy")]
 pub use physics::PhySdkWorld;
 pub use physics::{ContactInfo, ContactModel, resolve_ground_contact, RigidBodyWorld, RigidTransform, TerrainField, ToyWorld};

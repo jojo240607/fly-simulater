@@ -17,7 +17,7 @@ use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, R
 
 use crate::alloc::allocate_eff;
 use crate::plant::QuadrotorPlant;
-use crate::physics::{ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld};
+use crate::physics::{BodyCollider, ContactInfo, ContactModel, DynamicObstacle, Obstacle, RigidBodyWorld};
 use crate::wind::WindField;
 use crate::sensor::{AvoidanceConfig, RangeFinderModel, SensorConfig, SensorFault};
 
@@ -225,11 +225,30 @@ where
         contact: Option<ContactModel>,
         obstacles: Vec<Obstacle>,
     ) -> Self {
+        // 默认初始位姿：NED (0,0,-5) = 悬停 5m 高（与 QuadrotorPlant::new 一致）。
+        Self::new_at(world, cfg, dt, wind, sensor_cfg, kind, contact, obstacles, [0.0, 0.0, -5.0])
+    }
+
+    /// 与 [`FlyController::new`] 相同，但可指定机体初始 NED 位置 `pos_ned`（[n,e,d] m）。
+    ///
+    /// P3-D5 多机共世界：每架机在不同初始位置创建，EKF 初始位置与机体真实位置对齐，
+    /// 避免 GPS/气压首次校正前看到 ~5m 级位置误差全油门弹射（与 PLAN 阶段 11-A 同因）。
+    pub fn new_at(
+        world: W,
+        cfg: &VehicleConfig,
+        dt: f64,
+        wind: Option<WindField>,
+        sensor_cfg: SensorConfig,
+        kind: ControllerKind,
+        contact: Option<ContactModel>,
+        obstacles: Vec<Obstacle>,
+        pos_ned: [f32; 3],
+    ) -> Self {
         let mut ekf = EkfEstimator::default_quad();
-        // 阶段 11-A：EKF 初始位置估计必须与机体真实初始位置一致（NED d=-5，即引擎 y=5），
+        // 阶段 11-A：EKF 初始位置估计必须与机体真实初始位置一致（NED），
         // 否则 GPS/气压首次校正前 PID 看到 ~5m 位置误差全油门弹射（见 PLAN 阶段 11-A）。
-        // 注意：此处硬编码需与 `QuadrotorPlant::new` 的初始位置（pos7=[0,5,0]→NED d=-5）保持一致。
-        ekf.set_initial_position([0.0, 0.0, -5.0]);
+        // 注意：此处需与 `QuadrotorPlant::new_at` 的初始位置保持一一对应。
+        ekf.set_initial_position(pos_ned);
         let dt_s = Second(dt as f32);
         let hil = match kind {
             ControllerKind::Pid => {
@@ -264,7 +283,7 @@ where
             }
         };
 
-        let plant = QuadrotorPlant::new(world, cfg, dt, wind, sensor_cfg, contact, obstacles);
+        let plant = QuadrotorPlant::new_at(world, cfg, dt, wind, sensor_cfg, contact, obstacles, pos_ned);
 
         let imu = SimImu {
             last: ImuSample {
@@ -777,9 +796,37 @@ where
         self.plant.set_dynamic_obstacles(obstacles);
     }
 
+    /// P3-D5：切换外部世界步进模式（多机共享世界用，见 [`QuadrotorPlant::set_external_world_step`]）。
+    pub fn set_external_world_step(&mut self, external: bool) {
+        self.plant.set_external_world_step(external);
+    }
+
+    /// P3-C3/P3-D5：注册/清除参与机体-机体碰撞的其他动态刚体碰撞体列表。
+    ///
+    /// 多机场景由 `MultiDroneSim` 用各机 `body_id()` 组装 peers 后调用，
+    /// 每步解算双刚体碰撞（等大反向冲量、动量守恒）。
+    pub fn plant_set_peer_colliders(&mut self, peers: Vec<BodyCollider>) {
+        self.plant.set_peer_colliders(peers);
+    }
+
+    /// P3-D5：返回本机在物理世界中的刚体 id（`RigidBodyWorld::add_body` 返回值）。
+    pub fn body_id(&self) -> i64 {
+        self.plant.body_id()
+    }
+
     /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。
     pub fn contact_info(&self) -> Option<ContactInfo> {
         self.plant.contact_info()
+    }
+
+    /// P3-D3：返回当前生效的障碍列表（引擎世界系，静态 + 动态展平后），供渲染。
+    pub fn current_obstacles(&self) -> Vec<Obstacle> {
+        self.plant.current_obstacles()
+    }
+
+    /// P3-D3：在引擎世界系任意点读取风场（可视化采样，只读，不扰动物理风）。
+    pub fn wind_at(&self, pos: [f64; 3]) -> [f64; 3] {
+        self.plant.wind_at(pos)
     }
 
     /// 调试：返回引擎世界系真实坐标与四元数。

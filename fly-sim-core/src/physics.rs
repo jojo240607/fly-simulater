@@ -1222,3 +1222,53 @@ impl RigidBodyWorld for ToyWorld {
         self.time
     }
 }
+
+// ============================================================ 共享世界包装（P3-D5）
+
+/// 为 `Rc<RefCell<W>>` 实现 `RigidBodyWorld`：把对共享物理世界的读/写代理到
+/// `borrow()/borrow_mut()`。这是 P3-D5 多机共世界的基础——多个 `QuadrotorPlant`
+/// 持有同一 `Rc<RefCell<W>>`，各自以 `body_id` 独立操作刚体，而世界只推进一次。
+///
+/// 借用语义：所有方法都是瞬时借用（方法返回即释放），不会跨方法持有借用手柄，
+/// 因此多机顺序步进时不会产生 `RefCell` 重复借用冲突。
+impl<W: RigidBodyWorld> RigidBodyWorld for std::rc::Rc<std::cell::RefCell<W>> {
+    fn body_count(&self) -> usize {
+        self.borrow().body_count()
+    }
+
+    fn add_body(&mut self, mass: f64, pos7: &RigidTransform, inertia3: &[f64; 3]) -> i64 {
+        self.borrow_mut().add_body(mass, pos7, inertia3)
+    }
+
+    fn apply_impulse(&mut self, id: i64, j3: &[f64; 3], mode: i32) {
+        self.borrow_mut().apply_impulse(id, j3, mode);
+    }
+
+    fn apply_torque_impulse(&mut self, id: i64, k3: &[f64; 3], mode: i32) {
+        self.borrow_mut().apply_torque_impulse(id, k3, mode);
+    }
+
+    fn get_velocity(&self, id: i64) -> [f64; 3] {
+        self.borrow().get_velocity(id)
+    }
+
+    fn get_angular_velocity(&self, id: i64) -> [f64; 3] {
+        self.borrow().get_angular_velocity(id)
+    }
+
+    fn get_rigid_transforms(&self, buf: &mut [f64]) -> usize {
+        self.borrow().get_rigid_transforms(buf)
+    }
+
+    fn get_body_transform(&self, id: i64, buf: &mut [f64; 7]) {
+        self.borrow().get_body_transform(id, buf);
+    }
+
+    fn step(&mut self, dt: f64) -> i32 {
+        self.borrow_mut().step(dt)
+    }
+
+    fn time(&self) -> f64 {
+        self.borrow().time()
+    }
+}

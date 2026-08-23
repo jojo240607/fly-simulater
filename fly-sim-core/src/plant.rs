@@ -347,6 +347,10 @@ pub struct QuadrotorPlant<W> {
     /// P3-C3：其他动态刚体碰撞体列表（参与机体-机体碰撞解算）。
     /// 非空时每步经 `resolve_body_peer_collisions` 解算双刚体碰撞（等大反向冲量、动量守恒）。
     peer_colliders: Vec<BodyCollider>,
+    /// P3-D5：外部世界步进开关。`false`（默认）= 本机自主调用 `world.step(dt)`
+    /// （单机行为不变）；`true` = 跳过世界步进（多机共享世界时由 `MultiDroneSim`
+    /// 在所有机体注入冲量后**统一推进一次**，避免 N 架机各步一次导致时间膨胀）。
+    external_world_step: bool,
     /// P0-2：动量理论诱导速度（m/s），含垂直气流耦合；每步在 step() 内刷新。
     induced_vel: f64,
     /// P3-C1：悬停标定反解的有效桨距 θ0（rad，ω 无关常量，见 `bet_rotor`）。
@@ -386,20 +390,40 @@ where
         contact: Option<ContactModel>,
         obstacles: Vec<Obstacle>,
     ) -> Self {
+        // 默认初始位姿：NED (0,0,-5) = 悬停 5m 高（与 FlyController::new 的 EKF 初值一致）。
+        Self::new_at(world, cfg, dt, wind, sensor_cfg, contact, obstacles, [0.0, 0.0, -5.0])
+    }
+
+    /// 与 [`QuadrotorPlant::new`] 相同，但可指定机体初始 NED 位置 `pos_ned`（[n,e,d] m）。
+    ///
+    /// P3-D5 多机共世界：每架机用不同初始位置创建刚体，避免多机在原点重叠。
+    /// 初始姿态不变（绕 X 轴 -90°，推力轴竖直向上托住重力）。
+    pub fn new_at(
+        world: W,
+        cfg: &VehicleConfig,
+        dt: f64,
+        wind: Option<WindField>,
+        sensor_cfg: SensorConfig,
+        contact: Option<ContactModel>,
+        obstacles: Vec<Obstacle>,
+        pos_ned: [f32; 3],
+    ) -> Self {
         let mut world = world;
         // 注：P1-2 地面接触完全由 `resolve_ground_contact` 惩罚模型处理（读取机体位姿、
         // 施加弹簧-阻尼+库仑摩擦冲量），**不向物理世界注入原生地面刚体**。这样：
         // - 真实引擎与测试替身行为一致（无"原生碰撞求解器"与惩罚模型双重接触）；
         // - 真空 / 自由落体能量守恒场景（contact=None）天然无地面，机体自由下落不发散。
 
-        // 初始位姿：NED (0,0,-5) = 悬停 5m 高 -> 引擎 (0, 5, 0)。
+        // 初始位姿：NED `pos_ned` 映射到引擎世界系（x=n, y=-d, z=-e），默认悬停 5m 高
+        // -> 引擎 (0, 5, 0)。
         // 初始姿态：机体"上"轴(+Z, 引擎机体系)对齐世界 +Y(上)，即绕 X 轴 +90°。
         // 这样旋翼推力(沿机体 +Z)初始向上托住重力（引擎重力沿 -Y）。
         let c = (std::f64::consts::FRAC_PI_4).cos(); // cos45
         let s = (std::f64::consts::FRAC_PI_4).sin(); // sin45
         // 绕 X 轴 -90°：使机体"上"轴(+Z, 引擎机体系)对齐世界 +Y(上)。
         // （验证：rotate_by_quat((c,-s,0,0),(0,0,1)) = (0,1,0) 向上）
-        let pos7: [f64; 7] = [0.0, 5.0, 0.0, c, -s, 0.0, 0.0]; // q=(cos45, -sin45,0,0) 绕X-90°
+        let up = vec_ned_to_up(pos_ned);
+        let pos7: [f64; 7] = [up[0], up[1], up[2], c, -s, 0.0, 0.0]; // q=(cos45, -sin45,0,0) 绕X-90°
         // 主转动惯量：使用机型配置的真实惯量（阶段 1，不再用 m·L² 近似）。
         // 断言正定，避免物理引擎收到非物理惯量。
         assert!(
@@ -463,6 +487,7 @@ where
             ranger: None,
             last_contact: None,
             peer_colliders: Vec::new(),
+            external_world_step: false,
             induced_vel: 0.0,
             bet_theta0,
             bet_vi: 0.0,
@@ -501,6 +526,18 @@ where
     /// `peers` 空：关闭机体-机体碰撞解算。
     pub fn set_peer_colliders(&mut self, peers: Vec<BodyCollider>) {
         self.peer_colliders = peers;
+    }
+
+    /// P3-D5：切换外部世界步进模式（多机共享世界用，见 [`QuadrotorPlant::external_world_step`]）。
+    pub fn set_external_world_step(&mut self, external: bool) {
+        self.external_world_step = external;
+    }
+
+    /// 返回本机在物理世界中的刚体 id（`RigidBodyWorld::add_body` 返回值）。
+    ///
+    /// P3-D5：`MultiDroneSim` 用各机 body_id 组装 `BodyCollider` 列表做机间碰撞注册。
+    pub fn body_id(&self) -> i64 {
+        self.body_id
     }
 
     /// P1-2 障碍反射：注册/清除避障距离传感器（雷达/深度相机）。
@@ -554,6 +591,25 @@ where
     /// P1-2：读取最近一次接触解算结果（未接触时为 `None`）。
     pub fn contact_info(&self) -> Option<ContactInfo> {
         self.last_contact
+    }
+
+    /// P3-D3：返回当前生效的全部障碍（静态 + 按 `self.time` 生成的动态障碍，已展平），
+    /// 供渲染可视化。只读，不推进任何状态。
+    pub fn current_obstacles(&self) -> Vec<Obstacle> {
+        let mut all = self.obstacles.clone();
+        for d in &self.dynamic_obstacles {
+            all.push(d.at(self.time));
+        }
+        crate::physics::flatten_obstacles(&all)
+    }
+
+    /// P3-D3：在引擎世界系任意点读取风场（可视化采样用）。无风返回零向量。
+    /// 走 `WindField::sample_static_at` 只读采样，不推进时间/不扰动湍流随机流。
+    pub fn wind_at(&self, pos: [f64; 3]) -> [f64; 3] {
+        if self.wind.is_none() {
+            return [0.0; 3];
+        }
+        self.wind.as_ref().unwrap().sample_static_at(&pos)
     }
 
     /// 保存本拍 4 路归一化油门指令（[0,1]），由电机一阶滞后在 step 内趋近实际推力。
@@ -775,8 +831,12 @@ where
         self.last_tau_body = tau_body;
 
         // ---- 步进物理引擎 ----
-        let rc = self.world.step(self.dt);
-        assert_eq!(rc, 0, "物理引擎 step 检测到 NaN/Inf，世界已损坏");
+        // P3-D5：多机共享世界时由 `MultiDroneSim` 统一步进一次（external_world_step=true），
+        // 本机只注入冲量不推进世界，避免 N 架机各步一次导致世界时间膨胀 N 倍。
+        if !self.external_world_step {
+            let rc = self.world.step(self.dt);
+            assert_eq!(rc, 0, "物理引擎 step 检测到 NaN/Inf，世界已损坏");
+        }
         self.time += self.dt;
 
         // ---- P1-2：地面接触解算（惩罚弹簧-阻尼 + 库仑摩擦）----
