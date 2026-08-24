@@ -12,6 +12,8 @@ path = "src/main.rs"
 fly-sim-core = { path = "fly-sim-core" }
 # 机架配置类型（no_std，host 端解析 TOML 后构造 VehicleConfig）。
 flyctrl-core = { path = "../../mcu/oop/flyctrl/core" }
+# 共用 MAVLink v2 编解码核心（UDP 主机链路帧层直接依赖，单一事实来源）。
+mavlink-core = { path = "../../mcu/oop/mavlink-core" }
 # 机架数据输入：从外部 TOML 加载机型参数（替代硬编码 default_quad）。
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }

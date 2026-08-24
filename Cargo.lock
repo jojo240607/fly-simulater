@@ -419,6 +419,7 @@ name = "fly-sim-core"
 version = "0.1.0"
 dependencies = [
  "flyctrl-core",
+ "mavlink-core",
  "phy-demo",
  "phy-math",
  "phy-rigid",
@@ -443,6 +444,7 @@ version = "0.1.0"
 dependencies = [
  "fly-sim-core",
  "flyctrl-core",
+ "mavlink-core",
  "phy-demo",
  "phy-math",
  "serde",
@@ -456,6 +458,7 @@ name = "flyctrl-core"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "mavlink-core",
 ]
 
 [[package]]
@@ -716,6 +719,10 @@ dependencies = [
  "autocfg",
  "rawpointer",
 ]
+
+[[package]]
+name = "mavlink-core"
+version = "0.1.0"
 
 [[package]]
 name = "memchr"

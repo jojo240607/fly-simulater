@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 # 飞控核心：SIL/HIL 共享控制律（no_std crate，host std 环境可依赖）。
 flyctrl-core = { path = "../../../mcu/oop/flyctrl/core" }
+# 共用 MAVLink v2 编解码核心（no_std 帧层 + 全消息编解码，单一事实来源）。
+# 直接依赖 mavlink-core，帧层/编解码不再经 flyctrl-core 间接引用。
+mavlink-core = { path = "../../../mcu/oop/mavlink-core" }
 # 物理引擎（Rust 源码级依赖，rlib）。可选：仅在启用 `phy` feature（真实引擎 SIL/HIL
 # 路径）时编译；默认关闭后 fly-sim-core 仅靠 ToyWorld 替身即可构建与单测，
 # 避免上游 phy-rigid 工具链不兼容阻断整个 crate 的编译。

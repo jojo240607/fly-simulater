@@ -3,7 +3,8 @@
 //! 让仿真作为 MAVLink 端点，可被真实地面站（QGroundControl / MAVProxy）经 UDP 连接。
 //! 仅依赖 `std::net`，不参与嵌入式构建（编译期用 feature 隔离，但本仿真工程恒为主机）。
 
-use flyctrl_core::comm::link::{Frame, Link, MAX_FRAME_LEN};
+use flyctrl_core::comm::link::Link;
+use mavlink_core::frame::{Frame, MAX_FRAME_LEN};
 use std::net::{SocketAddr, UdpSocket};
 
 /// UDP 链路：每个 MAVLink 帧作为一个 datagram 收发。

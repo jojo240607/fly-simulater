@@ -5,18 +5,20 @@
 //! 经 [`LoopbackLink`] 字节链路发出，可被标准地面站（QGC/PX4）解析——
 //! 补齐路线图差距清单 #8（"无标准消息协议 MAVLink"）。
 //!
-//! 复用 `flyctrl-core` 既有的 MAVLink v2 编解码（`crc16_x25` + `CRC_EXTRA` 字节级
+//! 复用 `mavlink-core`（共用 MAVLink v2 编解码：`crc16_x25` + `CRC_EXTRA` 字节级
 //! 兼容），本模块只做"仿真状态 → 帧流 → 链路 → 回环解析"的编排 + 自验证。
 //!
 //! 注意：本模块是 **host 侧遥测桥**（仿真/地面站联调用），非嵌入式链路实现
 //! （后者在 `flyctrl-core::comm::link::stm32f407` 占位，落地时接 joc-base HAL）。
 
-use flyctrl_core::comm::link::{Frame, Link, LoopbackLink, MAX_FRAME_LEN};
+use flyctrl_core::comm::link::{Link, LoopbackLink};
 use flyctrl_core::comm::mavlink::{
-    self, encode_attitude, encode_global_position_int, encode_heartbeat, encode_local_pos,
+    encode_attitude, encode_global_position_int, encode_heartbeat, encode_local_pos,
     encode_sys_status, encode_vfr_hud,
 };
 use flyctrl_core::vehicle::{VehicleState, MeterPerSecond};
+// 帧层原语（magic/长度/解码）直接取自 mavlink-core（单一事实来源）。
+use mavlink_core::frame::{decode, Frame, MAVLINK_MAGIC, MAX_FRAME_LEN};
 
 /// 标准 MAVLink 遥测下行桥：维护 sys_id/comp_id/seq，把 [`VehicleState`] 编码成帧流。
 #[derive(Clone, Debug)]
@@ -112,7 +114,7 @@ impl MavlinkBridge {
 ///
 /// 解析规则（与 `LoopbackLink::recv_frame` 同语义）：以 `0xFD` 起始，读 9 字节头部，
 /// 按 `len` 域收齐 `10 + len + 2` 字节为一帧。仅做**组帧**，CRC/CRC_EXTRA 校验交给
-/// `flyctrl_core::comm::mavlink::decode`（权威）。
+/// `mavlink_core::frame::decode`（权威）。
 pub struct MavlinkStreamParser {
     buf: [u8; MAX_FRAME_LEN],
     len: usize,
@@ -134,7 +136,7 @@ impl MavlinkStreamParser {
         for &b in bytes {
             if self.need == 0 {
                 // 等待起始符
-                if b == mavlink::MAVLINK_MAGIC {
+                if b == MAVLINK_MAGIC {
                     self.buf[0] = b;
                     self.len = 1;
                     self.need = 9; // 还需 9 字节头部
@@ -181,7 +183,7 @@ pub fn loopback_telemetry(stream: &[u8]) -> Vec<(u32, Vec<u8>)> {
         if back.is_empty() {
             continue;
         }
-        if let Some((id, payload)) = mavlink::decode(&back) {
+        if let Some((id, payload)) = decode(&back) {
             out.push((id, payload.to_vec()));
         }
     }
