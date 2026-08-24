@@ -75,6 +75,15 @@ target_fix/
 # Temporary debug scripts (tools/_*.py)
 tools/_*.py
 
+# OpenOCD / HIL 调试日志
+projectmcuoopjoc-app-rust*.log
+tools/_hil_full_log.txt
+dbg_trace_*.txt
+
+# Python 缓存
+__pycache__/
+*.pyc
+
 # Editor / OS
 .vscode/
 .DS_Store
