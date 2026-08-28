@@ -952,6 +952,9 @@ impl RigidBodyWorld for PhySdkWorld {
         let b = &mut self.rigid_mut().bodies[id as usize];
         let dw = b.inv_inertia_world() * V3::new(k3[0], k3[1], k3[2]);
         b.ang_vel += dw;
+        // 注：曾在此处 per-step eprintln 诊断力矩冲量，导致物理步被 stderr 重定向文件
+        // I/O 拖慢（~29ms/步 → 234ms/帧），IMU 注入率远低于飞控 250Hz → 注入饥饿发散。
+        // 诊断用打印已移除；如需复现请用打印开关而非每拍硬刷屏。
     }
 
     fn get_velocity(&self, id: i64) -> [f64; 3] {

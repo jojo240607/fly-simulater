@@ -11,7 +11,7 @@ use flyctrl_core::fdir::Health;
 use flyctrl_core::flightmode::{FlightMode, ModeContext, ModeGovernor};
 use flyctrl_core::hal::actuator::{MotorActuator, OutputProtocol};
 use flyctrl_core::hal::sensor::{AirspeedSensor, GpsSensor, ImuSensor, MagSensor, RtkSensor, VioSensor};
-use flyctrl_core::hil::HilContext;
+use flyctrl_core::hil::{HilContext, SimImu as FallbackImu};
 use flyctrl_core::units::{Airspeed, Meter, MeterPerSecondSquared, Radian, RadianPerSecond, Second};
 use flyctrl_core::vehicle::{ActuatorCmd, AirspeedSample, ImuSample, PosSample, RcInput, RtkSample, VehicleState, VioSample};
 
@@ -209,6 +209,36 @@ pub struct FlyController<W> {
     dt: f64,
     /// 仿真已推进时间（s），每次 [`FlyController::step`] 累加 `dt`。
     time: f64,
+    /// 共享单步回退 IMU（`flyctrl_core::hil::SimImu`）：SIL 本拍恒有真实 IMU 帧，
+    /// 该实例仅在 [`step_hil`](flyctrl_core::hil::HilContext::step_hil) 收到 `None`
+    /// 时启用，与实机 HIL 注入饥饿时的回退数据同源，保证算法/数据完全一致。
+    sim_imu: FallbackImu,
+    /// 本拍是否走了共享单步 `step_hil`：`step_hil` 内部已做气压观测融合
+    /// （`update_alt`），`finalize` 必须跳过，否则同一观测被双重注入。
+    used_step_hil: bool,
+    /// HIL 反相发散复现（诊断）：IMU 节流注入周期。0=关闭（SIL 默认每拍真实 IMU）；
+    /// N>0 时每 N 拍才喂一次真实 IMU，其余拍传 None → `step_hil` 回退 sample-and-hold
+    /// 陈旧 IMU（`last_real_imu`），复刻 HIL 中「MCU 4ms 控制拍 vs PC ~11ms 物理步」
+    /// 导致的注入饥饿。复现完可移除。
+    imu_throttle: u32,
+    /// 节流注入计数器（每拍 +1，用于周期判定）。
+    imu_step: u32,
+    /// SIL/HIL 流程一致性：GPS/位置观测节流注入周期。0=每拍（SIL 默认 250Hz）；
+    /// N>0 时每 N 拍才注入一次 GPS，其余拍传 None → EKF 位置仅靠 IMU 积分 + 气压
+    /// 锚定，复刻 HIL 中 HIL_GPS/SET_POSITION 每 `HIL_NAV_EVERY=8` 步注入一次
+    /// （≈31Hz）的节流节奏（见 fly-sim-server/src/main.rs）。
+    gps_throttle: u32,
+    /// GPS 节流计数器（每拍 +1，用于周期判定）。
+    gps_step: u32,
+    /// HIL 反相发散复现（诊断）：物理步节流周期。0=关闭（SIL 每拍推进物理）；
+    /// N>0 时每 N 个控制拍才推进一次物理（`finalize` 中 apply_actuators +
+    /// plant.step，每次仍推进 1×dt），期间 plant 冻结而控制律照常每拍运行，
+    /// 复刻 HIL 中「MCU 4ms 控制拍 vs PC 物理步更慢」的双时钟失配：控制时钟
+    /// 快于物理时钟 → sample-and-hold 陈旧 IMU 外推 12ms 而真值仅走 4ms，
+    /// 姿态估计超前物理真值 → 控制器反向修正 → 反相发散。复现完可移除。
+    plant_throttle: u32,
+    /// 物理步节流计数器（每拍 +1，用于周期判定）。
+    plant_step: u32,
 }
 
 impl<W> FlyController<W>
@@ -326,6 +356,14 @@ where
             av_evade_int: [0.0, 0.0],
             dt,
             time: 0.0,
+            sim_imu: FallbackImu::new(),
+            used_step_hil: false,
+            imu_throttle: 0,
+            imu_step: 0,
+            gps_throttle: 0,
+            gps_step: 0,
+            plant_throttle: 0,
+            plant_step: 0,
         }
     }
 
@@ -366,6 +404,32 @@ where
             // 夹紧到 [0,1]，防御非法 CLI 输入。
             self.fail_mask[i] = eff[i].clamp(0.0, 1.0);
         }
+    }
+
+    /// HIL 反相发散复现（诊断）：设置 IMU 节流注入周期。N>0 时每 N 拍喂一次真实 IMU，
+    /// 其余拍传 None（复用共享单步的 sample-and-hold 回退），用于在 SIL 复现 HIL
+    /// 注入饥饿导致的姿态估计反相发散。0=关闭（SIL 默认每拍真实 IMU）。复现完移除。
+    pub fn set_imu_throttle(&mut self, every: u32) {
+        self.imu_throttle = every;
+        self.imu_step = 0;
+    }
+
+    /// SIL/HIL 流程一致性：设置 GPS/位置观测节流注入周期。N>0 时每 N 拍才注入一次
+    /// GPS，其余拍传 None（EKF 位置靠 IMU 积分 + 气压锚定），复刻 HIL 中 HIL_GPS/
+    /// SET_POSITION 每 `HIL_NAV_EVERY=8` 步（≈31Hz）注入一次的节流节奏。0=每拍
+    /// （SIL 默认 250Hz）。
+    pub fn set_gps_throttle(&mut self, every: u32) {
+        self.gps_throttle = every;
+        self.gps_step = 0;
+    }
+
+    /// HIL 反相发散复现（诊断）：设置物理步节流周期。N>0 时每 N 个控制拍才
+    /// 推进一次物理（`finalize` 跳过中间拍的 apply_actuators + plant.step），
+    /// 模拟 HIL 双时钟失配（MCU 4ms 控制拍快于 PC 物理步）。与 `set_imu_throttle`
+    /// 配套使用（IMU 注入与物理步同频）。0=关闭（SIL 每拍推进物理）。复现完移除。
+    pub fn set_plant_throttle(&mut self, every: u32) {
+        self.plant_throttle = every;
+        self.plant_step = 0;
     }
 
     /// 推模式：先让 plant 产出当帧样本，存入传感器 trait，再跑控制律，最后 step 世界。
@@ -433,10 +497,18 @@ where
                     // 累积位置设定点偏移，使串级 PID 的位置外环跟随侧移而非把机体拉回
                     // 原点；取代旧的 `sp.pos += av_vel*10` 硬放大（后者每帧放大速度级
                     // 目标、姿态/高度剧烈波动）。
+                    //
+                    // 一阶低通（加法同时乘泄漏）：稳态偏移收敛到 ≈ lateral_speed*K/λ，
+                    // 与注释口径一致。纯积分（只加不泄）会在长威胁期无限制累积
+                    // （实测 7s 威胁 ev_int 冲到 16.9m，机体被推到侧向 8m+，威胁结束后
+                    // 回航距离过大，20s 内无法回原点）。
                     let dt = self.dt as f32;
+                    let decay = (-AV_EVADE_POS_LAMBDA * dt).exp();
                     let lateral_speed = self.av_evade_dir * lat_mag;
-                    self.av_evade_int[0] += AV_EVADE_POS_K * lateral_speed * right[0] as f32 * dt;
-                    self.av_evade_int[1] += AV_EVADE_POS_K * lateral_speed * right[1] as f32 * dt;
+                    self.av_evade_int[0] = self.av_evade_int[0] * decay
+                        + AV_EVADE_POS_K * lateral_speed * right[0] as f32 * dt;
+                    self.av_evade_int[1] = self.av_evade_int[1] * decay
+                        + AV_EVADE_POS_K * lateral_speed * right[1] as f32 * dt;
                 } else {
                     // 威胁结束：重置方向锁存，位置偏移按 e^(-λt) 指数泄漏回零，
                     // 位置外环把机体拉回原航线（自然释放）。
@@ -454,13 +526,52 @@ where
         }
         // 推进仿真时钟。
         self.time += self.dt;
-        let setpoint_ref = &sp;
-        match &mut self.hil {
-            CtrlVariant::Pid(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Indi(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Lqr(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, setpoint_ref, &mut self.motors, &self.cfg),
-            CtrlVariant::Tecs(h) => h.step(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, setpoint_ref, &mut self.motors, &self.cfg),
-        }
+        // 共享单步（方案 A）：喂入当拍原始样本（SIL 恒有 IMU/GPS/气压），
+        // 由 `step_hil` 完成 SimImu 回退、姿态/位置初始化门控、EKF 估计 +
+        // 气压观测、FDIR 健康闸、控制律与执行器限幅，与实机 HIL 完全同一份编排。
+        // 与旧 `step` 的差异：VIO/RTK 融合（MCU HIL 无此通道）不再注入，垂直通道
+        // 气压融合由 `step_hil` 内部完成（`finalize` 据此跳过 update_alt）。
+        // 诊断：IMU 节流注入（HIL 反相发散复现）。默认 0=关闭（SIL 每拍真实 IMU）。
+        // N>0 时每 N 拍喂一次真实 IMU，其余 None → `step_hil` 回退 sample-and-hold
+        // 陈旧 IMU，复刻 HIL 中「MCU 4ms 控制拍 vs PC ~11ms 物理步」的注入饥饿。
+        let imu = if self.imu_throttle > 0 {
+            self.imu_step = self.imu_step.wrapping_add(1);
+            if self.imu_step % self.imu_throttle == 0 {
+                Some(self.imu.last)
+            } else {
+                None
+            }
+        } else {
+            Some(self.imu.last)
+        };
+        let gps = if self.gps_throttle > 0 {
+            self.gps_step = self.gps_step.wrapping_add(1);
+            if self.gps_step % self.gps_throttle == 0 {
+                self.gps.last
+            } else {
+                None
+            }
+        } else {
+            self.gps.last
+        };
+        let baro_alt = Some(self.baro_alt);
+        let armed = self.armed;
+        // 共享单步（方案 A）：与实机 HIL（MCU control.rs）同一份编排——喂入当拍
+        // 原始样本，由 `step_hil` 完成 SimImu 回退、姿态/位置初始化门控、EKF 估计
+        // + 气压观测、FDIR 健康闸、控制律与执行器限幅。垂直通道气压融合由
+        // `step_hil` 内部完成（`finalize` 据此跳过 update_alt）。VIO/RTK 融合见
+        // `step_hil` 尾部（SIL 注入、MCU HIL 无此通道则传 None）。
+        self.used_step_hil = true;
+        let r = match &mut self.hil {
+            CtrlVariant::Pid(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, &sp, true, armed, true, &mut self.sim_imu),
+            CtrlVariant::Indi(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, &sp, true, armed, true, &mut self.sim_imu),
+            CtrlVariant::Lqr(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, &sp, true, armed, true, &mut self.sim_imu),
+            CtrlVariant::Tecs(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, &sp, true, armed, true, &mut self.sim_imu),
+        };
+        // 记录本拍执行器指令供 `finalize` 回写 plant（与旧 `h.step` 内部
+        // `motors.apply` 等价）。
+        self.motors.apply(&r.cmd);
+        r.est
     }
 
     /// RC 直通闭环骨架：推进仿真时钟 → 按调用方给出的即时指令 HIL 单步。
@@ -469,6 +580,8 @@ where
     /// 与 `run_setpoint` 共用采集/估计/FDIR 骨架（见 [`HilContext::step_with_cmd`]）。
     fn run_cmd(&mut self, cmd_fn: impl FnOnce(&VehicleState) -> ActuatorCmd) -> VehicleState {
         self.time += self.dt;
+        // 非共享单步路径：气压融合仍由 `finalize` 完成（`step_with_cmd` 内部不含 update_alt）。
+        self.used_step_hil = false;
         match &mut self.hil {
             CtrlVariant::Pid(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, cmd_fn, &mut self.motors, &self.cfg),
             CtrlVariant::Indi(h) => h.step_with_cmd(&mut self.imu, &mut self.gps, &mut self.air, &mut self.vio, &mut self.rtk, cmd_fn, &mut self.motors, &self.cfg),
@@ -644,11 +757,15 @@ where
     /// - 解锁门控：未解锁（DISARM）时强制零推力，模拟电机停转/安全上锁。
     fn finalize(&mut self) {
         let baro_alt = self.baro_alt;
-        match &mut self.hil {
-            CtrlVariant::Pid(h) => h.est.update_alt(baro_alt),
-            CtrlVariant::Indi(h) => h.est.update_alt(baro_alt),
-            CtrlVariant::Lqr(h) => h.est.update_alt(baro_alt),
-            CtrlVariant::Tecs(h) => h.est.update_alt(baro_alt),
+        // 气压计高度融合：仅在非共享单步路径（`run_cmd` 手动/增稳）执行——
+        // `step_hil`（`run_setpoint`）内部已做 update_alt，这里跳过避免双重注入。
+        if !self.used_step_hil {
+            match &mut self.hil {
+                CtrlVariant::Pid(h) => h.est.update_alt(baro_alt),
+                CtrlVariant::Indi(h) => h.est.update_alt(baro_alt),
+                CtrlVariant::Lqr(h) => h.est.update_alt(baro_alt),
+                CtrlVariant::Tecs(h) => h.est.update_alt(baro_alt),
+            }
         }
 
         let has_degraded = self.fail_mask.iter().any(|&e| e < 1.0);
@@ -679,14 +796,26 @@ where
 
         // 把控制指令显式回写被控对象（注入推力/力矩）。
         // 解锁门控：未解锁（MAVLink DISARM）时强制零推力，模拟电机停转/安全上锁。
-        if self.armed {
-            self.plant.apply_actuators(&cmd);
+        // 诊断：物理步节流（HIL 双时钟复现）。N>0 时每 N 个控制拍才推进一次物理，
+        // 中间拍跳过 apply_actuators + plant.step（plant 冻结、指令被下一拍覆盖，
+        // 控制律照常每拍运行）——复刻 HIL 中「MCU 4ms 控制拍 vs PC 物理步更慢」
+        // 的时间基失配。复现完可移除。
+        let do_plant_step = if self.plant_throttle > 0 {
+            self.plant_step = self.plant_step.wrapping_add(1);
+            self.plant_step % self.plant_throttle == 0
         } else {
-            self.plant.apply_actuators(&ActuatorCmd::zero());
+            true
+        };
+        if do_plant_step {
+            if self.armed {
+                self.plant.apply_actuators(&cmd);
+            } else {
+                self.plant.apply_actuators(&ActuatorCmd::zero());
+            }
+            // 推进物理世界（已注入本拍推力）。仍推进 1×dt：HIL 的 PC 每物理步
+            // 固定 `world.step(dt)`（dt=4ms），物理时钟相对控制时钟变慢正是本场景。
+            self.plant.step();
         }
-
-        // 推进物理世界（已注入本拍推力）。
-        self.plant.step();
     }
 
     /// 解锁（MAVLink ARM）。电机恢复可转。
@@ -727,9 +856,27 @@ where
         self.plant.apply_actuators(cmd);
     }
 
+    /// 诊断：施加外部角冲量扰动（N·m·s，世界系 NED），模拟 HIL 释放/风等外部瞬态。
+    /// 在 `step` 前调用，冲量随本步物理步生效；不受电机效率分配器补偿，用于制造
+    /// 真实旋转以检验注入饥饿/时间基失配下的姿态估计反相发散。复现完移除。
+    pub fn disturb_torque_impulse(&mut self, tau_impulse_ned: [f64; 3]) {
+        self.plant.apply_torque_disturbance(tau_impulse_ned);
+    }
+
     /// 阶段 9：直接推进物理世界一步（不跑控制律，供自由落体等无控场景）。
     pub fn plant_step(&mut self) {
         self.plant.step();
+    }
+
+    /// HIL：外部执行器指令驱动一物理步，并刷新传感器真值样本。
+    ///
+    /// 与 [`step`]（PC 控制律闭环）相对：HIL 下控制律在真实 MCU，PC 只施加
+    /// `HIL_ACTUATOR_CONTROLS` 回传的电机指令并推进物理，然后重新采样 IMU/GPS 真值，
+    /// 使 [`last_imu`](Self::last_imu) 返回本步最新比力/角速度，供 `HIL_SENSOR` 注入。
+    pub fn plant_step_hil(&mut self, cmd: &ActuatorCmd) {
+        self.plant_apply(cmd);
+        self.plant.step();
+        self.sample_sensors();
     }
 
     /// P3-B1：运行时注入 GPS 失锁（false）或恢复（true）。

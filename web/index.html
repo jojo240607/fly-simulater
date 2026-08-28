@@ -55,6 +55,7 @@
         <option value="wind">抗风 (wind)</option>
         <option value="degraded">退化故障 (degraded)</option>
         <option value="avoidance">避障 (avoidance)</option>
+        <option value="hil" selected>HIL 真机</option>
       </select>
       <label>控制律</label>
       <select id="controller">
@@ -87,12 +88,14 @@
     <div class="group">
       <h3>遥测</h3>
       <div class="tele">
+        <div><span class="k">HIL 链路</span><span class="v" id="t-hil">–</span></div>
         <div><span class="k">高度</span><span class="v" id="t-alt">–</span></div>
         <div><span class="k">水平位移</span><span class="v" id="t-horiz">–</span></div>
         <div><span class="k">速度</span><span class="v" id="t-spd">–</span></div>
         <div><span class="k">滚转</span><span class="v" id="t-roll">–</span></div>
         <div><span class="k">俯仰</span><span class="v" id="t-pitch">–</span></div>
         <div><span class="k">偏航</span><span class="v" id="t-yaw">–</span></div>
+        <div><span class="k">真值对照</span><span class="v" id="t-truth">–</span></div>
         <div><span class="k">状态</span><span class="v" id="t-state">–</span></div>
       </div>
       <div style="margin-top:10px">

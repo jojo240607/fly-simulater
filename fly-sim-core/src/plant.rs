@@ -619,6 +619,21 @@ where
         }
     }
 
+    /// 诊断：施加外部角冲量扰动（N·m·s，世界系 NED），模拟 HIL 释放/风等外部瞬态。
+    /// 在 `step` 前调用，冲量随本步 `world.step` 生效；不受电机效率分配器补偿。
+    ///
+    /// 注意坐标变换：物理引擎是 Y-up，伪向量（力矩/角速度）NED→引擎 须按文件头
+    /// 反射约定变换（τ_up = (-n, +d, +e)），否则 [0,k,0] 会被误当成绕引擎竖直
+    /// 轴的偏航力矩而非俯仰力矩（真值 pitch 恒 0 的症状来源）。
+    pub fn apply_torque_disturbance(&mut self, tau_impulse_ned: [f64; 3]) {
+        let tau_up = [
+            -tau_impulse_ned[0],
+            tau_impulse_ned[2],
+            tau_impulse_ned[1],
+        ];
+        self.world.apply_torque_impulse(self.body_id, &tau_up, 0);
+    }
+
     /// 推进一个物理步：先把旋翼力/力矩注入机体，再 step。
     pub fn step(&mut self) {
         // ---- P3-C1：旋翼推进前置量（姿态/大气/速度，供 BET 核逐桨使用）----

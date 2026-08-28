@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 fly-sim-core = { path = "../fly-sim-core" }
 flyctrl-core = { path = "../../../mcu/oop/flyctrl/core" }
+# HIL 模式：USB CDC（虚拟串口）与真实飞控 MCU 通信（MAVLink 编解码走 flyctrl-core 再导出）。
+serialport = "4.9.0"
 phy-sdk = { path = "../../../game/physics/crates/phy-sdk", optional = true }
 phy-rigid = { path = "../../../game/physics/crates/phy-rigid", optional = true }
 phy-math = { path = "../../../game/physics/crates/phy-math", optional = true }

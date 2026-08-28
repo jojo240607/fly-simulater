@@ -393,8 +393,12 @@ fn dbg_multi_lateral_slide() {
             let fwd = ned(rot([-1.0,0.0,0.0]));
             let right = ned(rot([0.0,1.0,0.0]));
             let (av_vel, trig, lat_comp) = av.avoidance_velocity(&frame, fwd, right);
-            eprintln!("t={:.2}s pos=({:.2},{:.2},{:.2}) clear={:.2} fwd=({:.2},{:.2}) right=({:.2},{:.2}) trig={} lat_comp={:.3} av=({:.2},{:.2}) valid=[{}]",
-                t, pos[0], pos[1], pos[2], clear, fwd[0], fwd[1], right[0], right[1], trig, lat_comp, av_vel[0], av_vel[1], valid.join(", "));
+            let ev_int = ctrl.debug_av_evade();
+            let est = ctrl.debug_estimate_ned();
+            let truth = ctrl.debug_truth_ned();
+            eprintln!("t={:.2}s pos=({:.2},{:.2},{:.2}) clear={:.2} fwd=({:.2},{:.2}) right=({:.2},{:.2}) trig={} lat_comp={:.3} av=({:.2},{:.2}) ev_int=({:.2},{:.2}) est=({:.2},{:.2},{:.2}) tru=({:.2},{:.2},{:.2}) valid=[{}]",
+                t, pos[0], pos[1], pos[2], clear, fwd[0], fwd[1], right[0], right[1], trig, lat_comp, av_vel[0], av_vel[1], ev_int[0], ev_int[1],
+                est.pos[0].0, est.pos[1].0, est.pos[2].0, truth.pos[0].0, truth.pos[1].0, truth.pos[2].0, valid.join(", "));
         }
     }
     eprintln!("MIN_CLEAR={:.4}", min_clear);

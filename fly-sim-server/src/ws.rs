@@ -79,10 +79,11 @@ pub fn read_frame(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     let mut b0 = [0u8; 1];
     stream.read_exact(&mut b0)?;
     let opcode = b0[0] & 0x0F;
-    let masked = (b0[0] & 0x80) != 0;
 
     let mut b1 = [0u8; 1];
     stream.read_exact(&mut b1)?;
+    // 掩码位在第二字节 MSB（RFC6455）；第一字节 MSB 是 FIN，不能当作掩码位。
+    let masked = (b1[0] & 0x80) != 0;
     let mut len = (b1[0] & 0x7F) as usize;
     if len == 126 {
         let mut ext = [0u8; 2];

@@ -15,7 +15,7 @@
 
   // 控制面板当前值
   const ctl = {
-    scenario: "hover",
+    scenario: "hil",
     controller: "pid",
     wind: 0.5,
     fail_motor: null,   // 整数或 null
@@ -84,18 +84,80 @@
   function applyTelemetry(json) {
     let t;
     try { t = JSON.parse(json); } catch (e) { return; }
+    // HIL 真机模式：链路状态 + MCU 估计（遥测数字）+ 物理真值（对照）。
+    if (t.hil) {
+      applyHilTelemetry(t);
+      drawMotors(t.m);
+      return;
+    }
     setText("t-alt", t.alt.toFixed(2) + " m");
     setText("t-horiz", t.horiz.toFixed(2) + " m");
     setText("t-spd", t.speed.toFixed(2) + " m/s");
     setText("t-roll", (t.roll * 180 / Math.PI).toFixed(1) + "°");
     setText("t-pitch", (t.pitch * 180 / Math.PI).toFixed(1) + "°");
     setText("t-yaw", (t.yaw * 180 / Math.PI).toFixed(1) + "°");
+    setText("t-hil", "–");
+    setText("t-truth", "–");
     const st = document.getElementById("t-state");
     if (t.diverged) {
       st.innerHTML = '<span class="badge bad">发散</span>';
     } else {
       st.innerHTML = '<span class="badge ok">稳定</span>';
     }
+    drawMotors(t.m);
+  }
+
+  // HIL 遥测：状态徽章 + MCU 估计 + 真值对照。
+  function applyHilTelemetry(t) {
+    const h = t.hil;
+    const st = document.getElementById("t-state");
+    const hilEl = document.getElementById("t-hil");
+    const stateMap = {
+      connecting: ["探测 USB-CDC…", "var(--warn)"],
+      waiting_heartbeat: ["等待心跳…", "var(--warn)"],
+      running: ["已连接 · 闭环运行", "var(--accent)"],
+      error: ["连接失败", "var(--bad)"],
+    };
+    const [label, color] = stateMap[h.state] || [h.state, "var(--warn)"];
+    hilEl.textContent = label;
+    hilEl.style.color = color;
+    if (h.state === "error") {
+      st.innerHTML = '<span class="badge bad">链路异常</span>';
+      setText("t-truth", h.msg || "");
+    } else {
+      st.innerHTML = h.state === "running"
+        ? '<span class="badge ok">HIL</span>'
+        : '<span class="badge" style="background:rgba(227,179,65,.15);color:var(--warn)">连接中</span>';
+    }
+    // 遥测数字 = MCU 估计（真实飞控的"所见"），未到回退真值。
+    const mcu = t.mcu;
+    if (mcu) {
+      setText("t-alt", mcu.alt.toFixed(2) + " m");
+      setText("t-horiz", "–");
+      setText("t-spd", mcu.speed.toFixed(2) + " m/s");
+      setText("t-roll", (mcu.roll * 180 / Math.PI).toFixed(1) + "°");
+      setText("t-pitch", (mcu.pitch * 180 / Math.PI).toFixed(1) + "°");
+      setText("t-yaw", (mcu.yaw * 180 / Math.PI).toFixed(1) + "°");
+    } else if (t.truth) {
+      const tr = t.truth;
+      setText("t-alt", tr.alt.toFixed(2) + " m");
+      setText("t-horiz", tr.horiz.toFixed(2) + " m");
+      setText("t-spd", tr.speed.toFixed(2) + " m/s");
+      setText("t-roll", (tr.roll * 180 / Math.PI).toFixed(1) + "°");
+      setText("t-pitch", (tr.pitch * 180 / Math.PI).toFixed(1) + "°");
+      setText("t-yaw", (tr.yaw * 180 / Math.PI).toFixed(1) + "°");
+    }
+    // 真值对照（物理引擎）：仅数字，简短展示。
+    if (t.truth) {
+      const tr = t.truth;
+      setText(
+        "t-truth",
+        `alt ${tr.alt.toFixed(1)} · R/P ${(tr.roll * 180 / Math.PI).toFixed(0)}/${(tr.pitch * 180 / Math.PI).toFixed(0)}°`
+      );
+    }
+  }
+
+  function drawMotors(m) {
     // 电机推力条
     const wrap = document.getElementById("motors");
     if (!wrap._bars) {
@@ -114,10 +176,11 @@
       }
     }
     for (let i = 0; i < 4; i++) {
-      const m = t.m[i] || 0;
-      wrap._bars[i].fill.style.width = Math.max(0, Math.min(1, m)) * 100 + "%";
-      wrap._bars[i].fill.style.background = m > 0.5 ? "var(--accent)" : "var(--warn)";
-      wrap._bars[i].lbl.textContent = `M${i}: ${m.toFixed(2)}`;
+      const val = m ? m[i] : 0;
+      const mm = val || 0;
+      wrap._bars[i].fill.style.width = Math.max(0, Math.min(1, mm)) * 100 + "%";
+      wrap._bars[i].fill.style.background = mm > 0.5 ? "var(--accent)" : "var(--warn)";
+      wrap._bars[i].lbl.textContent = `M${i}: ${mm.toFixed(2)}`;
     }
   }
 
@@ -148,8 +211,30 @@
   const windSlider = document.getElementById("wind");
   const windVal = document.getElementById("windv");
 
-  scenarioSel.onchange = () => { ctl.scenario = scenarioSel.value; sendControl(); };
+  scenarioSel.onchange = () => {
+    ctl.scenario = scenarioSel.value;
+    setHilMode(ctl.scenario === "hil");
+    sendControl();
+  };
   controllerSel.onchange = () => { ctl.controller = controllerSel.value; sendControl(); };
+
+  // HIL 真机模式：控制律/故障/风场由 MCU 接管，面板只读。
+  function setHilMode(active) {
+    controllerSel.disabled = active;
+    failSel.disabled = active;
+    degSlider.disabled = active;
+    windSlider.disabled = active;
+    const hint = document.querySelector(".hint");
+    if (hint) {
+      hint.textContent = active
+        ? "HIL 真机：PC 物理引擎 ↔ USB-CDC 真实飞控闭环。\n" +
+          "渲染=物理真值，遥测=MCU 估计（真值对照）。\n" +
+          "先确认 MCU 已烧录 --features hil 固件并已连接 USB。"
+        : "拖拽画面：旋转视角 · 滚轮：缩放\n" +
+          "退化场景：先 4s 稳态再注入故障，发散后自动重演。\n" +
+          "避障场景：橙色=障碍（球/盒），青色射线=测距（绿=有效命中），蓝箭头=风场。";
+    }
+  }
 
   failSel.onchange = () => {
     const v = parseInt(failSel.value, 10);

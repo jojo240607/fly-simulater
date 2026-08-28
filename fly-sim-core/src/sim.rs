@@ -9,7 +9,7 @@
 use flyctrl_core::controller::Setpoint;
 use flyctrl_core::invariants;
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, Radian};
-use flyctrl_core::vehicle::{ActuatorCmd, VehicleState};
+use flyctrl_core::vehicle::{ActuatorCmd, ImuSample, VehicleState};
 
 use crate::controller::{hover_setpoint, FlyController};
 use crate::mavlink::MavlinkBridge;
@@ -82,6 +82,35 @@ where
     /// 每个物理步触发一次，传入世界真值（NED）与最近控制指令。
     pub fn set_on_frame(&mut self, cb: Box<dyn FnMut(&VehicleState, ActuatorCmd)>) {
         self.on_frame = Some(cb);
+    }
+
+    /// HIL 反相发散复现（诊断）：转发 IMU 节流注入周期到控制器
+    /// （见 [`FlyController::set_imu_throttle`]）。0=关闭（SIL 每拍真实 IMU）；
+    /// N>0 时每 N 拍喂一次真实 IMU，其余拍传 None，复刻 HIL 注入饥饿。复现完移除。
+    pub fn set_imu_throttle(&mut self, every: u32) {
+        self.ctrl.set_imu_throttle(every);
+    }
+
+    /// SIL/HIL 流程一致性：转发 GPS/位置观测节流注入周期到控制器
+    /// （见 [`FlyController::set_gps_throttle`]）。0=每拍（SIL 默认 250Hz）；
+    /// N>0 时每 N 拍才注入一次 GPS，复刻 HIL 中 HIL_GPS/SET_POSITION 每
+    /// `HIL_NAV_EVERY=8` 步（≈31Hz）注入一次的节流节奏。
+    pub fn set_gps_throttle(&mut self, every: u32) {
+        self.ctrl.set_gps_throttle(every);
+    }
+
+    /// HIL 反相发散复现（诊断）：转发物理步节流周期到控制器
+    /// （见 [`FlyController::set_plant_throttle`]）。0=关闭（SIL 每拍推进物理）；
+    /// N>0 时每 N 个控制拍才推进一次物理，复刻 HIL 双时钟失配。与 `set_imu_throttle`
+    /// 配套（IMU 注入与物理步同频）。复现完移除。
+    pub fn set_plant_throttle(&mut self, every: u32) {
+        self.ctrl.set_plant_throttle(every);
+    }
+
+    /// 诊断：施加外部角冲量扰动（N·m·s，世界系 NED），模拟 HIL 释放/风等外部瞬态。
+    /// 在 `step_frame` 前调用，随本步物理步生效。复现完移除。
+    pub fn disturb_torque_impulse(&mut self, tau_impulse_ned: [f64; 3]) {
+        self.ctrl.disturb_torque_impulse(tau_impulse_ned);
     }
 
     /// 阶段 6：被控对象真实机械能（动能 + 重力势能，NED）。
@@ -486,6 +515,24 @@ where
     /// 阶段 7+（Web 后端）：取当前真值状态（NED）与最近控制指令快照，供渲染/遥测使用。
     pub fn snapshot(&self) -> (VehicleState, ActuatorCmd) {
         (self.ctrl.world_state(), self.ctrl.last_cmd())
+    }
+
+    /// HIL 模式：外部执行器指令驱动单步物理仿真（不跑 PC 控制律）。
+    ///
+    /// 与 [`step_frame`]（SIL，PC 控制律闭环）相对：HIL 下控制律在真实 MCU，
+    /// PC 只把 `HIL_ACTUATOR_CONTROLS` 回传的电机指令 `cmd` 施加到被控对象并
+    /// 推进物理一步（同时刷新 IMU 真值），返回新的 NED 真值状态供
+    /// `HIL_SENSOR`/`SET_POSITION` 注入。
+    pub fn step_hil(&mut self, cmd: &ActuatorCmd) -> VehicleState {
+        self.ctrl.plant_step_hil(cmd);
+        self.steps += 1;
+        self.ctrl.world_state()
+    }
+
+    /// HIL 模式：最近一次 IMU 真值（机体比力 + 角速度），供 `HIL_SENSOR` 注入。
+    /// 比力/角速度单位与标准 MAVLink `HIL_SENSOR` 的 accel/gyro 字段一致。
+    pub fn last_imu(&self) -> ImuSample {
+        self.ctrl.last_imu()
     }
 
     /// 阶段 7+：取引擎世界系（Y-up）真实位姿 (pos xyz, quat wxyz)。绕开 NED 映射，
