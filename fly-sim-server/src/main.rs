@@ -39,7 +39,7 @@ use fly_sim_hil::hil_link::{dbg_report_f64, HilLink, LinkState};
 // 虚拟 MCU（Unicorn 模拟固件）——场景 "vperiph" 的 HIL 后端。
 use mcu_simulater::machine::Machine;
 use mcu_simulater::peripheral::vperiph::data_source::FlySimState;
-use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, UsageType};
+use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, Profile, UsageType};
 use openh264::formats::YUVSource;
 
 /// 待编码的 I420 帧（YUV420 平面：Y(w*h) + U(w/2*h/2) + V(w/2*h/2)），
@@ -128,6 +128,9 @@ fn new_h264_encoder(bitrate_bps: u32, intra_period: u32) -> Result<Encoder, open
         .bitrate(BitRate::from_bps(bitrate_bps))
         .max_frame_rate(FrameRate::from_hz(8.0))
         .usage_type(UsageType::CameraVideoRealTime)
+        // Baseline：无 B 帧（解码顺序=编码顺序），WebCodecs 兼容性最好；
+        // 实测带宽与 High 相当（20fps 下均 ~220KB/60 帧）
+        .profile(Profile::Baseline)
         // GOP：新客户端 ≤1.5s 等到关键帧出画面（视频流常规值）
         .intra_frame_period(IntraFramePeriod::from_num_frames(intra_period));
     Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
@@ -160,14 +163,14 @@ const STEPS_PER_FRAME: u64 = 8; // 每显示帧推进的物理步（dt=4ms → ~
 /// （更顺，画面移动幅度减半但帧率翻倍，位移速度不变）。固件控制律每 3.3 物理步
 /// 一个周期（run 200k=0.3 周期），每步 run 13ms/周期安全（150k 等效 18ms 已发散）。
 /// 2 步/帧 = 33ms → 上限测试（编码吞吐决定实际可达 fps）。
-/// 每帧物理步数（用户选定 40fps 档）：
+/// 每帧物理步数（统一 20fps 推帧档）：
 /// - 8 步/帧 = 7.5fps（原，卡）
-/// - 4 步/帧 = 19fps（流畅，2.5Mbps）
-/// - 2 步/帧 = 40fps（人眼感知极限，3.8Mbps）← 当前
-/// - 1 步/帧 = 80fps（绝对上限：run(200k)≈12ms 是硬下限，4.9Mbps，CPU 最高）
-/// 固件控制律每 3.3 物理步一个周期（run 200k=0.3 周期，每步 run 13ms/周期安全；
-/// 150k 等效 18ms 已实测发散），各档均稳定（alt 起伏 0.64m）。
-const VP_STEPS_PER_FRAME: u64 = 2;
+/// - 2 步/帧 = 40fps：open264 在 40fps 输入下码控不足（800k÷40=20k/帧）会主动
+///   跳帧 → 参考帧缺失 → WebCodecs 周期性解码错误+卡顿（本地验证 40fps 仅
+///   解 38/60 帧，20fps 60/60 全解）→ 放弃 40fps 档
+/// - 4 步/帧 = 20fps（当前）：稳定不丢帧、带宽减半（桌面 ~1.8M）
+/// 固件控制律每 3.3 物理步一个周期（每步 run 13ms/周期安全），各档均稳定。
+const VP_STEPS_PER_FRAME: u64 = 4;
 
 /// 固件推进频率：每 N 物理步 run 一次。实测每 2 步 run（控制律周期 ~26ms 物理）
 /// 超过稳定临界（~15ms，150k/步 等效）→ 姿态发散坠机；必须每步 run（~13ms 周期）。
@@ -1265,11 +1268,9 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
         // vperiph(320×240/640×480) 协商为 h264 时用视频流（帧间压缩，带宽比 PNG 省 ~5×）；
         // SIL(720×540) 恒用 PNG。编码器每连接一个。
         let mut h264: Option<Encoder> = None;
-        let frame_skip = if low { 2 } else { 1 }; // 手机档每 2 帧推 1（40→20fps）
-        let mut skip = 0u32;
+        // 各档统一 20fps 推帧（VP_STEPS_PER_FRAME=4），不做帧跳过：
+        // 40fps 输入 open264 会跳帧（码控不足）→ 浏览器解码错误；20fps 稳定。
         for (fw, fh, inp, tele) in render_rx {
-            skip += 1;
-            if skip % frame_skip != 0 { continue; }
             let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
             let bytes: &[u8] = bytemuck_pixels(&pixels);
             if use_h264 && (low || (fw == 640 && fh == 480)) {
