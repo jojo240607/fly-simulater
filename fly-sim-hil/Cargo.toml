@@ -1,0 +1,23 @@
+[package]
+name = "fly-sim-hil"
+version = "0.1.0"
+edition = "2021"
+description = "HIL 链路层（USB-CDC / 虚拟口抽象）：MAVLink HIL 帧收发 + 注入节奏，与 MCU 仿真平台共用"
+
+[features]
+default = []
+# 真实 USB-CDC 物理串口后端（serialport crate）。默认不启用，以便虚拟口
+# （mcu_simulater 的 USB_OTG 虚拟外设实现 HilPort）零外部依赖闭环。
+realport = ["dep:serialport"]
+
+[dependencies]
+# 飞控核心：SIL/HIL 共享控制律 + MAVLink 类型（ImuSample/ActuatorCmd）。
+flyctrl-core = { path = "../../flyctrl/core" }
+# 共用 MAVLink v2 编解码核心（HIL_SENSOR/HIL_GPS/SET_POSITION/HIL_ACTUATOR_CONTROLS…）。
+mavlink-core = { path = "../../mavlink-core" }
+# 真实 USB-CDC 后端（VID 0483:5740 STM32 虚拟串口）；仅 realport feature 启用。
+# 在 Linux 构建需 libudev-dev（serialport 经 udev 枚举串口）。
+serialport = { version = "4.9.0", optional = true }
+
+[profile.release]
+opt-level = 3

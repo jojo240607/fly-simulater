@@ -1,4 +1,10 @@
-//! HIL 链路层：经 USB CDC（虚拟串口）与真实飞控 MCU 的 MAVLink 数据交互。
+//! HIL 链路层：经 USB CDC（虚拟串口）与飞控 MCU 的 MAVLink 数据交互。
+//!
+//! 串口后端抽象为 [`HilPort`] trait：
+//! - 默认：虚拟口后端（如 mcu_simulater 的 USB_OTG 虚拟外设）实现 [`HilPort`]，
+//!   经 [`HilLink::open_virtual`] 接入，单进程 HIL 闭环，零外部串口依赖。
+//! - `realport` feature：真实 USB-CDC 后端（serialport，VID 0483:5740 STM32），
+//!   经 [`HilLink::open`] 接入（含后台 [`CdcProbe`] 端口探测）。
 //!
 //! 闭环方向（与 `tools/hil_mock.py` 同构，验证过的边界直接复用）：
 //!   - 上行（PC -> 飞控）：`HIL_SENSOR`(107) 注入 IMU 真值 + 气压高度；
@@ -14,18 +20,19 @@
 //!   - MCU bulk-OUT 端点收满 64B 后需 ~ms 级时间供 uplink 消费并 re-arm，
 //!     多包（如 HIL_SENSOR 74B=64+10）分块间必须留间隔，否则命中 NAK 写超时。
 
-use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use flyctrl_core::comm::mavlink::{self, Frame, MAX_FRAME_LEN};
 use flyctrl_core::vehicle::ImuSample;
 
 /// STM32 USB-CDC 的 VID/PID（HIL 上行口）。
+#[cfg(feature = "realport")]
 pub const VID_STM32: u16 = 0x0483;
+#[cfg(feature = "realport")]
 pub const PID_STM32_CDC: u16 = 0x5740;
 /// HIL 上行口波特率（USB-CDC 恒为 115200）。
+#[cfg(feature = "realport")]
 const BAUD: u32 = 115200;
 
 /// MAV_MODE_FLAG_HIL_ENABLED（心跳 base_mode 位，标识当前为 HIL 仿真模式）。
@@ -124,54 +131,76 @@ pub enum LinkState {
     Error(&'static str),
 }
 
-/// USB-CDC 与真实飞控的 MAVLink 交互句柄。
+/// HIL 链路串口后端抽象（真实 USB-CDC / mcu_simulater 虚拟口统一接口）。
 ///
-/// 单一调用方（main 的 HIL 渲染线程）持有，发送/接收均在此串行完成，
-/// 不需要内部锁（与固件侧 USB_TX_MTX 的 app 级互斥不在同一进程）。
-pub struct HilLink {
-    port: Box<dyn serialport::SerialPort>,
-    seq: u8,
-    /// 下行分包/粘包重组缓冲。
-    rx_buf: Vec<u8>,
-    /// 最近 HIL_ACTUATOR_CONTROLS 四电机归一化推力。
-    actuator: [f32; 4],
-    /// 是否已收到含 HIL flag 的心跳（链路建立判据）。
-    hil_flagged: bool,
-    /// 最近 MCU 估计姿态 / NED 位置速度（Web UI 遥测用）。
-    mcu_att: Option<mavlink::Attitude>,
-    mcu_local: Option<mavlink::LocalPositionNed>,
-    last_rx: Instant,
-    /// 临时诊断：记录解析到的帧（前 N 条）与 CRC 失败数。
-    dbg_frames: u32,
-    dbg_crc_fail: u32,
-    /// 临时诊断：send_chunked 写/睡耗时累加（区分 USB 写阻塞 vs 分块间隔）。
-    dbg_write_us: u64,
-    dbg_sleep_us: u64,
-    dbg_chunks: u64,
-    /// 临时诊断（hil-input-replay）：注入序号与上次注入墙钟（测量真实注入节奏）。
-    inj_seq: u64,
-    last_inj_wall: Option<Instant>,
-    /// 录制句柄（open_impl 打开一次，持久复用），避免每次 rec_event 重开文件拖慢 HIL 注入节奏。
-    rec_file: Option<std::fs::File>,
+/// 单线程使用（HilLink 由单一调用方持有，无跨线程要求）——不要求 Send，
+/// 以便包住非 Send 的仿真对象（如 mcu_simulater 的 Machine，内含 unicorn Rc）。
+pub trait HilPort {
+    /// 当前可读字节数（<=0 视为无下行；虚拟口返回缓冲长度）。
+    fn bytes_to_read(&self) -> std::io::Result<u32>;
+    /// 读下行字节（最多 buf.len()），返回实际读数。
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+    /// 写上行字节（全量或报错）。
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()>;
+    /// 冲刷（虚拟口可为 no-op）。
+    fn flush(&mut self) -> std::io::Result<()>;
 }
 
-/// HIL USB-CDC 端口后台探测。
+/// 真实 USB-CDC 后端：把 serialport 包装为 [`HilPort`]（realport feature）。
+///
+/// `bytes_to_read()` 是 windows 串口驱动缓冲剩余字节数（`available_bytes`），
+/// 使 poll 能先判空再单次读，避免 read 阻塞饿死主循环（见 [`HilLink::poll`] 注释）。
+#[cfg(feature = "realport")]
+pub struct RealPort {
+    port: serialport::TTYPort,
+}
+
+#[cfg(feature = "realport")]
+impl RealPort {
+    fn new(port: serialport::TTYPort) -> Self {
+        Self { port }
+    }
+}
+
+#[cfg(feature = "realport")]
+impl HilPort for RealPort {
+    fn bytes_to_read(&self) -> std::io::Result<u32> {
+        use serialport::SerialPort as _;
+        self.port.bytes_to_read().map(|n| n as u32).map_err(Into::into)
+    }
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::Read as _;
+        self.port.read(buf).map_err(Into::into)
+    }
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        self.port.write_all(buf).map_err(Into::into)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.port.flush().map_err(Into::into)
+    }
+}
+
+/// HIL USB-CDC 端口后台探测（realport feature）。
 ///
 /// 背景：`serialport::available_ports()` 在 USB 驱动卡死时可能长时间阻塞（hil-cdc-stall
 /// 调试中主循环曾因此挂起）。把枚举放到独立线程，每 ~1.5s 刷新一次缓存结果；
 /// 主线程只读缓存，永不阻塞，设备恢复后自动重连。
+#[cfg(feature = "realport")]
 pub struct CdcProbe {
-    last: Arc<Mutex<Option<String>>>,
-    stop: Arc<AtomicBool>,
+    last: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[cfg(feature = "realport")]
 impl CdcProbe {
     /// 启动后台探测线程（进程生命周期内常驻）。
     pub fn start() -> Self {
-        let last = Arc::new(Mutex::new(None::<String>));
-        let stop = Arc::new(AtomicBool::new(false));
-        let t_last = Arc::clone(&last);
-        let t_stop = Arc::clone(&stop);
+        use std::sync::atomic::Ordering;
+        let last = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let t_last = std::sync::Arc::clone(&last);
+        let t_stop = std::sync::Arc::clone(&stop);
         std::thread::spawn(move || {
             while !t_stop.load(Ordering::Relaxed) {
                 // 枚举可能阻塞（驱动卡死）；只影响本线程，主循环仍能读到上一次结果。
@@ -200,12 +229,82 @@ impl CdcProbe {
     }
 }
 
+/// USB-CDC 与真实飞控的 MAVLink 交互句柄。
+///
+/// 单一调用方（main 的 HIL 渲染线程）持有，发送/接收均在此串行完成，
+/// 不需要内部锁（与固件侧 USB_TX_MTX 的 app 级互斥不在同一进程）。
+pub struct HilLink {
+    port: Box<dyn HilPort>,
+    seq: u8,
+    /// 下行分包/粘包重组缓冲。
+    rx_buf: Vec<u8>,
+    /// 最近 HIL_ACTUATOR_CONTROLS 四电机归一化推力。
+    actuator: [f32; 4],
+    /// [HIL 联调诊断] 完整 16 路 controls（4-15 原样保留，供诊断）。
+    pub actuator_full: [f32; 16],
+    /// 是否已收到含 HIL flag 的心跳（链路建立判据）。
+    hil_flagged: bool,
+    /// 最近 MCU 估计姿态 / NED 位置速度（Web UI 遥测用）。
+    mcu_att: Option<mavlink::Attitude>,
+    mcu_local: Option<mavlink::LocalPositionNed>,
+    last_rx: Instant,
+    /// 临时诊断：记录解析到的帧（前 N 条）与 CRC 失败数。
+    dbg_frames: u32,
+    dbg_crc_fail: u32,
+    /// 临时诊断：send_chunked 写/睡耗时累加（区分 USB 写阻塞 vs 分块间隔）。
+    dbg_write_us: u64,
+    dbg_sleep_us: u64,
+    dbg_chunks: u64,
+    /// 临时诊断（hil-input-replay）：注入序号与上次注入墙钟（测量真实注入节奏）。
+    inj_seq: u64,
+    last_inj_wall: Option<Instant>,
+    /// 录制句柄（open_impl 打开一次，持久复用），避免每次 rec_event 重开文件拖慢 HIL 注入节奏。
+    rec_file: Option<std::fs::File>,
+}
+
 impl HilLink {
-    /// 打开指定 HIL 上行口（带整体墙钟限时）。
+    /// 从任意 [`HilPort`] 后端构造（字段初始化；真实串口与虚拟口共用）。
+    fn from_port(port: Box<dyn HilPort>) -> Self {
+        Self {
+            port,
+            seq: 0,
+            rx_buf: Vec::with_capacity(2048),
+            actuator: [0.0; 4],
+            actuator_full: [0.0; 16],
+            hil_flagged: false,
+            mcu_att: None,
+            mcu_local: None,
+            last_rx: Instant::now(),
+            dbg_frames: 0,
+            dbg_crc_fail: 0,
+            dbg_write_us: 0,
+            dbg_sleep_us: 0,
+            dbg_chunks: 0,
+            inj_seq: 0,
+            last_inj_wall: None,
+            rec_file: std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(REC_PATH)
+                .ok(),
+        }
+    }
+
+    /// 打开虚拟口后端（如 mcu_simulater 的 USB_OTG 虚拟外设实现 [`HilPort`]）。
+    /// 用于单进程 HIL 闭环：不探测、不重试——虚拟口常驻可用，立即进入链路状态机。
+    pub fn open_virtual(port: Box<dyn HilPort>) -> Self {
+        Self::from_port(port)
+    }
+
+    /// 打开指定 HIL 上行口（带整体墙钟限时）。仅 realport feature 可用。
     ///
     /// 驱动卡死时 `serialport::open()` 可能无超时阻塞（CreateFileW/SetCommState），
     /// 直接调用会饿死主循环。故放到独立线程执行并限时返回：
     /// 超时泄漏一个探测线程（重试已节流，可接受），调用方按重试节流继续探测。
+    ///
+    /// 线程边界：spawn 只携带 `serialport::TTYPort`（Send），`HilLink` 本体
+    /// （含非 Send 的 `Box<dyn HilPort>`，供 mcu_simulater 虚拟口）在调用线程构造。
+    #[cfg(feature = "realport")]
     pub fn open(port_name: &str, open_timeout: Duration) -> Result<Self, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let name = port_name.to_string();
@@ -214,7 +313,7 @@ impl HilLink {
         });
         let wall = open_timeout + Duration::from_secs(2);
         match rx.recv_timeout(wall) {
-            Ok(r) => r,
+            Ok(r) => r.map(|port| Self::from_port(Box::new(RealPort::new(port)))),
             Err(_) => {
                 // #region debug-point D:open-timeout
                 dbg_report(
@@ -231,7 +330,11 @@ impl HilLink {
 
     /// 打开实现：端口未就绪（复位枚举中）时在 `open_timeout` 内重试，
     /// 占用/禁用类错误直接返回 `Err`（提示 taskkill / Enable-PnpDevice，属边界问题）。
-    fn open_impl(port_name: &str, open_timeout: Duration) -> Result<Self, String> {
+    ///
+    /// 返回 `serialport::TTYPort`（Send，可在 spawn 线程间传输），由 [`Self::open`]
+    /// 在调用线程包成非 Send 的 `HilPort`。
+    #[cfg(feature = "realport")]
+    fn open_impl(port_name: &str, open_timeout: Duration) -> Result<serialport::TTYPort, String> {
         let t0 = Instant::now();
         let mut tries = 0u64;
         loop {
@@ -249,34 +352,13 @@ impl HilLink {
             // #endregion
             match serialport::new(port_name, BAUD)
                 .timeout(Duration::from_millis(50))
-                .open()
+                .open_native()
             {
                 Ok(port) => {
                     // #region debug-point D:open-ok
                     dbg_report("D", "hil_link.rs:open", "serial open ok", &[("tries", tries as i64)]);
                     // #endregion
-                    return Ok(Self {
-                        port,
-                        seq: 0,
-                        rx_buf: Vec::with_capacity(2048),
-                        actuator: [0.0; 4],
-                        hil_flagged: false,
-                        mcu_att: None,
-                        mcu_local: None,
-                        last_rx: Instant::now(),
-                        dbg_frames: 0,
-                        dbg_crc_fail: 0,
-                        dbg_write_us: 0,
-                        dbg_sleep_us: 0,
-                        dbg_chunks: 0,
-                        inj_seq: 0,
-                        last_inj_wall: None,
-                        rec_file: std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(REC_PATH)
-                            .ok(),
-                    });
+                    return Ok(port);
                 }
                 Err(e) => {
                     // 已枚举但驱动未就绪（FileNotFoundError/找不到文件）→ 短暂重试；
@@ -582,6 +664,7 @@ impl HilLink {
                 if let Some(act) = mavlink::decode_hil_actuator_controls(payload) {
                     self.actuator =
                         [act.controls[0], act.controls[1], act.controls[2], act.controls[3]];
+                    self.actuator_full = act.controls;
                     // #region debug-point hil-input-replay:act
                     self.rec_event(
                         "act",
