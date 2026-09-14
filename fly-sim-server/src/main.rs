@@ -118,12 +118,12 @@ fn rgba_to_i420(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// 新建 openh264 编码器（H.264 视频流：vperiph 640×480 @ 1200kbps）。
 /// 带宽实测：640×480 动态 8 字场景 ~1.2-1.5Mbps，在公网 2.5Mbps 内且比 PNG(320×240,
 /// 2.1Mbps) 分辨率更高带宽更低（帧间压缩）。
-fn new_h264_encoder() -> Result<Encoder, openh264::Error> {
+fn new_h264_encoder(bitrate_bps: u32) -> Result<Encoder, openh264::Error> {
     let cfg = EncoderConfig::new()
-        .bitrate(BitRate::from_bps(1_200_000))
-        .max_frame_rate(FrameRate::from_hz(8.0))
+        .bitrate(BitRate::from_bps(bitrate_bps))
+        .max_frame_rate(FrameRate::from_hz(20.0))
         .usage_type(UsageType::CameraVideoRealTime)
-        // GOP 15 帧（≈1.9s@8fps）：新客户端 ≤2s 等到关键帧出画面
+        // GOP 15 帧：新客户端 ≤2s（@8fps）/≤0.75s（@20fps）等到关键帧出画面
         .intra_frame_period(IntraFramePeriod::from_num_frames(15));
     Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
 }
@@ -1196,7 +1196,7 @@ fn telemetry_json(
     )
 }
 
-fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String) {
+fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: String) {
     use std::sync::atomic::{AtomicU32, Ordering as AOrder};
     static CLIENTS: AtomicU32 = AtomicU32::new(0);
     let n = CLIENTS.fetch_add(1, AOrder::Relaxed) + 1;
@@ -1247,20 +1247,27 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String) {
     // 帧格式：w(4B LE) + h(4B LE) + fmt(1B) + [fmt=1: PNG | fmt=2: key(1B)+H.264 Annex-B]。
     // 推帧格式由客户端协商（fmt 参数）：h264（默认，vperiph 视频流）/ png（无 WebCodecs 回退）。
     let use_h264 = fmt == "h264";
+    // 移动端降档（q=low）：320×240 + 500kbps + 20fps——弱信号/低端机解码/省流量。
+    // 桌面正常（q=""）：640×480 + 1200kbps + 40fps。
+    let low = q == "low";
     let (render_tx, render_rx) =
         std::sync::mpsc::sync_channel::<(u32, u32, RenderInput, String)>(2);
     let render_stream = stream.try_clone().unwrap();
     thread::spawn(move || {
         let mut s = render_stream;
-        // vperiph(320×240) 协商为 h264 时用视频流（帧间压缩，带宽比 PNG 再省 ~5×）；
+        // vperiph(320×240/640×480) 协商为 h264 时用视频流（帧间压缩，带宽比 PNG 省 ~5×）；
         // SIL(720×540) 恒用 PNG。编码器每连接一个。
         let mut h264: Option<Encoder> = None;
+        let frame_skip = if low { 2 } else { 1 }; // low 档每 2 帧推 1（40→20fps）
+        let mut skip = 0u32;
         for (fw, fh, inp, tele) in render_rx {
+            skip += 1;
+            if skip % frame_skip != 0 { continue; }
             let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
             let bytes: &[u8] = bytemuck_pixels(&pixels);
-            if use_h264 && fw == 640 && fh == 480 {
+            if use_h264 && (low || (fw == 640 && fh == 480)) {
                 if h264.is_none() {
-                    h264 = new_h264_encoder().ok();
+                    h264 = new_h264_encoder(if low { 500_000 } else { 1_200_000 }).ok();
                 }
                 if let Some(enc) = h264.as_mut() {
                     let i420 = I420Source { w: fw as usize, h: fh as usize, data: rgba_to_i420(bytes, fw as usize, fh as usize) };
@@ -1340,7 +1347,10 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String) {
                 // PNG 推帧保持 320×240（PNG 逐帧压缩，带宽 ~2.1Mbps 已近上限）。
                 // 前端按帧头 w/h 自适应显示。
                 let (fw, fh) = if c.scenario == "vperiph" {
-                    if use_h264 { (640u32, 480u32) } else { (320u32, 240u32) }
+                    // 桌面 H.264：640×480；移动端降档（q=low）：320×240（带宽/解码友好）
+                    if use_h264 {
+                        if low { (320u32, 240u32) } else { (640u32, 480u32) }
+                    } else { (320u32, 240u32) }
                 } else { (FRAME_W, FRAME_H) };
                 if render_tx.try_send((fw, fh, inp, tele)).is_err() {
                     // 渲染线程忙（通道满）：丢本帧保仿真实时，画面延迟 ≤2 帧。
@@ -1570,17 +1580,20 @@ fn handle_http(stream: &mut TcpStream) {
             return;
         }
         // 前端按能力协商推帧格式：?fmt=png（非安全上下文/老浏览器无 WebCodecs）| h264（默认）。
-        // WebCodecs 是 Secure Context 限定 API（需 HTTPS/localhost），明文 HTTP 下前端自动退 PNG。
-        let fmt = path
-            .split('?')
-            .nth(1)
-            .unwrap_or("")
+        // 移动端可附加 ?q=low（320×240+500kbps+20fps，省流量/解码友好）。
+        let query = path.split('?').nth(1).unwrap_or("");
+        let fmt = query
             .split('&')
             .find_map(|kv| kv.strip_prefix("fmt="))
             .unwrap_or("h264")
             .to_string();
+        let q = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("q="))
+            .unwrap_or("")
+            .to_string();
         let ctrl = Arc::new(Mutex::new(ControlState::default()));
-        handle_ws(stream.try_clone().expect("clone 失败"), ctrl, fmt);
+        handle_ws(stream.try_clone().expect("clone 失败"), ctrl, fmt, q);
     } else {
         let _ = serve_static(stream, path);
     }

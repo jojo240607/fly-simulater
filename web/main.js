@@ -30,7 +30,11 @@
     // WebCodecs（VideoDecoder）是 Secure Context 限定 API：HTTPS/localhost 才可用。
     // 明文 HTTP 下自动回退 PNG 推帧（服务器按 ?fmt= 协商编码格式）。
     const canH264 = window.isSecureContext && window.VideoDecoder;
-    ws = new WebSocket(`${proto}://${location.host}/ws?fmt=${canH264 ? "h264" : "png"}`);
+    // 移动端降档（q=low）：服务器按 320×240+500kbps+20fps 推——弱信号/低端机解码/
+    // 省流量；桌面正常 640×480+40fps。
+    const isMobile = /Android|iPhone|iPad|iPod|Mobile|HarmonyOS/i.test(navigator.userAgent);
+    const q = (isMobile && canH264) ? "&q=low" : "";
+    ws = new WebSocket(`${proto}://${location.host}/ws?fmt=${canH264 ? "h264" : "png"}${q}`);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
