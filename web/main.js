@@ -26,15 +26,20 @@
   let lastTele = 0;
 
   function connect() {
+    // 每连接全新解码状态（degrade 降档重连 / 网络断开重连都适用：
+    // 残留 vdecErrors≥2 会跳过 320 档直接退 PNG）
+    vdecErrors = 0; vdecBroken = false; gotVideo = false;
+    resetVDecoder();
     const proto = location.protocol === "https:" ? "wss" : "ws";
     // WebCodecs（VideoDecoder）是 Secure Context 限定 API：HTTPS/localhost 才可用。
     // 明文 HTTP 下自动回退 PNG 推帧（服务器按 ?fmt= 协商编码格式）。
     const canH264 = window.isSecureContext && window.VideoDecoder;
-    // 移动端降档（q=low）：服务器按 320×240+500kbps+20fps 推——弱信号/低端机解码/
-    // 省流量；桌面正常 640×480+40fps。
+    // 移动端降档链：resLevel 0=640×480 H.264（q=low）、1=320×240 H.264（q=lowest）、
+    // 2=PNG（forcePng）。640 解码失败自动退 320（仍视频流），再失败才 PNG。
     const isMobile = /Android|iPhone|iPad|iPod|Mobile|HarmonyOS/i.test(navigator.userAgent);
-    const q = (isMobile && canH264 && !forcePng) ? "&q=low" : "";
-    ws = new WebSocket(`${proto}://${location.host}/ws?fmt=${(canH264 && !forcePng) ? "h264" : "png"}${q}`);
+    const useVideo = canH264 && !forcePng;
+    const q = !useVideo ? "" : (resLevel === 1 ? "&q=lowest" : (isMobile ? "&q=low" : ""));
+    ws = new WebSocket(`${proto}://${location.host}/ws?fmt=${useVideo ? "h264" : "png"}${q}`);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
@@ -50,17 +55,13 @@
       }
       statusEl.style.color = "var(--accent)";
       sendControl();
-      // 兜底（仅 H.264 模式）：连接后 4s 解码器仍无任何视频帧输出 → 降级 PNG
-      // 重连（覆盖解码器配置成功但不出帧 / 手机硬解 640×480 失败等静默故障）。
-      // PNG 模式无 vdec，不 arm。
+      // 兜底（仅 H.264 模式）：连接后 4s 解码器仍无任何视频帧输出 → 降级
+      // （640→320→PNG，覆盖解码器静默故障/手机硬解 640 失败）。PNG 模式无 vdec，不 arm。
       if (canH264) {
         clearTimeout(noVideoTimer);
         noVideoTimer = setTimeout(() => {
           if (gotVideo) return;
-          forcePng = true; // 强制下次重连走 PNG（不再回 h264）
-          statusEl.textContent = "视频流无输出，降级 PNG 推帧重连…";
-          statusEl.style.color = "var(--warn)";
-          try { ws.close(); } catch (e) {}
+          degrade();
         }, 4000);
       }
     };
@@ -89,6 +90,22 @@
   let gotVideo = false;     // 是否收到过视频帧（无输出超时兜底用）
   let noVideoTimer = null;  // 无输出超时定时器
   let forcePng = false;     // 解码持续失败后强制 PNG 推帧（重连不再协商 h264）
+  let resLevel = 0;         // 0=640×480 H.264、1=320×240 H.264（640 解码失败退档）、2=PNG
+
+  // 降级链：640×480 无输出/解码失败 → 降 320×240（仍 H.264 视频流）→ 再失败 → PNG。
+  function degrade() {
+    if (!forcePng && resLevel === 0) {
+      resLevel = 1;
+      statusEl.textContent = "640×480 解码无输出，降 320×240 重试…";
+      statusEl.style.color = "var(--warn)";
+      try { ws.close(); } catch (e) {}
+      return;
+    }
+    forcePng = true;
+    statusEl.textContent = "视频流持续失败，降级 PNG 推帧重连…";
+    statusEl.style.color = "var(--warn)";
+    try { ws.close(); } catch (e) {}
+  }
   let vts = 0;              // 单调时间戳（μs），WebCodecs 只要求单调递增
 
   function hex2(v) { return v.toString(16).padStart(2, "0"); }
@@ -223,10 +240,8 @@
       // 解码出错：丢掉 delta 帧，等下一个关键帧重建解码器（H.264 帧链不能断）
       if (!key) return;
       if (vdecErrors >= 2) {
-        // 连续重建仍失败：强制降级 PNG 推帧（重连协商 ?fmt=png，不再回 h264）
-        forcePng = true;
-        statusEl.textContent = "H.264 解码持续失败，降级 PNG 推帧重连…";
-        ws.close();
+        // 连续重建仍失败：沿降级链退（640→320→PNG，保画面）
+        degrade();
         return;
       }
       resetVDecoder();

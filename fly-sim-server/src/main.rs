@@ -1250,9 +1250,11 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
     // 帧格式：w(4B LE) + h(4B LE) + fmt(1B) + [fmt=1: PNG | fmt=2: key(1B)+H.264 Annex-B]。
     // 推帧格式由客户端协商（fmt 参数）：h264（默认，vperiph 视频流）/ png（无 WebCodecs 回退）。
     let use_h264 = fmt == "h264";
-    // 移动端降档（q=low）：320×240 + 500kbps + 20fps——弱信号/低端机解码/省流量。
-    // 桌面正常（q=""）：640×480 + 1200kbps + 40fps。
-    let low = q == "low";
+    // 移动端降档：q=low（640×480+600k+20fps，用户要求移动端同分辨率）；
+    // q=lowest（320×240+350k+20fps，前端解码 640 失败自动退档重试）。
+    // 桌面正常（q=""）：640×480 + 800kbps + 40fps。
+    let low = q == "low" || q == "lowest";
+    let q320 = q == "lowest";
     let (render_tx, render_rx) =
         std::sync::mpsc::sync_channel::<(u32, u32, RenderInput, String)>(2);
     let render_stream = stream.try_clone().unwrap();
@@ -1261,7 +1263,7 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
         // vperiph(320×240/640×480) 协商为 h264 时用视频流（帧间压缩，带宽比 PNG 省 ~5×）；
         // SIL(720×540) 恒用 PNG。编码器每连接一个。
         let mut h264: Option<Encoder> = None;
-        let frame_skip = if low { 2 } else { 1 }; // low 档每 2 帧推 1（40→20fps）
+        let frame_skip = if low { 2 } else { 1 }; // 手机档每 2 帧推 1（40→20fps）
         let mut skip = 0u32;
         for (fw, fh, inp, tele) in render_rx {
             skip += 1;
@@ -1271,13 +1273,15 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
             if use_h264 && (low || (fw == 640 && fh == 480)) {
                 if h264.is_none() {
                     // 桌面：640×480 @800kbps GOP30（0.75s@40fps）；
-                    // 手机：640×480 @600kbps GOP20（1s@20fps，低码率省带宽）
-                    // GOP 不宜过长：等关键帧黑屏时间 = GOP/帧率，≤1s 保证新客户端快出画面
-                    h264 = new_h264_encoder(
-                        if low { 600_000 } else { 800_000 },
-                        if low { 20 } else { 40 },
-                        if low { 20 } else { 30 },
-                    ).ok();
+                    // 手机 low：640×480 @600kbps GOP20；lowest：320×240 @350kbps GOP20
+                    let (br, mfps, gop) = if q320 {
+                        (350_000u32, 20u32, 20u32)
+                    } else if low {
+                        (600_000u32, 20u32, 20u32)
+                    } else {
+                        (800_000u32, 40u32, 30u32)
+                    };
+                    h264 = new_h264_encoder(br, mfps, gop).ok();
                 }
                 if let Some(enc) = h264.as_mut() {
                     let i420 = I420Source { w: fw as usize, h: fh as usize, data: rgba_to_i420(bytes, fw as usize, fh as usize) };
@@ -1357,9 +1361,11 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
                 // PNG 推帧保持 320×240（PNG 逐帧压缩，带宽 ~2.1Mbps 已近上限）。
                 // 前端按帧头 w/h 自适应显示。
                 let (fw, fh) = if c.scenario == "vperiph" {
-                    // 桌面与移动端 H.264 均用 640×480（用户要求移动端同分辨率）；
-                    // 移动端靠低码率(600k)+低帧率(20fps)省带宽。PNG 推帧保持 320×240。
-                    if use_h264 { (640u32, 480u32) } else { (320u32, 240u32) }
+                    // 桌面/手机 low：H.264 640×480；lowest：320×240（前端解码 640 失败退档）；
+                    // PNG 推帧保持 320×240
+                    if use_h264 {
+                        if q320 { (320u32, 240u32) } else { (640u32, 480u32) }
+                    } else { (320u32, 240u32) }
                 } else { (FRAME_W, FRAME_H) };
                 if render_tx.try_send((fw, fh, inp, tele)).is_err() {
                     // 渲染线程忙（通道满）：丢本帧保仿真实时，画面延迟 ≤2 帧。
