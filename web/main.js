@@ -27,11 +27,20 @@
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
+    // WebCodecs（VideoDecoder）是 Secure Context 限定 API：HTTPS/localhost 才可用。
+    // 明文 HTTP 下自动回退 PNG 推帧（服务器按 ?fmt= 协商编码格式）。
+    const canH264 = window.isSecureContext && window.VideoDecoder;
+    ws = new WebSocket(`${proto}://${location.host}/ws?fmt=${canH264 ? "h264" : "png"}`);
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-      statusEl.textContent = "已连接";
+      if (!canH264 && !window.VideoDecoder) {
+        statusEl.textContent = "已连接（PNG 推帧：浏览器无 WebCodecs）";
+      } else if (!canH264) {
+        statusEl.textContent = "已连接（PNG 推帧：需 HTTPS 才支持视频流）";
+      } else {
+        statusEl.textContent = "已连接（H.264 视频流）";
+      }
       statusEl.style.color = "var(--accent)";
       sendControl();
     };

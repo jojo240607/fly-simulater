@@ -1143,7 +1143,7 @@ fn telemetry_json(
     )
 }
 
-fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
+fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String) {
     use std::sync::atomic::{AtomicU32, Ordering as AOrder};
     static CLIENTS: AtomicU32 = AtomicU32::new(0);
     let n = CLIENTS.fetch_add(1, AOrder::Relaxed) + 1;
@@ -1192,18 +1192,20 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
     // 渲染线程：软件光栅化 + 编码 + WS 推帧，与仿真解耦（Unicorn 仿真不被渲染/网络阻塞）。
     // 有界通道(2)：渲染慢于仿真时 try_send 丢新帧——仿真保持实时，画面延迟 ≤2 帧。
     // 帧格式：w(4B LE) + h(4B LE) + fmt(1B) + [fmt=1: PNG | fmt=2: key(1B)+H.264 Annex-B]。
+    // 推帧格式由客户端协商（fmt 参数）：h264（默认，vperiph 视频流）/ png（无 WebCodecs 回退）。
+    let use_h264 = fmt == "h264";
     let (render_tx, render_rx) =
         std::sync::mpsc::sync_channel::<(u32, u32, RenderInput, String)>(2);
     let render_stream = stream.try_clone().unwrap();
     thread::spawn(move || {
         let mut s = render_stream;
-        // vperiph(320×240) 用 H.264 视频流（帧间压缩，带宽比 PNG 再省 ~10×）；
-        // SIL(720×540) 用 PNG。编码器每连接一个。
+        // vperiph(320×240) 协商为 h264 时用视频流（帧间压缩，带宽比 PNG 再省 ~5×）；
+        // SIL(720×540) 恒用 PNG。编码器每连接一个。
         let mut h264: Option<Encoder> = None;
         for (fw, fh, inp, tele) in render_rx {
             let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
             let bytes: &[u8] = bytemuck_pixels(&pixels);
-            if fw == 320 && fh == 240 {
+            if use_h264 && fw == 320 && fh == 240 {
                 if h264.is_none() {
                     h264 = new_h264_encoder().ok();
                 }
@@ -1511,8 +1513,18 @@ fn handle_http(stream: &mut TcpStream) {
         if ws::handshake(stream, &buf[..n]).is_err() {
             return;
         }
+        // 前端按能力协商推帧格式：?fmt=png（非安全上下文/老浏览器无 WebCodecs）| h264（默认）。
+        // WebCodecs 是 Secure Context 限定 API（需 HTTPS/localhost），明文 HTTP 下前端自动退 PNG。
+        let fmt = path
+            .split('?')
+            .nth(1)
+            .unwrap_or("")
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("fmt="))
+            .unwrap_or("h264")
+            .to_string();
         let ctrl = Arc::new(Mutex::new(ControlState::default()));
-        handle_ws(stream.try_clone().expect("clone 失败"), ctrl);
+        handle_ws(stream.try_clone().expect("clone 失败"), ctrl, fmt);
     } else {
         let _ = serve_static(stream, path);
     }
