@@ -59,10 +59,11 @@ const PORT: u16 = 8080; // 可用 FLY_SIM_PORT 环境变量覆盖（8080 常被�
 const FRAME_W: u32 = 720;
 const FRAME_H: u32 = 540;
 const STEPS_PER_FRAME: u64 = 8; // 每显示帧推进的物理步（dt=4ms → ~32ms/帧 ≈ 31fps 仿真时钟）
-/// vperiph 帧步数：16 步/帧 = 64ms 仿真。Unicorn 模拟比真机慢 ~5×（仿真/墙钟≈0.19），
-/// 提高每帧步数把仿真时钟拉到 ~0.34（3 倍慢放），配合 480×360 渲染保帧率，
-/// 让 8 字机动/风扰动在画面上可见（悬停原样会"看起来静止"）。
-const VP_STEPS_PER_FRAME: u64 = 16;
+/// vperiph 帧步数：8 步/帧 = 32ms 仿真。Unicorn 模拟比真机慢 ~10×（每条 ~50ns vs 6ns），
+/// 帧率 = 1/(步数×run耗时+固定开销)，8 步在 run(200k) 下 ≈ 7.5fps（比 16 步/帧的 3.8fps
+/// 高近一倍，帧率优先——画面连贯），仿真/墙钟 ≈ 0.24（4 倍慢放）。8 字机动周期 16s 仿真
+/// ≈ 66s 墙钟，加高幅度摇杆让画面可见飞行（悬停原样会"看起来静止"）。
+const VP_STEPS_PER_FRAME: u64 = 8;
 /// HIL 导航注入节流：HIL_GPS/SET_POSITION 每 N 物理步发一次（8 步 = 32ms ≈ 31Hz）。
 /// EKF 位置观测（GPS/气压）需求远低于 IMU 的 4ms 节拍（模拟器 non-HIL GPS 仅 20Hz），
 /// 而每条消息经 send_chunked 分块睡眠 ~2ms×块数。若 3 条消息全量每步发送，每步注入
@@ -249,19 +250,25 @@ impl VperiphMc {
 
     /// 演示机动：注入 SBUS 摇杆（ch0=roll, ch1=pitch）做 8 字轨迹，让画面可见飞行。
     /// 固件经 SBUS 读摇杆（ch5=1500 → mode=1 槽位），摇杆 → 姿态/目标机动。
-    /// 幅度温和（±0.2 → 1500±100us，倾斜 ~10°），周期 24s 仿真时间。
+    /// 幅度 ±0.28/±0.22（1500±140/110us，8 字半径 ~1-2m），周期 16s 仿真。
     fn inject_maneuver(&self, t_sim: f64) {
         let roll_amp = 0.28f32;
         let pitch_amp = 0.22f32;
-        let w = 2.0f64 * std::f64::consts::PI / 24.0; // 8 字周期 24s 仿真
+        let w = 2.0f64 * std::f64::consts::PI / 16.0; // 8 字周期 16s 仿真
         let mut st = self.state.lock().unwrap();
         st.rc_ch[0] = 1500.0 + roll_amp * (w * t_sim).sin() as f32 * 500.0;
         st.rc_ch[1] = 1500.0 + pitch_amp * (w * t_sim).cos() as f32 * 500.0;
     }
 
     /// 推进 Unicorn 固件一步。偶发非法指令 → Err（上层重建）。
+    ///
+    /// 指令数 200k ≈ 固件 0.3 个控制周期（4ms@168MHz≈67 万条）。实测：
+    /// run(300k)=20.9ms / run(200k)=16.5ms / run(150k)=11.5ms。
+    /// 150k（0.22 周期/步）控制律滞后 → 姿态发散坠机（实测 alt 单调下降）；
+    /// 300k 是稳定下限但最慢。200k 为折中（控制律每 3.3 物理步≈13ms 更新，
+    /// 仍远高于机动/阵风带宽），配合 8 步/帧 ≈ 7.5fps、仿真/墙钟 0.24。
     fn run_step(&self) -> Result<(), ()> {
-        self.machine.lock().unwrap().run(300_000).map_err(|e| {
+        self.machine.lock().unwrap().run(200_000).map_err(|e| {
             eprintln!("[vperiph] Unicorn run 失败：{e:?}（重建重启）");
         })
     }
@@ -1143,10 +1150,13 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
             }
             let _ = ws::send_frame(&mut stream, 0x1, tele.as_bytes());
         }
-        // 节流到 ~30fps 显示节奏
-        let elapsed = last.elapsed();
-        if elapsed < frame_interval {
-            thread::sleep(frame_interval - elapsed);
+        // 节流到 ~30fps 显示节奏。vperiph 例外：Unicorn 推进已远慢于 30fps，
+        // sleep 只会白白增加延迟，跳过（渲染本身已是限速器）。
+        if c.scenario != "vperiph" {
+            let elapsed = last.elapsed();
+            if elapsed < frame_interval {
+                thread::sleep(frame_interval - elapsed);
+            }
         }
         last = Instant::now();
     }
