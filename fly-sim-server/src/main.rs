@@ -1270,12 +1270,13 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
             let bytes: &[u8] = bytemuck_pixels(&pixels);
             if use_h264 && (low || (fw == 640 && fh == 480)) {
                 if h264.is_none() {
-                    // 桌面：640×480 @800kbps GOP60（1.5s@40fps）；
-                    // 手机：640×480 @600kbps GOP30（1.5s@20fps，低码率省带宽）
+                    // 桌面：640×480 @800kbps GOP30（0.75s@40fps）；
+                    // 手机：640×480 @600kbps GOP20（1s@20fps，低码率省带宽）
+                    // GOP 不宜过长：等关键帧黑屏时间 = GOP/帧率，≤1s 保证新客户端快出画面
                     h264 = new_h264_encoder(
                         if low { 600_000 } else { 800_000 },
                         if low { 20 } else { 40 },
-                        if low { 30 } else { 60 },
+                        if low { 20 } else { 30 },
                     ).ok();
                 }
                 if let Some(enc) = h264.as_mut() {
