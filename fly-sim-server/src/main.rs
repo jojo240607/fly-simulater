@@ -118,13 +118,16 @@ fn rgba_to_i420(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// 新建 openh264 编码器（H.264 视频流：vperiph 640×480 @ 1200kbps）。
 /// 带宽实测：640×480 动态 8 字场景 ~1.2-1.5Mbps，在公网 2.5Mbps 内且比 PNG(320×240,
 /// 2.1Mbps) 分辨率更高带宽更低（帧间压缩）。
-fn new_h264_encoder(bitrate_bps: u32) -> Result<Encoder, openh264::Error> {
+/// 新建 openh264 编码器：bitrate=目标码率、max_fps=码控按实际帧率标定、
+/// intra_period=关键帧间隔（帧数）。GOP 拉疏（1.5s）可大幅降带宽（IDR 全帧
+/// 开销占比高：原 15 帧@40fps=0.375s 一个 IDR，带宽主要吃在这）。
+fn new_h264_encoder(bitrate_bps: u32, max_fps: u32, intra_period: u32) -> Result<Encoder, openh264::Error> {
     let cfg = EncoderConfig::new()
         .bitrate(BitRate::from_bps(bitrate_bps))
-        .max_frame_rate(FrameRate::from_hz(20.0))
+        .max_frame_rate(FrameRate::from_hz(max_fps as f32))
         .usage_type(UsageType::CameraVideoRealTime)
-        // GOP 15 帧：新客户端 ≤2s（@8fps）/≤0.75s（@20fps）等到关键帧出画面
-        .intra_frame_period(IntraFramePeriod::from_num_frames(15));
+        // GOP：新客户端 ≤1.5s 等到关键帧出画面（视频流常规值）
+        .intra_frame_period(IntraFramePeriod::from_num_frames(intra_period));
     Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
 }
 
@@ -1267,7 +1270,12 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
             let bytes: &[u8] = bytemuck_pixels(&pixels);
             if use_h264 && (low || (fw == 640 && fh == 480)) {
                 if h264.is_none() {
-                    h264 = new_h264_encoder(if low { 500_000 } else { 1_200_000 }).ok();
+                    // 桌面：640×480 @800kbps GOP60（1.5s）；手机：320×240 @350kbps GOP30（1.5s）
+                    h264 = new_h264_encoder(
+                        if low { 350_000 } else { 800_000 },
+                        if low { 20 } else { 40 },
+                        if low { 30 } else { 60 },
+                    ).ok();
                 }
                 if let Some(enc) = h264.as_mut() {
                     let i420 = I420Source { w: fw as usize, h: fh as usize, data: rgba_to_i420(bytes, fw as usize, fh as usize) };
