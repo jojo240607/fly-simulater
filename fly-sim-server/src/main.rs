@@ -1102,6 +1102,27 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
     let frame_interval = Duration::from_millis(33);
     let mut last = Instant::now();
     let mut iter: u64 = 0;
+
+    // 渲染线程：软件光栅化 + WS 推帧，与仿真解耦（Unicorn 仿真不被渲染/网络阻塞）。
+    // 有界通道(2)：渲染慢于仿真时 try_send 丢新帧——仿真保持实时，画面延迟 ≤2 帧。
+    let (render_tx, render_rx) =
+        std::sync::mpsc::sync_channel::<(u32, u32, RenderInput, String)>(2);
+    let render_stream = stream.try_clone().unwrap();
+    thread::spawn(move || {
+        let mut s = render_stream;
+        for (fw, fh, inp, tele) in render_rx {
+            let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
+            // 二进制帧：w(4) + h(4) + RGBA 字节（u32 小端即 B,G,R,A）
+            let mut bin = Vec::with_capacity(8 + pixels.len() * 4);
+            bin.extend_from_slice(&fw.to_le_bytes());
+            bin.extend_from_slice(&fh.to_le_bytes());
+            let bytes: &[u8] = bytemuck_pixels(&pixels);
+            bin.extend_from_slice(bytes);
+            let _ = ws::send_frame(&mut s, 0x2, &bin);
+            let _ = ws::send_frame(&mut s, 0x1, tele.as_bytes());
+        }
+    });
+
     loop {
         iter += 1;
         if stop_rx.try_recv().is_ok() {
@@ -1111,7 +1132,7 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
         if iter % 300 == 0 {
             eprintln!("[ws][dbg] loop alive iter {iter}");
         }
-        // 每帧：取控制、按需重建、步进、渲染、发送。
+        // 每帧：取控制、按需重建、步进（仿真线程只做物理+固件模拟，渲染交给渲染线程）。
         // HIL 场景走 USB 闭环（advance_hil），其余走 PC 控制律闭环（advance）。
         let c = {
             let mut g = ctrl.lock().unwrap();
@@ -1139,19 +1160,16 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
             if let Some(inp) = inp {
                 // vperiph 用 480×360 渲染（Unicorn 慢，降分辨率保帧率；前端按帧头 w/h 自适应显示）
                 let (fw, fh) = if c.scenario == "vperiph" { (480u32, 360u32) } else { (FRAME_W, FRAME_H) };
-                let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
-                // 二进制帧：w(4) + h(4) + RGBA 字节（u32 小端即 B,G,R,A）
-                let mut bin = Vec::with_capacity(8 + pixels.len() * 4);
-                bin.extend_from_slice(&fw.to_le_bytes());
-                bin.extend_from_slice(&fh.to_le_bytes());
-                let bytes: &[u8] = bytemuck_pixels(&pixels);
-                bin.extend_from_slice(bytes);
-                let _ = ws::send_frame(&mut stream, 0x2, &bin);
+                if render_tx.try_send((fw, fh, inp, tele)).is_err() {
+                    // 渲染线程忙（通道满）：丢本帧保仿真实时，画面延迟 ≤2 帧。
+                }
+            } else {
+                // 无渲染帧的状态遥测（如 vperiph boot 中/失败）：主线程直发。
+                let _ = ws::send_frame(&mut stream, 0x1, tele.as_bytes());
             }
-            let _ = ws::send_frame(&mut stream, 0x1, tele.as_bytes());
         }
         // 节流到 ~30fps 显示节奏。vperiph 例外：Unicorn 推进已远慢于 30fps，
-        // sleep 只会白白增加延迟，跳过（渲染本身已是限速器）。
+        // sleep 只会白白增加延迟，跳过（仿真本身已是限速器）。
         if c.scenario != "vperiph" {
             let elapsed = last.elapsed();
             if elapsed < frame_interval {
