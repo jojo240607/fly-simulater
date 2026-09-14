@@ -51,12 +51,23 @@
     };
   }
 
-  // 解析二进制帧：前 8 字节 = (w,u32)(h,u32)，余下 = RGBA。
+  // 解析二进制帧：前 8 字节 = (w,u32)(h,u32)，第 9 字节 = fmt，
+  // fmt=0 → 余下 RGBA；fmt=1 → 余下 PNG（blob→ImageBitmap 解码，GPU 快且省带宽）。
   function drawFrame(buf) {
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     const w = dv.getUint32(0, true);
     const h = dv.getUint32(4, true);
-    const px = buf.subarray(8, 8 + w * h * 4);
+    const fmt = buf[8];
+    if (fmt === 1) {
+      const blob = new Blob([buf.subarray(9)], { type: "image/png" });
+      createImageBitmap(blob).then((bmp) => {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+        bmp.close();
+      }).catch(() => {});
+      return;
+    }
+    const px = buf.subarray(9, 9 + w * h * 4);
     if (!imgData || imgData.width !== w || imgData.height !== h) {
       imgData = ctx.createImageData(w, h);
     }

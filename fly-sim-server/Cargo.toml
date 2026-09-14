@@ -15,6 +15,9 @@ phy-sdk = { path = "../../physics/crates/phy-sdk", optional = true }
 phy-rigid = { path = "../../physics/crates/phy-rigid", optional = true }
 phy-math = { path = "../../physics/crates/phy-math", optional = true }
 phy-demo = { path = "../../physics/crates/phy-demo", optional = true }
+# 推帧 PNG 压缩：外网带宽 ~2.5Mbps，RGBA 帧(691KB/帧@8fps≈44Mbps)会被网络节流到
+# ~0.4fps；PNG 压缩 3D 渲染帧 ~5-15%，带宽需求降 10×+。
+png = "0.17"
 
 [features]
 default = []

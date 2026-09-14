@@ -1103,8 +1103,9 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
     let mut last = Instant::now();
     let mut iter: u64 = 0;
 
-    // 渲染线程：软件光栅化 + WS 推帧，与仿真解耦（Unicorn 仿真不被渲染/网络阻塞）。
+    // 渲染线程：软件光栅化 + PNG 压缩 + WS 推帧，与仿真解耦（Unicorn 仿真不被渲染/网络阻塞）。
     // 有界通道(2)：渲染慢于仿真时 try_send 丢新帧——仿真保持实时，画面延迟 ≤2 帧。
+    // 帧格式：w(4B LE) + h(4B LE) + fmt(1B) + 数据；fmt=1 → PNG 字节（前端 blob→ImageBitmap 解码）。
     let (render_tx, render_rx) =
         std::sync::mpsc::sync_channel::<(u32, u32, RenderInput, String)>(2);
     let render_stream = stream.try_clone().unwrap();
@@ -1112,12 +1113,23 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
         let mut s = render_stream;
         for (fw, fh, inp, tele) in render_rx {
             let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
-            // 二进制帧：w(4) + h(4) + RGBA 字节（u32 小端即 B,G,R,A）
-            let mut bin = Vec::with_capacity(8 + pixels.len() * 4);
+            let bytes: &[u8] = bytemuck_pixels(&pixels);
+            // PNG 编码（Fast：压缩率与速度折中，外网带宽是硬瓶颈——RGBA 原帧会被节流）
+            let mut png_buf = Vec::new();
+            {
+                let mut enc = png::Encoder::new(&mut png_buf, fw, fh);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                enc.set_compression(png::Compression::Fast);
+                if let Ok(mut writer) = enc.write_header() {
+                    let _ = writer.write_image_data(bytes);
+                }
+            }
+            let mut bin = Vec::with_capacity(9 + png_buf.len());
             bin.extend_from_slice(&fw.to_le_bytes());
             bin.extend_from_slice(&fh.to_le_bytes());
-            let bytes: &[u8] = bytemuck_pixels(&pixels);
-            bin.extend_from_slice(bytes);
+            bin.push(1u8); // fmt=1: PNG
+            bin.extend_from_slice(&png_buf);
             let _ = ws::send_frame(&mut s, 0x2, &bin);
             let _ = ws::send_frame(&mut s, 0x1, tele.as_bytes());
         }
@@ -1158,8 +1170,9 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
         }
         if let Some((inp, tele)) = out {
             if let Some(inp) = inp {
-                // vperiph 用 480×360 渲染（Unicorn 慢，降分辨率保帧率；前端按帧头 w/h 自适应显示）
-                let (fw, fh) = if c.scenario == "vperiph" { (480u32, 360u32) } else { (FRAME_W, FRAME_H) };
+                // vperiph 用 320×240 渲染（Unicorn 慢 + 外网带宽节流，PNG 压缩 + 降分辨率
+                // 双管齐下保帧率；前端按帧头 w/h 自适应显示）
+                let (fw, fh) = if c.scenario == "vperiph" { (320u32, 240u32) } else { (FRAME_W, FRAME_H) };
                 if render_tx.try_send((fw, fh, inp, tele)).is_err() {
                     // 渲染线程忙（通道满）：丢本帧保仿真实时，画面延迟 ≤2 帧。
                 }
