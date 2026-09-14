@@ -59,6 +59,10 @@ const PORT: u16 = 8080; // 可用 FLY_SIM_PORT 环境变量覆盖（8080 常被�
 const FRAME_W: u32 = 720;
 const FRAME_H: u32 = 540;
 const STEPS_PER_FRAME: u64 = 8; // 每显示帧推进的物理步（dt=4ms → ~32ms/帧 ≈ 31fps 仿真时钟）
+/// vperiph 帧步数：16 步/帧 = 64ms 仿真。Unicorn 模拟比真机慢 ~5×（仿真/墙钟≈0.19），
+/// 提高每帧步数把仿真时钟拉到 ~0.34（3 倍慢放），配合 480×360 渲染保帧率，
+/// 让 8 字机动/风扰动在画面上可见（悬停原样会"看起来静止"）。
+const VP_STEPS_PER_FRAME: u64 = 16;
 /// HIL 导航注入节流：HIL_GPS/SET_POSITION 每 N 物理步发一次（8 步 = 32ms ≈ 31Hz）。
 /// EKF 位置观测（GPS/气压）需求远低于 IMU 的 4ms 节拍（模拟器 non-HIL GPS 仅 20Hz），
 /// 而每条消息经 send_chunked 分块睡眠 ~2ms×块数。若 3 条消息全量每步发送，每步注入
@@ -241,6 +245,18 @@ impl VperiphMc {
         let h = baro_up - 5.0;
         st.baro_pa = 101_325.0 * (-h / 8434.5).exp();
         st.rc_ch[4] = 2000.0;
+    }
+
+    /// 演示机动：注入 SBUS 摇杆（ch0=roll, ch1=pitch）做 8 字轨迹，让画面可见飞行。
+    /// 固件经 SBUS 读摇杆（ch5=1500 → mode=1 槽位），摇杆 → 姿态/目标机动。
+    /// 幅度温和（±0.2 → 1500±100us，倾斜 ~10°），周期 24s 仿真时间。
+    fn inject_maneuver(&self, t_sim: f64) {
+        let roll_amp = 0.28f32;
+        let pitch_amp = 0.22f32;
+        let w = 2.0f64 * std::f64::consts::PI / 24.0; // 8 字周期 24s 仿真
+        let mut st = self.state.lock().unwrap();
+        st.rc_ch[0] = 1500.0 + roll_amp * (w * t_sim).sin() as f32 * 500.0;
+        st.rc_ch[1] = 1500.0 + pitch_amp * (w * t_sim).cos() as f32 * 500.0;
     }
 
     /// 推进 Unicorn 固件一步。偶发非法指令 → Err（上层重建）。
@@ -891,7 +907,9 @@ impl SimDriver {
 
         let mut last: Option<flyctrl_core::vehicle::VehicleState> = None;
         let mut motors = [0f32; 4];
-        for _ in 0..STEPS_PER_FRAME {
+        // vperiph 帧步数多于 SIL（16 步/帧 = 64ms 仿真）：Unicorn 比真机慢 ~5×，
+        // 加速仿真时钟让机动/风扰动在画面上可见（同时降渲染分辨率保帧率）。
+        for _ in 0..VP_STEPS_PER_FRAME {
             // 每步读回固件最新 PWM 推力（同 advance_hil 的 link.actuator() 节奏）
             motors = vp.read_thrust();
             let thrust: f32 = motors.iter().sum();
@@ -917,6 +935,8 @@ impl SimDriver {
             if let Some(sim) = self.sim.as_ref() {
                 vp.inject(sim);
             }
+            // 演示机动：8 字摇杆（画面可见飞行）
+            vp.inject_maneuver(self.phase_steps as f64 * DT);
             // Unicorn 推进；偶发非法指令 → 重建（下帧重新 boot）
             if vp.run_step().is_err() {
                 self.vp = None;
@@ -1110,11 +1130,13 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
         }
         if let Some((inp, tele)) = out {
             if let Some(inp) = inp {
-                let pixels = fly_sim_core::render::render_frame(FRAME_W, FRAME_H, &inp);
+                // vperiph 用 480×360 渲染（Unicorn 慢，降分辨率保帧率；前端按帧头 w/h 自适应显示）
+                let (fw, fh) = if c.scenario == "vperiph" { (480u32, 360u32) } else { (FRAME_W, FRAME_H) };
+                let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
                 // 二进制帧：w(4) + h(4) + RGBA 字节（u32 小端即 B,G,R,A）
                 let mut bin = Vec::with_capacity(8 + pixels.len() * 4);
-                bin.extend_from_slice(&FRAME_W.to_le_bytes());
-                bin.extend_from_slice(&FRAME_H.to_le_bytes());
+                bin.extend_from_slice(&fw.to_le_bytes());
+                bin.extend_from_slice(&fh.to_le_bytes());
                 let bytes: &[u8] = bytemuck_pixels(&pixels);
                 bin.extend_from_slice(bytes);
                 let _ = ws::send_frame(&mut stream, 0x2, &bin);
