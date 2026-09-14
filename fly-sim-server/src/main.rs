@@ -119,19 +119,17 @@ fn rgba_to_i420(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// 带宽实测：640×480 动态 8 字场景 ~1.2-1.5Mbps，在公网 2.5Mbps 内且比 PNG(320×240,
 /// 2.1Mbps) 分辨率更高带宽更低（帧间压缩）。
 /// 新建 openh264 编码器：bitrate=目标码率、intra_period=关键帧间隔（帧数）。
-/// max_frame_rate 固定 8.0：实测 open264 在 20/40fps 声明下输出的流 WebCodecs
-/// 兼容性差（40fps 本地解码 38/60 丢帧、浏览器解码失败）；8fps 的 SPS VUI
-/// 输出兼容（用户 640×480@8fps 正常显示过）。码控按 8fps 标定 → 实际码率
-/// 宽松（约 1.2-2Mbps），但帧率不受限（推帧由 VP_STEPS_PER_FRAME 决定）。
+/// max_frame_rate 固定 8.0：open264 高帧率声明的流 WebCodecs 兼容性差（40fps
+/// 声明本地解码丢帧）；8fps 声明的 SPS VUI 兼容（用户正常显示过）。
+/// profile 用 High（用户正常显示的版本），GOP 15（短 P 帧链——GOP 拉长到 30
+/// 后 WebCodecs 每关键帧周期累积错误报错卡顿，实测"每 3s 卡一下"）。
 fn new_h264_encoder(bitrate_bps: u32, intra_period: u32) -> Result<Encoder, openh264::Error> {
     let cfg = EncoderConfig::new()
         .bitrate(BitRate::from_bps(bitrate_bps))
         .max_frame_rate(FrameRate::from_hz(8.0))
         .usage_type(UsageType::CameraVideoRealTime)
-        // Baseline：无 B 帧（解码顺序=编码顺序），WebCodecs 兼容性最好；
-        // 实测带宽与 High 相当（20fps 下均 ~220KB/60 帧）
-        .profile(Profile::Baseline)
-        // GOP：新客户端 ≤1.5s 等到关键帧出画面（视频流常规值）
+        .profile(Profile::High)
+        // GOP 15（≈1.9s@8fps 声明 / 0.75s@20fps 实际）：短 P 链 + 快重同步
         .intra_frame_period(IntraFramePeriod::from_num_frames(intra_period));
     Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
 }
@@ -1275,16 +1273,11 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
             let bytes: &[u8] = bytemuck_pixels(&pixels);
             if use_h264 && (low || (fw == 640 && fh == 480)) {
                 if h264.is_none() {
-                    // 桌面：640×480 @800kbps GOP30；手机 low：640×480 @600kbps GOP20；
-                    // lowest：320×240 @350kbps GOP20（max_frame_rate 固定 8，见 new_h264_encoder）
-                    let (br, gop) = if q320 {
-                        (350_000u32, 20u32)
-                    } else if low {
-                        (600_000u32, 20u32)
-                    } else {
-                        (800_000u32, 30u32)
-                    };
-                    h264 = new_h264_encoder(br, gop).ok();
+                    // 回滚到用户正常显示的编码组合（1200k/High/GOP15/8fps 声明）：
+                    // 桌面 640×480 @1200kbps；手机 640×480 @800kbps；lowest 320×240 @500kbps。
+                    // GOP 全 15（短 P 链防 WebCodecs 累积错误）
+                    let br = if q320 { 500_000u32 } else if low { 800_000u32 } else { 1_200_000u32 };
+                    h264 = new_h264_encoder(br, 15).ok();
                 }
                 if let Some(enc) = h264.as_mut() {
                     let i420 = I420Source { w: fw as usize, h: fh as usize, data: rgba_to_i420(bytes, fw as usize, fh as usize) };
