@@ -66,6 +66,8 @@
   let vdec = null;
   let vdecPending = [];
   let h264UnsupportedShown = false;
+  let vdecBroken = false;   // 解码出错：等待关键帧重建解码器（自恢复）
+  let vts = 0;              // 单调时间戳（μs），WebCodecs 只要求单调递增
 
   function hex2(v) { return v.toString(16).padStart(2, "0"); }
 
@@ -87,6 +89,13 @@
     return { sps, pps };
   }
 
+  function resetVDecoder() {
+    if (vdec) { try { vdec.close(); } catch (e) {} }
+    vdec = null;
+    vdecPending = [];
+    vdecBroken = false;
+  }
+
   function initVDecoder(sps, pps, w, h) {
     // avcC description（WebCodecs 需要，从 SPS/PPS 打包）
     const avcc = new Uint8Array(11 + sps.length + pps.length);
@@ -102,10 +111,16 @@
     const codec = "avc1." + hex2(sps[1]) + hex2(sps[2]) + hex2(sps[3]);
     vdec = new VideoDecoder({
       output: (frame) => {
-        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        try {
+          ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        } catch (e) {}
         frame.close();
       },
-      error: (e) => { console.error("VideoDecoder error:", e); },
+      error: (e) => {
+        console.error("VideoDecoder error:", e);
+        statusEl.textContent = "视频流解码错误，自动重同步…";
+        vdecBroken = true; // 等下一个关键帧重建解码器
+      },
     });
     vdec.configure({ codec, description: avcc, codedWidth: w, codedHeight: h });
     for (const c of vdecPending) { try { vdec.decode(c); } catch (e) {} }
@@ -125,16 +140,23 @@
       }
       return;
     }
+    if (vdecBroken) {
+      // 解码出错：丢掉 delta 帧，等下一个关键帧重建解码器（H.264 帧链不能断）
+      if (!key) return;
+      resetVDecoder();
+      statusEl.textContent = "已连接（H.264 视频流 640×480）";
+    }
     if (!vdec) {
       if (!key) return; // 等关键帧（含 SPS/PPS）
       const { sps, pps } = extractSpsPps(data);
       if (!sps || !pps) return;
       initVDecoder(sps, pps, w, h);
     }
-    if (vdec.decodeQueueSize > 8) return; // 背压：解码队列满丢帧
+    // 不做 decodeQueueSize 丢帧：丢任何一帧都会切断 H.264 帧间依赖链导致解码
+    // error 后画面永久停。解码器跟不上时靠 GOP 关键帧（每 ~1.9s）自然重同步。
     const chunk = new EncodedVideoChunk({
       type: key ? "key" : "delta",
-      timestamp: performance.now() * 1000,
+      timestamp: (vts += 40000), // 40ms/帧；WebCodecs 只要求单调递增
       data: data.slice(0),
     });
     try { vdec.decode(chunk); } catch (e) {}
