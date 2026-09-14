@@ -1349,8 +1349,9 @@ fn main() {
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(PORT);
-    let listener = TcpListener::bind(("127.0.0.1", port)).expect("无法绑定端口");
-    println!("[server] Fly Simulator Web 后端已启动: http://127.0.0.1:{}/", port);
+    let bind_ip = std::env::var("FLY_SIM_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let listener = TcpListener::bind((bind_ip.as_str(), port)).expect("无法绑定端口");
+    println!("[server] Fly Simulator Web 后端已启动: http://{}:{}/", bind_ip, port);
     println!("[server] 控制: 场景(hover/wind/degraded/avoidance/hil) 控制律(pid/lqr/indi) 故障(fail_motor/degrade) 风(wind) 相机(cam_*)");
 
     // 预热：探测静态目录是否存在
