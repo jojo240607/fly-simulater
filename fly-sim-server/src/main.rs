@@ -115,10 +115,12 @@ fn rgba_to_i420(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
     out
 }
 
-/// 新建 openh264 编码器（320×240，低码率视频流）。
+/// 新建 openh264 编码器（H.264 视频流：vperiph 640×480 @ 1200kbps）。
+/// 带宽实测：640×480 动态 8 字场景 ~1.2-1.5Mbps，在公网 2.5Mbps 内且比 PNG(320×240,
+/// 2.1Mbps) 分辨率更高带宽更低（帧间压缩）。
 fn new_h264_encoder() -> Result<Encoder, openh264::Error> {
     let cfg = EncoderConfig::new()
-        .bitrate(BitRate::from_bps(400_000))
+        .bitrate(BitRate::from_bps(1_200_000))
         .max_frame_rate(FrameRate::from_hz(8.0))
         .usage_type(UsageType::CameraVideoRealTime)
         // GOP 15 帧（≈1.9s@8fps）：新客户端 ≤2s 等到关键帧出画面
@@ -1205,7 +1207,7 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String) {
         for (fw, fh, inp, tele) in render_rx {
             let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
             let bytes: &[u8] = bytemuck_pixels(&pixels);
-            if use_h264 && fw == 320 && fh == 240 {
+            if use_h264 && fw == 640 && fh == 480 {
                 if h264.is_none() {
                     h264 = new_h264_encoder().ok();
                 }
@@ -1283,9 +1285,12 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String) {
         }
         if let Some((inp, tele)) = out {
             if let Some(inp) = inp {
-                // vperiph 用 320×240 渲染（Unicorn 慢 + 外网带宽节流，PNG 压缩 + 降分辨率
-                // 双管齐下保帧率；前端按帧头 w/h 自适应显示）
-                let (fw, fh) = if c.scenario == "vperiph" { (320u32, 240u32) } else { (FRAME_W, FRAME_H) };
+                // vperiph：H.264 视频流用 640×480（帧间压缩带宽余量大，分辨率提升 4×）；
+                // PNG 推帧保持 320×240（PNG 逐帧压缩，带宽 ~2.1Mbps 已近上限）。
+                // 前端按帧头 w/h 自适应显示。
+                let (fw, fh) = if c.scenario == "vperiph" {
+                    if use_h264 { (640u32, 480u32) } else { (320u32, 240u32) }
+                } else { (FRAME_W, FRAME_H) };
                 if render_tx.try_send((fw, fh, inp, tele)).is_err() {
                     // 渲染线程忙（通道满）：丢本帧保仿真实时，画面延迟 ≤2 帧。
                 }

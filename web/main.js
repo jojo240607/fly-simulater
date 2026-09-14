@@ -34,12 +34,14 @@
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-      if (!canH264 && !window.VideoDecoder) {
-        statusEl.textContent = "已连接（PNG 推帧：浏览器无 WebCodecs）";
-      } else if (!canH264) {
-        statusEl.textContent = "已连接（PNG 推帧：需 HTTPS 才支持视频流）";
+      if (!canH264) {
+        if (!window.isSecureContext) {
+          statusEl.textContent = "已连接（PNG 推帧：需 HTTPS 才支持视频流）";
+        } else {
+          statusEl.textContent = "已连接（PNG 推帧：浏览器无 WebCodecs）";
+        }
       } else {
-        statusEl.textContent = "已连接（H.264 视频流）";
+        statusEl.textContent = "已连接（H.264 视频流 640×480）";
       }
       statusEl.style.color = "var(--accent)";
       sendControl();
