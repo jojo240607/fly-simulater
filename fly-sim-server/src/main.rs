@@ -39,6 +39,92 @@ use fly_sim_hil::hil_link::{dbg_report_f64, HilLink, LinkState};
 // 虚拟 MCU（Unicorn 模拟固件）——场景 "vperiph" 的 HIL 后端。
 use mcu_simulater::machine::Machine;
 use mcu_simulater::peripheral::vperiph::data_source::FlySimState;
+use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, UsageType};
+use openh264::formats::YUVSource;
+
+/// 待编码的 I420 帧（YUV420 平面：Y(w*h) + U(w/2*h/2) + V(w/2*h/2)），
+/// 直接包装为 openh264 的 YUVSource。
+struct I420Source {
+    w: usize,
+    h: usize,
+    data: Vec<u8>,
+}
+
+impl YUVSource for I420Source {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.w, self.h)
+    }
+    fn strides(&self) -> (usize, usize, usize) {
+        (self.w, self.w / 2, self.w / 2)
+    }
+    fn y(&self) -> &[u8] {
+        &self.data[..self.w * self.h]
+    }
+    fn u(&self) -> &[u8] {
+        &self.data[self.w * self.h..self.w * self.h * 5 / 4]
+    }
+    fn v(&self) -> &[u8] {
+        &self.data[self.w * self.h * 5 / 4..]
+    }
+}
+
+/// RGBA（小端 u32 = [B,G,R,A] 字节序）→ I420，BT.601 限制范围（16-235）。
+fn rgba_to_i420(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h * 3 / 2];
+    let y_off = 0usize;
+    let u_off = w * h;
+    let v_off = w * h * 5 / 4;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            let (r, g, b) = (rgba[i + 2] as i32, rgba[i + 1] as i32, rgba[i] as i32);
+            let yy = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            out[y_off + y * w + x] = yy.clamp(0, 255) as u8;
+        }
+    }
+    // 2×2 块平均出 U/V
+    for y in (0..h).step_by(2) {
+        for x in (0..w).step_by(2) {
+            let mut r = 0i32;
+            let mut g = 0i32;
+            let mut b = 0i32;
+            let mut n = 0i32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let yy = y + dy;
+                    let xx = x + dx;
+                    if yy < h && xx < w {
+                        let i = (yy * w + xx) * 4;
+                        r += rgba[i + 2] as i32;
+                        g += rgba[i + 1] as i32;
+                        b += rgba[i] as i32;
+                        n += 1;
+                    }
+                }
+            }
+            r /= n;
+            g /= n;
+            b /= n;
+            let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+            let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+            let uv = (y / 2) * (w / 2) + (x / 2);
+            out[u_off + uv] = u.clamp(0, 255) as u8;
+            out[v_off + uv] = v.clamp(0, 255) as u8;
+        }
+    }
+    out
+}
+
+/// 新建 openh264 编码器（320×240，低码率视频流）。
+fn new_h264_encoder() -> Result<Encoder, openh264::Error> {
+    let cfg = EncoderConfig::new()
+        .bitrate(BitRate::from_bps(400_000))
+        .max_frame_rate(FrameRate::from_hz(8.0))
+        .usage_type(UsageType::CameraVideoRealTime)
+        // GOP 15 帧（≈1.9s@8fps）：新客户端 ≤2s 等到关键帧出画面
+        .intra_frame_period(IntraFramePeriod::from_num_frames(15));
+    Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
+}
 
 // vperiph 固件/系统镜像路径（与 mcu_simulater tests/x_hover_env.rs 同一套）。
 const VP_SYS: &str = "/home/ubuntu/work/joc-base/build_rel/stm32f407_minimal.elf";
@@ -1103,18 +1189,43 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
     let mut last = Instant::now();
     let mut iter: u64 = 0;
 
-    // 渲染线程：软件光栅化 + PNG 压缩 + WS 推帧，与仿真解耦（Unicorn 仿真不被渲染/网络阻塞）。
+    // 渲染线程：软件光栅化 + 编码 + WS 推帧，与仿真解耦（Unicorn 仿真不被渲染/网络阻塞）。
     // 有界通道(2)：渲染慢于仿真时 try_send 丢新帧——仿真保持实时，画面延迟 ≤2 帧。
-    // 帧格式：w(4B LE) + h(4B LE) + fmt(1B) + 数据；fmt=1 → PNG 字节（前端 blob→ImageBitmap 解码）。
+    // 帧格式：w(4B LE) + h(4B LE) + fmt(1B) + [fmt=1: PNG | fmt=2: key(1B)+H.264 Annex-B]。
     let (render_tx, render_rx) =
         std::sync::mpsc::sync_channel::<(u32, u32, RenderInput, String)>(2);
     let render_stream = stream.try_clone().unwrap();
     thread::spawn(move || {
         let mut s = render_stream;
+        // vperiph(320×240) 用 H.264 视频流（帧间压缩，带宽比 PNG 再省 ~10×）；
+        // SIL(720×540) 用 PNG。编码器每连接一个。
+        let mut h264: Option<Encoder> = None;
         for (fw, fh, inp, tele) in render_rx {
             let pixels = fly_sim_core::render::render_frame(fw, fh, &inp);
             let bytes: &[u8] = bytemuck_pixels(&pixels);
-            // PNG 编码（Fast：压缩率与速度折中，外网带宽是硬瓶颈——RGBA 原帧会被节流）
+            if fw == 320 && fh == 240 {
+                if h264.is_none() {
+                    h264 = new_h264_encoder().ok();
+                }
+                if let Some(enc) = h264.as_mut() {
+                    let i420 = I420Source { w: fw as usize, h: fh as usize, data: rgba_to_i420(bytes, fw as usize, fh as usize) };
+                    if let Ok(bs) = enc.encode(&i420) {
+                        let key = bs.frame_type() == FrameType::IDR;
+                        let mut nal = Vec::new();
+                        bs.write_vec(&mut nal);
+                        let mut bin = Vec::with_capacity(10 + nal.len());
+                        bin.extend_from_slice(&fw.to_le_bytes());
+                        bin.extend_from_slice(&fh.to_le_bytes());
+                        bin.push(2u8); // fmt=2: H.264 Annex-B
+                        bin.push(if key { 1u8 } else { 0u8 });
+                        bin.extend_from_slice(&nal);
+                        let _ = ws::send_frame(&mut s, 0x2, &bin);
+                        let _ = ws::send_frame(&mut s, 0x1, tele.as_bytes());
+                        continue;
+                    }
+                }
+                // 编码失败 → 回退 PNG（fmt=1）
+            }
             let mut png_buf = Vec::new();
             {
                 let mut enc = png::Encoder::new(&mut png_buf, fw, fh);

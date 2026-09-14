@@ -51,13 +51,92 @@
     };
   }
 
+  // ---- H.264 视频流解码（WebCodecs，fmt=2）----
+  let vdec = null;
+  let vdecPending = [];
+  let h264UnsupportedShown = false;
+
+  function hex2(v) { return v.toString(16).padStart(2, "0"); }
+
+  // 从 Annex-B NAL 流提取 SPS(7)/PPS(8)。
+  function extractSpsPps(nal) {
+    let i = 0, sps = null, pps = null;
+    while (i < nal.length - 3) {
+      if (nal[i] === 0 && nal[i + 1] === 0 && nal[i + 2] === 1) i += 3;
+      else if (nal[i] === 0 && nal[i + 1] === 0 && nal[i + 2] === 0 && nal[i + 3] === 1) i += 4;
+      else { i++; continue; }
+      const type = nal[i] & 0x1f;
+      let j = i + 1;
+      while (j < nal.length - 3 && !(nal[j] === 0 && nal[j + 1] === 0 && (nal[j + 2] === 1 || (nal[j + 2] === 0 && nal[j + 3] === 1)))) j++;
+      const body = nal.subarray(i, j);
+      if (type === 7) sps = body;
+      else if (type === 8) pps = body;
+      i = j;
+    }
+    return { sps, pps };
+  }
+
+  function initVDecoder(sps, pps, w, h) {
+    // avcC description（WebCodecs 需要，从 SPS/PPS 打包）
+    const avcc = new Uint8Array(11 + sps.length + pps.length);
+    avcc[0] = 1;
+    avcc[1] = sps[1]; avcc[2] = sps[2]; avcc[3] = sps[3]; // profile/compat/level
+    avcc[4] = 0xff; avcc[5] = 0xe1;
+    avcc[6] = (sps.length >> 8) & 0xff; avcc[7] = sps.length & 0xff;
+    avcc.set(sps, 8);
+    avcc[8 + sps.length] = 1;
+    const po = 9 + sps.length;
+    avcc[po] = (pps.length >> 8) & 0xff; avcc[po + 1] = pps.length & 0xff;
+    avcc.set(pps, po + 2);
+    const codec = "avc1." + hex2(sps[1]) + hex2(sps[2]) + hex2(sps[3]);
+    vdec = new VideoDecoder({
+      output: (frame) => {
+        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        frame.close();
+      },
+      error: (e) => { console.error("VideoDecoder error:", e); },
+    });
+    vdec.configure({ codec, description: avcc, codedWidth: w, codedHeight: h });
+    for (const c of vdecPending) { try { vdec.decode(c); } catch (e) {} }
+    vdecPending = [];
+  }
+
+  function drawH264(buf) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const w = dv.getUint32(0, true), h = dv.getUint32(4, true);
+    const key = buf[9] === 1;
+    const data = buf.subarray(10);
+    if (!window.VideoDecoder) {
+      // 老浏览器无 WebCodecs：vperiph 视频流无法解码，提示换场景（SIL 走 PNG 可用）
+      if (!h264UnsupportedShown) {
+        h264UnsupportedShown = true;
+        statusEl.textContent = "当前浏览器不支持视频流解码(WebCodecs)，请用 Chrome/Edge，或切换到悬停/抗风等场景（PNG 推帧）";
+      }
+      return;
+    }
+    if (!vdec) {
+      if (!key) return; // 等关键帧（含 SPS/PPS）
+      const { sps, pps } = extractSpsPps(data);
+      if (!sps || !pps) return;
+      initVDecoder(sps, pps, w, h);
+    }
+    if (vdec.decodeQueueSize > 8) return; // 背压：解码队列满丢帧
+    const chunk = new EncodedVideoChunk({
+      type: key ? "key" : "delta",
+      timestamp: performance.now() * 1000,
+      data: data.slice(0),
+    });
+    try { vdec.decode(chunk); } catch (e) {}
+  }
+
   // 解析二进制帧：前 8 字节 = (w,u32)(h,u32)，第 9 字节 = fmt，
-  // fmt=0 → 余下 RGBA；fmt=1 → 余下 PNG（blob→ImageBitmap 解码，GPU 快且省带宽）。
+  // fmt=0 → 余下 RGBA；fmt=1 → 余下 PNG；fmt=2 → key(1B)+H.264 Annex-B。
   function drawFrame(buf) {
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     const w = dv.getUint32(0, true);
     const h = dv.getUint32(4, true);
     const fmt = buf[8];
+    if (fmt === 2) { drawH264(buf); return; }
     if (fmt === 1) {
       const blob = new Blob([buf.subarray(9)], { type: "image/png" });
       createImageBitmap(blob).then((bmp) => {
