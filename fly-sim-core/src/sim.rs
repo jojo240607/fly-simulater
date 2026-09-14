@@ -535,6 +535,17 @@ where
         self.ctrl.last_imu()
     }
 
+    /// HIL 模式：最近一次 GPS 噪声化样本（NED pos+vel；`None`=非 GPS 帧/未定位）。
+    /// 与 SIL 控制律看到的读数一致（SensorConfig 噪声/偏置/延迟已施加）。
+    pub fn last_gps(&self) -> Option<flyctrl_core::vehicle::PosSample> {
+        self.ctrl.last_gps()
+    }
+
+    /// HIL 模式：最近一次气压计高度（向上正，m，含噪声/漂移），供注入。
+    pub fn last_baro_alt(&self) -> f32 {
+        self.ctrl.last_baro_alt()
+    }
+
     /// 阶段 7+：取引擎世界系（Y-up）真实位姿 (pos xyz, quat wxyz)。绕开 NED 映射，
     /// 供渲染直接使用（渲染世界系与引擎同为 Y-up，仅 z 轴反号）。
     pub fn debug_up(&self) -> ([f64; 3], [f64; 4]) {

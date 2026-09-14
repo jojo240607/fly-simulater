@@ -1036,6 +1036,17 @@ where
         self.imu.last
     }
 
+    /// 最近一次 GPS 样本（噪声化读数，`None`=非 GPS 帧/未定位）。
+    /// HIL 注入用：让虚拟外设固件收到与 SIL 控制律一致的逼真 GPS 读数。
+    pub fn last_gps(&self) -> Option<PosSample> {
+        self.gps.last
+    }
+
+    /// 最近一次气压计高度（向上正，m，含噪声/漂移），供 HIL 注入。
+    pub fn last_baro_alt(&self) -> f32 {
+        self.baro_alt
+    }
+
     /// 调试：返回最近一次姿态控制器输出（`(err[3], pqr[3], om[3])`）。
     pub fn dbg_att(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         match &self.hil {
