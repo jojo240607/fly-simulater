@@ -11,17 +11,17 @@ path = "src/main.rs"
 # 仿真内核（本次拆出的库 crate）：物理抽象 / 风 / 传感器 / 推进 / 控制 / 主循环。
 fly-sim-core = { path = "fly-sim-core" }
 # 机架配置类型（no_std，host 端解析 TOML 后构造 VehicleConfig）。
-flyctrl-core = { path = "../../mcu/oop/flyctrl/core" }
+flyctrl-core = { path = "../flyctrl/core" }
 # 共用 MAVLink v2 编解码核心（UDP 主机链路帧层直接依赖，单一事实来源）。
-mavlink-core = { path = "../../mcu/oop/mavlink-core" }
+mavlink-core = { path = "../mavlink-core" }
 # 机架数据输入：从外部 TOML 加载机型参数（替代硬编码 default_quad）。
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 # 阶段 7：实时 3D 可视化——复用物理引擎的渲染原语（Camera + 软件光栅化 Framebuffer）。
 # 这些依赖仅在 phy feature 下启用（phy-rigid 上游当前工具链下编译不过，非 phy 构建用 ToyWorld 替身）。
-phy-demo = { path = "../../game/physics/crates/phy-demo", optional = true }
+phy-demo = { path = "../physics/crates/phy-demo", optional = true }
 # 矩阵/向量数学（与 phy-demo 同一 nalgebra 实例，用于投影矩阵构造）。
-phy-math = { path = "../../game/physics/crates/phy-math", optional = true }
+phy-math = { path = "../physics/crates/phy-math", optional = true }
 # 窗口 + 软件后端（无 GPU 依赖，纯 CPU 光栅化，保证 MinGW 工具链可编译运行）。
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
@@ -33,7 +33,16 @@ default = []
 phy = ["fly-sim-core/phy", "phy-demo", "phy-math", "winit", "softbuffer"]
 
 [workspace]
-members = ["fly-sim-core", "fly-sim-server"]
+members = ["fly-sim-core", "fly-sim-hil", "fly-sim-server"]
+
+# Unicorn（M4F 模拟固件）使用 mcu_simulater 的 vendor 修复版：
+# 原版 2.1.5 在 IT 块结束后的条件分支会误报 UC_ERR_INSN_INVALID（condexec 泄漏），
+# 以及 trans_B/trans_BL 的 TB 直接跳转缓存 bug；vendor 版已修复（qemu/target/arm/translate.c）。
+# mcu_simulater（vperiph HIL 闭环）一直用它，故其 boot 稳定；此处 patch 使 fly-sim-server
+# 的 vperiph 场景与 mcu_simulater 使用同一份 Unicorn 实现。
+[patch.crates-io]
+unicorn-engine = { path = "../mcu_simulater/vendor/unicorn-engine" }
+unicorn-engine-sys = { path = "../mcu_simulater/vendor/unicorn-engine-sys" }
 
 [profile.release]
 opt-level = 3

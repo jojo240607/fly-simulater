@@ -15,7 +15,7 @@
 
   // 控制面板当前值
   const ctl = {
-    scenario: "hil",
+    scenario: "vperiph", // 默认虚拟 MCU 闭环（与下拉 selected 一致）；可选 hil/hover/wind/degraded/avoidance
     controller: "pid",
     wind: 0.5,
     fail_motor: null,   // 整数或 null

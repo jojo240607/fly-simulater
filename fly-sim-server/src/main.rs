@@ -14,7 +14,6 @@
 // 非 phy 构建下整模块禁用，仅保留一个提示性 main。
 #![cfg(feature = "phy")]
 
-mod hil_link;
 mod ws;
 
 use std::io::{Read, Write};
@@ -35,9 +34,28 @@ use flyctrl_core::controller::Setpoint;
 use flyctrl_core::units::{MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 use flyctrl_core::vehicle::{ActuatorCmd, ImuSample};
 
-use crate::hil_link::{dbg_report_f64, HilLink, LinkState};
+use fly_sim_hil::hil_link::{dbg_report_f64, HilLink, LinkState};
 
-const PORT: u16 = 8080;
+// 虚拟 MCU（Unicorn 模拟固件）——场景 "vperiph" 的 HIL 后端。
+use mcu_simulater::machine::Machine;
+use mcu_simulater::peripheral::vperiph::data_source::FlySimState;
+
+// vperiph 固件/系统镜像路径（与 mcu_simulater tests/x_hover_env.rs 同一套）。
+const VP_SYS: &str = "/home/ubuntu/work/joc-base/build_rel/stm32f407_minimal.elf";
+const VP_APP: &str = "/tmp/flyctrl_clean.bin";
+// vperiph 固定 GPS 原点（悬停点附近，与 x_vperiph/x_hover_env 同一约定）。
+const VP_LAT0: f32 = 31.2304;
+const VP_LON0: f32 = 121.4737;
+const VP_ALT0: f32 = 4.0;
+// TIM 基址（固件 pwm0..3 = TIM3/TIM2/TIM1/TIM4 CH1）——读固件 PWM 推力用。
+const VP_TIM3: u64 = 0x4000_0400;
+const VP_TIM2: u64 = 0x4000_0000;
+const VP_TIM1: u64 = 0x4001_0000;
+const VP_TIM4: u64 = 0x4000_0800;
+const VP_OFF_CRR1: u64 = 0x34;
+const VP_OFF_ARR: u64 = 0x2C;
+
+const PORT: u16 = 8080; // 可用 FLY_SIM_PORT 环境变量覆盖（8080 常被其他服务占用时）
 const FRAME_W: u32 = 720;
 const FRAME_H: u32 = 540;
 const STEPS_PER_FRAME: u64 = 8; // 每显示帧推进的物理步（dt=4ms → ~32ms/帧 ≈ 31fps 仿真时钟）
@@ -88,6 +106,159 @@ impl Default for ControlState {
     }
 }
 
+/// 虚拟 MCU：Unicorn 模拟固件 + fly-sim 虚拟外设直通（场景 "vperiph" 的 HIL 后端）。
+///
+/// 与真实 USB-CDC HIL 的区别仅在"MCU 指令来源"与"传感器注入通路"：
+/// - 指令来源：读 Unicorn 内固件 PWM（TIM CCR/ARR）而非 USB 下行；
+/// - 注入通路：写 `FlySimState`（attach_flysim 虚拟 I2C/UART）而非 HIL_SENSOR 消息。
+/// 闭环骨架（`SimLoop::step_hil` + 起飞台保持 + 渲染/遥测）与 `advance_hil` 共用。
+struct VperiphMc {
+    machine: Arc<Mutex<Machine>>,
+    state: Arc<Mutex<FlySimState>>,
+    hold: bool, // 起飞台保持：固件产生推力前机体静止（防自由落体撞地尖峰）
+    steps: u64, // 固件执行步数（诊断）
+}
+
+impl VperiphMc {
+    /// 完整装配：boot → EKF 收敛 → ARM。Unicorn 偶发 `UC_ERR_INSN_INVALID`（M4F 模拟
+    /// 瞬时不稳定，x_hover 系实测偶发）→ 内部重建重试，最多 8 次。
+    fn boot() -> Result<Self, String> {
+        let mut last_err = String::new();
+        for attempt in 0..8 {
+            match Self::boot_once() {
+                Ok(vp) => {
+                    eprintln!("[vperiph] 虚拟 MCU boot 完成（尝试 {}）", attempt + 1);
+                    return Ok(vp);
+                }
+                Err(e) => {
+                    eprintln!("[vperiph] boot 尝试 {} 失败：{e}", attempt + 1);
+                    last_err = e;
+                }
+            }
+        }
+        Err(format!("虚拟 MCU boot 连续失败：{last_err}"))
+    }
+
+    fn boot_once() -> Result<Self, String> {
+        let mut m = Machine::new_m4f().map_err(|e| format!("Machine: {e:?}"))?;
+        m.map_stm32f407_layout().map_err(|e| format!("map: {e:?}"))?;
+        let state = Arc::new(Mutex::new(FlySimState::default()));
+        m.attach_flysim_sensors(state.clone());
+        m.attach_flysim_uart_slaves(state.clone());
+
+        // boot 前注入初始真值（静止水平悬停 + 气压 h=0 + GPS 有效，同 x_vperiph）
+        {
+            let mut st = state.lock().unwrap();
+            st.imu_acc = [0.0, 0.0, -9.81];
+            st.imu_gyr = [0.0, 0.0, 0.0];
+            st.baro_pa = 101_325.0f32;
+            st.gps_lat = VP_LAT0;
+            st.gps_lon = VP_LON0;
+            st.gps_alt = VP_ALT0 + 5.0;
+            st.gps_fix = 3.0;
+            st.gps_vel = [0.0, 0.0, 0.0];
+            st.rc_ch = [1500.0; 16];
+        }
+
+        m.load_elf(std::path::Path::new(VP_SYS)).map_err(|e| format!("elf: {e:?}"))?;
+        m.load_app_partition(std::path::Path::new(VP_APP)).map_err(|e| format!("app: {e:?}"))?;
+        m.reset().map_err(|e| format!("reset: {e:?}"))?;
+        for _ in 0..12 {
+            m.run(1_000_000).map_err(|e| format!("boot run: {e:?}"))?;
+        }
+        let m = Arc::new(Mutex::new(m));
+
+        // ARM 前 EKF 高度收敛（同 x_vperiph：等 RC 建立 + EKF 高度拉回原点）
+        let mut mm = m.lock().unwrap();
+        let mut z = f32::NAN;
+        for i in 0..400 {
+            mm.run(1_000_000).map_err(|e| format!("settle run: {e:?}"))?;
+            z = f32::from_le_bytes(
+                mm.cpu.mem_read(0x2000_9074 + 28, 4).map_err(|e| format!("mem: {e:?}"))?
+                    .try_into().unwrap(),
+            );
+            if i % 100 == 0 {
+                eprintln!("[vperiph] 收敛推进 i={i} ekf_z={z:.3}");
+            }
+            if z.abs() < 0.6 {
+                break;
+            }
+        }
+        drop(mm);
+        eprintln!("[vperiph] EKF 收敛完成 ekf_z={z:.3}");
+
+        // ARM + RC 解锁
+        m.lock().unwrap().cpu.mem_write(0x2000_b669, &[1u8]).map_err(|e| format!("arm: {e:?}"))?;
+        {
+            let mut st = state.lock().unwrap();
+            st.rc_ch[4] = 2000.0;
+            st.rc_ch[3] = 1500.0;
+        }
+        Ok(Self { machine: m, state, hold: true, steps: 0 })
+    }
+
+    /// 读 4 路 PWM 的 CCR1/ARR → 归一化推力（m = (duty_us - 1000)/1000）。
+    fn read_thrust(&self) -> [f32; 4] {
+        let mut m = self.machine.lock().unwrap();
+        let tims = [VP_TIM3, VP_TIM2, VP_TIM1, VP_TIM4];
+        let mut out = [0f32; 4];
+        for (i, &t) in tims.iter().enumerate() {
+            let mut rd = |a: u64| -> u32 {
+                m.cpu.mem_read(a, 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0)
+            };
+            let arr = rd(t + VP_OFF_ARR) as f32;
+            let ccr = rd(t + VP_OFF_CRR1) as f32;
+            let duty = if arr > 0.0 { ccr / arr } else { 0.0 };
+            let us = duty * 2500.0;
+            out[i] = ((us - 1000.0) / 1000.0).clamp(0.0, 1.0);
+        }
+        out
+    }
+
+    /// 把 fly-sim 的噪声化传感器读数注入虚拟外设（固件经虚拟 I2C/UART 收到，
+    /// 与 SIL 控制律同源——`SimLoop` 的 `SensorConfig` 已叠加噪声/风作用后的真值）。
+    fn inject<W: fly_sim_core::physics::RigidBodyWorld>(&self, sim: &SimLoop<W>) {
+        let mut st = self.state.lock().unwrap();
+        let imu = sim.last_imu();
+        st.imu_acc = [imu.accel[0].0, imu.accel[1].0, imu.accel[2].0];
+        st.imu_gyr = [imu.gyro[0].0, imu.gyro[1].0, imu.gyro[2].0];
+        match sim.last_gps() {
+            Some(g) => {
+                st.gps_lat = VP_LAT0 + g.pos[0].0 / 111_320.0;
+                st.gps_lon = VP_LON0 + g.pos[1].0 / (111_320.0 * VP_LAT0.to_radians().cos());
+                st.gps_alt = VP_ALT0 - g.pos[2].0;
+                st.gps_fix = 3.0;
+                if let Some(v) = g.vel {
+                    st.gps_vel = [v[0].0, v[1].0, v[2].0];
+                }
+            }
+            None => {
+                st.gps_fix = 3.0;
+            }
+        }
+        // 气压：家庭点=起飞台 d=-5，baro h=0 对齐（与 x_vperiph 同约定）
+        let baro_up = sim.last_baro_alt();
+        let h = baro_up - 5.0;
+        st.baro_pa = 101_325.0 * (-h / 8434.5).exp();
+        st.rc_ch[4] = 2000.0;
+    }
+
+    /// 推进 Unicorn 固件一步。偶发非法指令 → Err（上层重建）。
+    fn run_step(&self) -> Result<(), ()> {
+        self.machine.lock().unwrap().run(300_000).map_err(|e| {
+            eprintln!("[vperiph] Unicorn run 失败：{e:?}（重建重启）");
+        })
+    }
+
+    /// 固件 EKF 估计高度 est.pos[2]（NED 向下正）。
+    fn ekf_z(&self) -> f32 {
+        let mut m = self.machine.lock().unwrap();
+        m.cpu.mem_read(0x2000_9074 + 28, 4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .unwrap_or(f32::NAN)
+    }
+}
+
 /// 仿真驱动内部状态（每 WS 连接一个）。
 struct SimDriver {
     sim: Option<SimLoop<PhySdkWorld>>,
@@ -98,7 +269,7 @@ struct SimDriver {
     degrade_injected: bool,
     trail: Vec<[f64; 3]>,  // 渲染系轨迹
     // HIL：USB 链路（场景 "hil" 时驱动），连接错误回退提示。
-    hil_probe: hil_link::CdcProbe, // 后台 USB-CDC 探测，主循环读取缓存，永不阻塞
+    hil_probe: fly_sim_hil::hil_link::CdcProbe, // 后台 USB-CDC 探测，主循环读取缓存，永不阻塞
     hil: Option<HilLink>,
     hil_err: Option<String>,
     hil_state: LinkState,
@@ -109,6 +280,8 @@ struct SimDriver {
     hil_step: u64,    // HIL 物理步计数（导航注入节流用）
     hil_hold: bool,   // HIL 起飞台保持：MCU 产生推力前静止于初始悬停点（防自由落体撞地尖峰）
     hil_noise: Option<SensorModel>, // HIL realistic 噪声：注入 HIL_SENSOR 前对真值叠加消费级噪声
+    // vperiph：Unicorn 虚拟 MCU（场景 "vperiph" 时驱动，HIL 的虚拟后端）。
+    vp: Option<VperiphMc>,
 }
 
 impl SimDriver {
@@ -121,7 +294,7 @@ impl SimDriver {
             phase_steps: 0,
             degrade_injected: false,
             trail: Vec::new(),
-            hil_probe: hil_link::CdcProbe::start(),
+            hil_probe: fly_sim_hil::hil_link::CdcProbe::start(),
             hil: None,
             hil_err: None,
             hil_state: LinkState::Connecting,
@@ -132,6 +305,7 @@ impl SimDriver {
             hil_step: 0,
             hil_hold: true,
             hil_noise: None,
+            vp: None,
         }
     }
 
@@ -147,17 +321,33 @@ impl SimDriver {
     fn rebuild(&mut self, c: &ControlState) {
         // 传感器噪声开关：SIL 用 SensorConfig 注入（SimLoop 内部），HIL 用 SensorModel
         // 在注入 HIL_SENSOR 前对真值叠加（与 SIL realistic 同一套噪声模型/参数/seed）。
-        self.sensor_cfg = if c.sensor_noise {
+        // vperiph 场景固定全场景真实化（realistic + 风场），与 x_hover_env 对齐。
+        let vperiph = c.scenario == "vperiph";
+        self.sensor_cfg = if vperiph || c.sensor_noise {
             SensorConfig::realistic()
         } else {
             SensorConfig::default()
         };
-        self.hil_noise = if c.sensor_noise {
+        self.hil_noise = if !vperiph && c.sensor_noise {
             Some(SensorModel::new(SensorConfig::realistic(), DT))
         } else {
             None
         };
-        let wind = if c.wind > 0.0 {
+        let wind = if vperiph {
+            // 全场景真实化风场（同 x_hover_env）：2.5m/s 北向稳态 + 阵风 + 湍流 + 风切。
+            Some(WindField::new(WindConfig {
+                base: [2.5, 0.0, -1.0],
+                gust_amp: [1.2, 0.0, 0.0],
+                gust_freq: 0.12,
+                turb_sigma: [0.3, 0.1, -0.3],
+                turb_tau: 0.5,
+                seed: 0x1234_5678,
+                shear_exponent: 0.2,
+                shear_ref_height: 10.0,
+                spatial_scale: 2.0,
+                ..WindConfig::default()
+            }))
+        } else if c.wind > 0.0 {
             Some(WindField::new(WindConfig {
                 base: [c.wind, 0.0, 0.0],
                 ..Default::default()
@@ -222,6 +412,8 @@ impl SimDriver {
         self.phase_steps = 0;
         self.degrade_injected = false;
         self.trail.clear();
+        // 场景/配置变更 → 虚拟 MCU 重建（下次 advance_vperiph 重新 boot）
+        self.vp = None;
     }
 
     /// 推进一帧，返回 (渲染输入, 遥测 JSON 字符串, 场景是否结束)。
@@ -673,6 +865,75 @@ impl SimDriver {
         );
         Some((Some(inp), tele))
     }
+
+    /// vperiph 模式单帧推进（场景 "vperiph"）：Unicorn 虚拟 MCU 闭环。
+    ///
+    /// 与 `advance_hil` 同一闭环骨架（`SimLoop::step_hil` + 起飞台保持 + 渲染/遥测），
+    /// 差异仅在 MCU 来源：指令读 Unicorn 固件 PWM，传感器经虚拟外设注入
+    /// （fly-sim 的 `SensorConfig::realistic` 噪声化读数 → `FlySimState` → 固件）。
+    fn advance_vperiph(&mut self, c: &ControlState) -> Option<(Option<RenderInput>, String)> {
+        // 虚拟 MCU 装配（boot → EKF 收敛 → ARM），内部已对 Unicorn 偶发崩溃重试。
+        if self.vp.is_none() {
+            match VperiphMc::boot() {
+                Ok(vp) => self.vp = Some(vp),
+                Err(e) => {
+                    eprintln!("[vperiph] boot 失败：{e}");
+                    return Some((
+                        None,
+                        format!(
+                            "{{\"alt\":0.0,\"horiz\":0.0,\"speed\":0.0,\"roll\":0.0,\"pitch\":0.0,\"yaw\":0.0,\"m\":[0,0,0,0],\"steps\":0,\"scenario\":\"vperiph\",\"diverged\":true}}"
+                        ),
+                    ));
+                }
+            }
+        }
+        let vp = self.vp.as_mut()?;
+
+        let mut last: Option<flyctrl_core::vehicle::VehicleState> = None;
+        let mut motors = [0f32; 4];
+        for _ in 0..STEPS_PER_FRAME {
+            // 每步读回固件最新 PWM 推力（同 advance_hil 的 link.actuator() 节奏）
+            motors = vp.read_thrust();
+            let thrust: f32 = motors.iter().sum();
+            let held = vp.hold && thrust < 0.05;
+            let cmd = ActuatorCmd { motor: motors };
+            let st = if held {
+                // 起飞台保持：固件未产生推力前机体静止于初始悬停点（防自由落体尖峰）
+                if let Some(sim) = self.sim.as_ref() {
+                    Some(sim.snapshot().0)
+                } else {
+                    None
+                }
+            } else {
+                vp.hold = false;
+                if let Some(sim) = self.sim.as_mut() {
+                    Some(sim.step_hil(&cmd))
+                } else {
+                    None
+                }
+            };
+            self.phase_steps += 1;
+            // 注入噪声化读数（SimLoop SensorConfig 已叠加 realistic 噪声/风作用）
+            if let Some(sim) = self.sim.as_ref() {
+                vp.inject(sim);
+            }
+            // Unicorn 推进；偶发非法指令 → 重建（下帧重新 boot）
+            if vp.run_step().is_err() {
+                self.vp = None;
+                return Some((
+                    None,
+                    "{\"alt\":0.0,\"horiz\":0.0,\"speed\":0.0,\"roll\":0.0,\"pitch\":0.0,\"yaw\":0.0,\"m\":[0,0,0,0],\"steps\":0,\"scenario\":\"vperiph\",\"diverged\":true}"
+                        .to_string(),
+                ));
+            }
+            last = st;
+        }
+        let st = last?;
+        let cmd = ActuatorCmd { motor: motors };
+        let inp = self.render_input(&st, &cmd, c);
+        let tele = telemetry_json(&st, &cmd, c, self.phase_steps, false);
+        Some((Some(inp), tele))
+    }
 }
 
 /// HIL 遥测 JSON：连接状态 + MCU 估计（ATTITUDE/LOCAL_POSITION_NED）+ 物理真值。
@@ -835,6 +1096,8 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>) {
         };
         let out = if c.scenario == "hil" {
             driver.advance_hil(&c)
+        } else if c.scenario == "vperiph" {
+            driver.advance_vperiph(&c)
         } else {
             driver.advance(&c).map(|(inp, tele)| (Some(inp), tele))
         };
@@ -1082,8 +1345,12 @@ fn handle_http(stream: &mut TcpStream) {
 }
 
 fn main() {
-    let listener = TcpListener::bind(("127.0.0.1", PORT)).expect("无法绑定端口");
-    println!("[server] Fly Simulator Web 后端已启动: http://127.0.0.1:{}/", PORT);
+    let port = std::env::var("FLY_SIM_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(PORT);
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("无法绑定端口");
+    println!("[server] Fly Simulator Web 后端已启动: http://127.0.0.1:{}/", port);
     println!("[server] 控制: 场景(hover/wind/degraded/avoidance/hil) 控制律(pid/lqr/indi) 故障(fail_motor/degrade) 风(wind) 相机(cam_*)");
 
     // 预热：探测静态目录是否存在
