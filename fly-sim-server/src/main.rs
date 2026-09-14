@@ -18,6 +18,7 @@ mod ws;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1259,9 +1260,13 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
     // 桌面正常（q=""）：640×480 + 800kbps + 40fps。
     let low = q == "low" || q == "lowest";
     let q320 = q == "lowest";
+    // 有界通道(4)：渲染慢于仿真时 try_send 丢新帧并标记 force_idr——仿真保持实时，
+    // 且丢帧后下一个编码帧强制 IDR（重置参考链），避免浏览器因参考帧缺失报零星错误。
+    let force_idr = Arc::new(AtomicBool::new(false));
     let (render_tx, render_rx) =
-        std::sync::mpsc::sync_channel::<(u32, u32, RenderInput, String)>(2);
+        std::sync::mpsc::sync_channel::<(u32, u32, RenderInput, String)>(4);
     let render_stream = stream.try_clone().unwrap();
+    let f_idr = force_idr.clone();
     thread::spawn(move || {
         let mut s = render_stream;
         // vperiph(320×240/640×480) 协商为 h264 时用视频流（帧间压缩，带宽比 PNG 省 ~5×）；
@@ -1281,6 +1286,9 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
                     h264 = new_h264_encoder(br, 15).ok();
                 }
                 if let Some(enc) = h264.as_mut() {
+                    if f_idr.swap(false, Ordering::Relaxed) {
+                        enc.force_intra_frame(); // 丢帧后重置参考链，防浏览器解码器报错
+                    }
                     let i420 = I420Source { w: fw as usize, h: fh as usize, data: rgba_to_i420(bytes, fw as usize, fh as usize) };
                     if let Ok(bs) = enc.encode(&i420) {
                         let key = bs.frame_type() == FrameType::IDR;
@@ -1365,7 +1373,9 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
                     } else { (320u32, 240u32) }
                 } else { (FRAME_W, FRAME_H) };
                 if render_tx.try_send((fw, fh, inp, tele)).is_err() {
-                    // 渲染线程忙（通道满）：丢本帧保仿真实时，画面延迟 ≤2 帧。
+                    // 渲染线程忙（通道满）：丢本帧保仿真实时，标记下一个编码帧强制 IDR
+                    // （参考链重置，浏览器解码器不会因参考帧缺失报错）。
+                    force_idr.store(true, Ordering::Relaxed);
                 }
             } else {
                 // 无渲染帧的状态遥测（如 vperiph boot 中/失败）：主线程直发。

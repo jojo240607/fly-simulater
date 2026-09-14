@@ -212,8 +212,9 @@
         vdecErrors = 0; // 成功解码一帧 = 流正常，重置错误计数
       },
       error: (e) => {
-        console.error("VideoDecoder error:", e);
-        statusEl.textContent = "视频流解码错误(" + (e && (e.message || e.name)) + ")，自动重同步…";
+        // 偶发错误静默自恢复（等关键帧重建，≤0.75s）；只有连续失败（vdecErrors≥2
+        // 触发降级）才在状态栏提示，避免用户看到零星错误刷屏。
+        console.warn("VideoDecoder error（偶发，自动重同步）:", e);
         vdecBroken = true; // 等下一个关键帧重建解码器
         vdecErrors++;      // 连续失败则降级 PNG（保画面）
       },
