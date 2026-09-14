@@ -121,14 +121,15 @@ fn rgba_to_i420(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// 新建 openh264 编码器：bitrate=目标码率、intra_period=关键帧间隔（帧数）。
 /// max_frame_rate 固定 8.0：open264 高帧率声明的流 WebCodecs 兼容性差（40fps
 /// 声明本地解码丢帧）；8fps 声明的 SPS VUI 兼容（用户正常显示过）。
-/// profile 用 High（用户正常显示的版本），GOP 15（短 P 帧链——GOP 拉长到 30
-/// 后 WebCodecs 每关键帧周期累积错误报错卡顿，实测"每 3s 卡一下"）。
+/// profile 用 Baseline（无 B 帧，解码顺序=编码顺序）：High 的 B 帧偶发
+/// timestamp/POC 乱序触发 WebCodecs 偶发解码错误（"偶尔提示解码失败"）。
+/// GOP 15：短 P 帧链防累积错误（GOP 30 曾导致周期性 3s 卡顿）。
 fn new_h264_encoder(bitrate_bps: u32, intra_period: u32) -> Result<Encoder, openh264::Error> {
     let cfg = EncoderConfig::new()
         .bitrate(BitRate::from_bps(bitrate_bps))
         .max_frame_rate(FrameRate::from_hz(8.0))
         .usage_type(UsageType::CameraVideoRealTime)
-        .profile(Profile::High)
+        .profile(Profile::Baseline)
         // GOP 15（≈1.9s@8fps 声明 / 0.75s@20fps 实际）：短 P 链 + 快重同步
         .intra_frame_period(IntraFramePeriod::from_num_frames(intra_period));
     Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
