@@ -208,8 +208,12 @@ impl Default for ControlState {
 struct VperiphMc {
     machine: Arc<Mutex<Machine>>,
     state: Arc<Mutex<FlySimState>>,
-    hold: bool, // 起飞台保持：固件产生推力前机体静止（防自由落体撞地尖峰）
-    steps: u64, // 固件执行步数（诊断）
+    hold: bool,          // 起飞台保持：固件产生推力前机体静止（防自由落体撞地尖峰）
+    steps: u64,          // 固件执行步数（诊断）
+    hold_z: Option<f32>, // 定高基准（NED z，向下为正）：起飞稳定后锁定（延迟 2s），与固件 hold_alt 接近
+    hold_z_timer: f32,   // 脱离起飞台后的稳定计时（s）
+    alt_int: f32,        // 定高外环积分项（抑制静差）
+    z_filt: f32,         // 外环输入高度低通滤波（去真值噪声，防油门抖动）
 }
 
 impl VperiphMc {
@@ -287,7 +291,7 @@ impl VperiphMc {
             st.rc_ch[4] = 2000.0;
             st.rc_ch[3] = 1500.0;
         }
-        Ok(Self { machine: m, state, hold: true, steps: 0 })
+        Ok(Self { machine: m, state, hold: true, steps: 0, hold_z: None, hold_z_timer: 0.0, alt_int: 0.0, z_filt: 0.0 })
     }
 
     /// 读 4 路 PWM 的 CCR1/ARR → 归一化推力（m = (duty_us - 1000)/1000）。
@@ -336,16 +340,36 @@ impl VperiphMc {
         st.rc_ch[4] = 2000.0;
     }
 
-    /// 演示机动：注入 SBUS 摇杆（ch0=roll, ch1=pitch）做 8 字轨迹，让画面可见飞行。
-    /// 固件经 SBUS 读摇杆（ch5=1500 → mode=1 槽位），摇杆 → 姿态/目标机动。
-    /// 幅度 ±0.28/±0.22（1500±140/110us，8 字半径 ~1-2m），周期 16s 仿真。
-    fn inject_maneuver(&self, t_sim: f64) {
+    /// 演示机动：注入 SBUS 摇杆做水平 8 字（画面可见飞行）+ 注入层定高外环。
+    /// 固件为 real-sensors（非 HIL），SBUS 摇杆真实进入控制；油门语义
+    /// `target_alt = hold_alt - (throttle-0.5)*2`：中位=保持基准高度。
+    /// 水平机动倾斜 → 升力垂直分量减 → 高度下沉，固件高度环（Unicorn 慢，0.3
+    /// 周期/步）补偿滞后 → ±1m 起伏。这里在注入层按高度误差微调油门通道补偿
+    /// （与固件内环级联）：高度偏低 → 推油门 → 固件目标高度抬升。
+    fn inject_maneuver(&mut self, t_sim: f64, z: f32) {
         let roll_amp = 0.28f32;
         let pitch_amp = 0.22f32;
         let w = 2.0f64 * std::f64::consts::PI / 16.0; // 8 字周期 16s 仿真
         let mut st = self.state.lock().unwrap();
         st.rc_ch[0] = 1500.0 + roll_amp * (w * t_sim).sin() as f32 * 500.0;
         st.rc_ch[1] = 1500.0 + pitch_amp * (w * t_sim).cos() as f32 * 500.0;
+        // 定高外环（注入层）：目标=起飞基准 hold_z，误差 → 油门通道
+        if let Some(hz) = self.hold_z {
+            // z 一阶低通（去真值噪声，防油门高频抖动）
+            if self.z_filt == 0.0 {
+                self.z_filt = z;
+            }
+            self.z_filt = 0.85 * self.z_filt + 0.15 * z;
+            let err = self.z_filt - hz; // NED z 向下为正：err>0 = 高度偏低
+            self.alt_int = (self.alt_int + err * DT as f32).clamp(-0.8, 0.8);
+            // 前馈：机动倾斜越大升力损失越大 → 同步预推油（无滞后补偿下沉）
+            let tilt = (st.rc_ch[0] - 1500.0).abs() / 500.0 + (st.rc_ch[1] - 1500.0).abs() / 500.0;
+            let ff = tilt * 0.14;
+            // kp=0.55 → 偏低 1m 推油近饱和（固件目标抬 ~1.1m）；ki 抑静差；
+            // 前馈随摇杆同步推油，抵消机动倾斜的升力损失（与 8 字同相位）
+            let thr = (0.5 + ff + (0.55 * err + 0.10 * self.alt_int)).clamp(0.25, 0.95);
+            st.rc_ch[3] = thr * 1000.0 + 1000.0;
+        }
     }
 
     /// 推进 Unicorn 固件一步。偶发非法指令 → Err（上层重建）。
@@ -1020,7 +1044,13 @@ impl SimDriver {
             } else {
                 vp.hold = false;
                 if let Some(sim) = self.sim.as_mut() {
-                    Some(sim.step_hil(&cmd))
+                    let st = sim.step_hil(&cmd);
+                    // 脱离起飞台瞬间锁定定高基准（实测比延迟锁定更稳：起飞后高度
+                    // 随机动自然稳定，立即锁定让外环全程补偿下沉）
+                    if vp.hold_z.is_none() {
+                        vp.hold_z = Some(st.pos[2].0);
+                    }
+                    Some(st)
                 } else {
                     None
                 }
@@ -1030,8 +1060,9 @@ impl SimDriver {
             if let Some(sim) = self.sim.as_ref() {
                 vp.inject(sim);
             }
-            // 演示机动：8 字摇杆（画面可见飞行）
-            vp.inject_maneuver(self.phase_steps as f64 * DT);
+            // 演示机动：水平 8 字摇杆 + 注入层定高外环（高度保持）
+            let z = st.as_ref().map(|s| s.pos[2].0).unwrap_or(0.0);
+            vp.inject_maneuver(self.phase_steps as f64 * DT, z);
             // Unicorn 推进；偶发非法指令 → 重建（下帧重新 boot）
             if vp.run_step().is_err() {
                 self.vp = None;
