@@ -67,9 +67,41 @@
   let vdecPending = [];
   let h264UnsupportedShown = false;
   let vdecBroken = false;   // 解码出错：等待关键帧重建解码器（自恢复）
+  let vdecErrors = 0;       // 连续错误计数：≥2 次则降级 PNG 重连（保画面）
   let vts = 0;              // 单调时间戳（μs），WebCodecs 只要求单调递增
 
   function hex2(v) { return v.toString(16).padStart(2, "0"); }
+
+  // Annex-B（起始码分隔）→ length-prefixed（4 字节大端长度前缀）。
+  // WebCodecs 的 avcC description 声明 lengthSizeMinusOne=3（4 字节长度），
+  // data 必须与之匹配——传 Annex-B 起始码会导致 Chrome 对 delta 帧解析失败报错。
+  function toLengthPrefixed(nal) {
+    const nals = [];
+    let i = 0;
+    while (i < nal.length - 3) {
+      let start = -1;
+      if (nal[i] === 0 && nal[i + 1] === 0 && nal[i + 2] === 1) { start = i + 3; i += 3; }
+      else if (nal[i] === 0 && nal[i + 1] === 0 && nal[i + 2] === 0 && nal[i + 3] === 1) { start = i + 4; i += 4; }
+      else { i++; continue; }
+      let j = i;
+      while (j < nal.length - 3 && !(nal[j] === 0 && nal[j + 1] === 0 && (nal[j + 2] === 1 || (nal[j + 2] === 0 && nal[j + 3] === 1)))) j++;
+      nals.push(nal.subarray(start, j));
+      i = j;
+    }
+    let total = 0;
+    for (const b of nals) total += 4 + b.length;
+    const res = new Uint8Array(total);
+    let o = 0;
+    for (const b of nals) {
+      res[o] = (b.length >> 24) & 0xff;
+      res[o + 1] = (b.length >> 16) & 0xff;
+      res[o + 2] = (b.length >> 8) & 0xff;
+      res[o + 3] = b.length & 0xff;
+      res.set(b, o + 4);
+      o += 4 + b.length;
+    }
+    return res;
+  }
 
   // 从 Annex-B NAL 流提取 SPS(7)/PPS(8)。
   function extractSpsPps(nal) {
@@ -115,11 +147,13 @@
           ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
         } catch (e) {}
         frame.close();
+        vdecErrors = 0; // 成功解码一帧 = 流正常，重置错误计数
       },
       error: (e) => {
         console.error("VideoDecoder error:", e);
-        statusEl.textContent = "视频流解码错误，自动重同步…";
+        statusEl.textContent = "视频流解码错误(" + (e && (e.message || e.name)) + ")，自动重同步…";
         vdecBroken = true; // 等下一个关键帧重建解码器
+        vdecErrors++;      // 连续失败则降级 PNG（保画面）
       },
     });
     vdec.configure({ codec, description: avcc, codedWidth: w, codedHeight: h });
@@ -143,6 +177,12 @@
     if (vdecBroken) {
       // 解码出错：丢掉 delta 帧，等下一个关键帧重建解码器（H.264 帧链不能断）
       if (!key) return;
+      if (vdecErrors >= 2) {
+        // 连续重建仍失败：降级 PNG 推帧保画面（重连协商 ?fmt=png）
+        statusEl.textContent = "H.264 解码持续失败，降级 PNG 推帧重连…";
+        ws.close();
+        return;
+      }
       resetVDecoder();
       statusEl.textContent = "已连接（H.264 视频流 640×480）";
     }
@@ -157,7 +197,7 @@
     const chunk = new EncodedVideoChunk({
       type: key ? "key" : "delta",
       timestamp: (vts += 40000), // 40ms/帧；WebCodecs 只要求单调递增
-      data: data.slice(0),
+      data: toLengthPrefixed(data), // length-prefixed，与 avcC description 一致
     });
     try { vdec.decode(chunk); } catch (e) {}
   }
