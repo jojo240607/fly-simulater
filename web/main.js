@@ -128,6 +128,29 @@
     vdecBroken = false;
   }
 
+  // —— rAF 节流绘制：解码 output 只缓存最新帧，由 requestAnimationFrame 统一绘制。
+  // 直接每帧 drawImage 会把解码器的 burst 输出（一次解多帧）原样抖到画面 → 卡顿；
+  // rAF 与浏览器刷新同步（60Hz 上限），只画最新帧 → 平滑且不堆积延迟。
+  let pendingFrame = null;   // 最新待绘制帧（VideoFrame 或 ImageBitmap）
+  let rafPending = false;
+  function scheduleRender() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      if (pendingFrame) {
+        try { ctx.drawImage(pendingFrame, 0, 0, canvas.width, canvas.height); } catch (e) {}
+        try { pendingFrame.close(); } catch (e) {}
+        pendingFrame = null;
+      }
+    });
+  }
+  function pushFrame(f) {
+    if (pendingFrame) { try { pendingFrame.close(); } catch (e) {} } // 只保留最新，丢弃旧的
+    pendingFrame = f;
+    scheduleRender();
+  }
+
   function initVDecoder(sps, pps, w, h) {
     // avcC description（WebCodecs 需要，从 SPS/PPS 打包）
     const avcc = new Uint8Array(11 + sps.length + pps.length);
@@ -143,10 +166,7 @@
     const codec = "avc1." + hex2(sps[1]) + hex2(sps[2]) + hex2(sps[3]);
     vdec = new VideoDecoder({
       output: (frame) => {
-        try {
-          ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
-        } catch (e) {}
-        frame.close();
+        try { pushFrame(frame); } catch (e) { try { frame.close(); } catch (_) {} }
         vdecErrors = 0; // 成功解码一帧 = 流正常，重置错误计数
       },
       error: (e) => {
@@ -214,8 +234,7 @@
       const blob = new Blob([buf.subarray(9)], { type: "image/png" });
       createImageBitmap(blob).then((bmp) => {
         ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-        bmp.close();
+        pushFrame(bmp); // 走 rAF 节流，与视频路径一致
       }).catch(() => {});
       return;
     }
