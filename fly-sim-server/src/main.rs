@@ -347,9 +347,10 @@ impl VperiphMc {
     /// 周期/步）补偿滞后 → ±1m 起伏。这里在注入层按高度误差微调油门通道补偿
     /// （与固件内环级联）：高度偏低 → 推油门 → 固件目标高度抬升。
     fn inject_maneuver(&mut self, t_sim: f64, z: f32) {
-        // 8 字幅度：roll 0.40/pitch 0.30 → 固件 setpoint 水平目标 ±1.2m（半径 ≥1m）
+        // 8 字幅度（速率模式：摇杆 → 期望速度 ±3.0m/s 满偏，半径 = 速度/角频率）：
+        // roll/pitch 0.40 → 速度 1.2m/s → 半径 1.2÷(2π/16) ≈ 3.06m（对称 8 字）
         let roll_amp = 0.40f32;
-        let pitch_amp = 0.30f32;
+        let pitch_amp = 0.40f32;
         let w = 2.0f64 * std::f64::consts::PI / 16.0; // 8 字周期 16s 仿真
         let mut st = self.state.lock().unwrap();
         st.rc_ch[0] = 1500.0 + roll_amp * (w * t_sim).sin() as f32 * 500.0;
