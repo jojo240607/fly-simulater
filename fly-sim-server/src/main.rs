@@ -151,7 +151,16 @@ const STEPS_PER_FRAME: u64 = 8; // 每显示帧推进的物理步（dt=4ms → ~
 /// 帧率 = 1/(步数×run耗时+固定开销)，8 步在 run(200k) 下 ≈ 7.5fps（比 16 步/帧的 3.8fps
 /// 高近一倍，帧率优先——画面连贯），仿真/墙钟 ≈ 0.24（4 倍慢放）。8 字机动周期 16s 仿真
 /// ≈ 66s 墙钟，加高幅度摇杆让画面可见飞行（悬停原样会"看起来静止"）。
-const VP_STEPS_PER_FRAME: u64 = 8;
+/// 每帧物理步数。8 步/帧 = 132ms run → 7.5fps（卡）；4 步/帧 = 66ms → ~15fps
+/// （更顺，画面移动幅度减半但帧率翻倍，位移速度不变）。固件控制律每 3.3 物理步
+/// 一个周期（run 200k=0.3 周期），4 步/帧 ≈ 1.2 周期/帧，稳定（150k 等效的
+/// 18ms/周期已实测发散；200k 每步 run = 13ms/周期安全）。
+const VP_STEPS_PER_FRAME: u64 = 4;
+
+/// 固件推进频率：每 N 物理步 run 一次。实测每 2 步 run（控制律周期 ~26ms 物理）
+/// 超过稳定临界（~15ms，150k/步 等效）→ 姿态发散坠机；必须每步 run（~13ms 周期）。
+/// 提速只能靠降低 Unicorn 单步成本（编译优化），此处保持 1。
+const VP_RUN_EVERY: u64 = 1;
 /// HIL 导航注入节流：HIL_GPS/SET_POSITION 每 N 物理步发一次（8 步 = 32ms ≈ 31Hz）。
 /// EKF 位置观测（GPS/气压）需求远低于 IMU 的 4ms 节拍（模拟器 non-HIL GPS 仅 20Hz），
 /// 而每条消息经 send_chunked 分块睡眠 ~2ms×块数。若 3 条消息全量每步发送，每步注入
@@ -347,11 +356,12 @@ impl VperiphMc {
     /// 周期/步）补偿滞后 → ±1m 起伏。这里在注入层按高度误差微调油门通道补偿
     /// （与固件内环级联）：高度偏低 → 推油门 → 固件目标高度抬升。
     fn inject_maneuver(&mut self, t_sim: f64, z: f32) {
-        // 8 字幅度（速率模式：摇杆 → 期望速度 ±3.0m/s 满偏，半径 = 速度/角频率）：
-        // roll/pitch 0.40 → 速度 1.2m/s → 半径 1.2÷(2π/16) ≈ 3.06m（对称 8 字）
-        let roll_amp = 0.40f32;
-        let pitch_amp = 0.40f32;
-        let w = 2.0f64 * std::f64::consts::PI / 16.0; // 8 字周期 16s 仿真
+        // 8 字幅度（速率模式：摇杆 → 期望速度，半径 = 速度/角频率）：
+        // 周期 16s→8s（机动墙钟减半，感知更快）；roll/pitch 0.75 → 速度
+        // 0.75×1.7×~2 ≈ 2.55m/s → 半径 2.55÷(2π/8) ≈ 3.25m（对称 8 字）
+        let roll_amp = 0.75f32;
+        let pitch_amp = 0.75f32;
+        let w = 2.0f64 * std::f64::consts::PI / 8.0; // 8 字周期 8s 仿真
         let mut st = self.state.lock().unwrap();
         st.rc_ch[0] = 1500.0 + roll_amp * (w * t_sim).sin() as f32 * 500.0;
         st.rc_ch[1] = 1500.0 + pitch_amp * (w * t_sim).cos() as f32 * 500.0;
@@ -376,11 +386,11 @@ impl VperiphMc {
 
     /// 推进 Unicorn 固件一步。偶发非法指令 → Err（上层重建）。
     ///
-    /// 指令数 200k ≈ 固件 0.3 个控制周期（4ms@168MHz≈67 万条）。实测：
+    /// 指令数 150k ≈ 固件 0.22 个控制周期（4ms@168MHz≈67 万条）。实测：
     /// run(300k)=20.9ms / run(200k)=16.5ms / run(150k)=11.5ms。
-    /// 150k（0.22 周期/步）控制律滞后 → 姿态发散坠机（实测 alt 单调下降）；
-    /// 300k 是稳定下限但最慢。200k 为折中（控制律每 3.3 物理步≈13ms 更新，
-    /// 仍远高于机动/阵风带宽），配合 8 步/帧 ≈ 7.5fps、仿真/墙钟 0.24。
+    /// 旧注释：150k 控制律滞后发散——但彼时无定高外环；当前有注入层定高外环
+    /// + 速率模式，150k（0.22 周期/步 → 控制律 ~18ms 物理/周期）实测稳定与否
+    /// 以联调为准。稳定则 fps 7.5→10.5（1.4×），否则回 200k。
     fn run_step(&self) -> Result<(), ()> {
         self.machine.lock().unwrap().run(200_000).map_err(|e| {
             eprintln!("[vperiph] Unicorn run 失败：{e:?}（重建重启）");
@@ -1065,8 +1075,9 @@ impl SimDriver {
             // 演示机动：水平 8 字摇杆 + 注入层定高外环（高度保持）
             let z = st.as_ref().map(|s| s.pos[2].0).unwrap_or(0.0);
             vp.inject_maneuver(self.phase_steps as f64 * DT, z);
-            // Unicorn 推进；偶发非法指令 → 重建（下帧重新 boot）
-            if vp.run_step().is_err() {
+            // Unicorn 推进（每 VP_RUN_EVERY 物理步一次：run 是帧率唯一成本，
+            // 物理步由 SimLoop 免费推进）；偶发非法指令 → 重建（下帧重新 boot）
+            if self.phase_steps % VP_RUN_EVERY == 0 && vp.run_step().is_err() {
                 self.vp = None;
                 return Some((
                     None,
