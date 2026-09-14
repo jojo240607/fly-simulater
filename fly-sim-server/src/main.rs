@@ -118,13 +118,15 @@ fn rgba_to_i420(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// 新建 openh264 编码器（H.264 视频流：vperiph 640×480 @ 1200kbps）。
 /// 带宽实测：640×480 动态 8 字场景 ~1.2-1.5Mbps，在公网 2.5Mbps 内且比 PNG(320×240,
 /// 2.1Mbps) 分辨率更高带宽更低（帧间压缩）。
-/// 新建 openh264 编码器：bitrate=目标码率、max_fps=码控按实际帧率标定、
-/// intra_period=关键帧间隔（帧数）。GOP 拉疏（1.5s）可大幅降带宽（IDR 全帧
-/// 开销占比高：原 15 帧@40fps=0.375s 一个 IDR，带宽主要吃在这）。
-fn new_h264_encoder(bitrate_bps: u32, max_fps: u32, intra_period: u32) -> Result<Encoder, openh264::Error> {
+/// 新建 openh264 编码器：bitrate=目标码率、intra_period=关键帧间隔（帧数）。
+/// max_frame_rate 固定 8.0：实测 open264 在 20/40fps 声明下输出的流 WebCodecs
+/// 兼容性差（40fps 本地解码 38/60 丢帧、浏览器解码失败）；8fps 的 SPS VUI
+/// 输出兼容（用户 640×480@8fps 正常显示过）。码控按 8fps 标定 → 实际码率
+/// 宽松（约 1.2-2Mbps），但帧率不受限（推帧由 VP_STEPS_PER_FRAME 决定）。
+fn new_h264_encoder(bitrate_bps: u32, intra_period: u32) -> Result<Encoder, openh264::Error> {
     let cfg = EncoderConfig::new()
         .bitrate(BitRate::from_bps(bitrate_bps))
-        .max_frame_rate(FrameRate::from_hz(max_fps as f32))
+        .max_frame_rate(FrameRate::from_hz(8.0))
         .usage_type(UsageType::CameraVideoRealTime)
         // GOP：新客户端 ≤1.5s 等到关键帧出画面（视频流常规值）
         .intra_frame_period(IntraFramePeriod::from_num_frames(intra_period));
@@ -1272,16 +1274,16 @@ fn handle_ws(stream: TcpStream, ctrl: Arc<Mutex<ControlState>>, fmt: String, q: 
             let bytes: &[u8] = bytemuck_pixels(&pixels);
             if use_h264 && (low || (fw == 640 && fh == 480)) {
                 if h264.is_none() {
-                    // 桌面：640×480 @800kbps GOP30（0.75s@40fps）；
-                    // 手机 low：640×480 @600kbps GOP20；lowest：320×240 @350kbps GOP20
-                    let (br, mfps, gop) = if q320 {
-                        (350_000u32, 20u32, 20u32)
+                    // 桌面：640×480 @800kbps GOP30；手机 low：640×480 @600kbps GOP20；
+                    // lowest：320×240 @350kbps GOP20（max_frame_rate 固定 8，见 new_h264_encoder）
+                    let (br, gop) = if q320 {
+                        (350_000u32, 20u32)
                     } else if low {
-                        (600_000u32, 20u32, 20u32)
+                        (600_000u32, 20u32)
                     } else {
-                        (800_000u32, 40u32, 30u32)
+                        (800_000u32, 30u32)
                     };
-                    h264 = new_h264_encoder(br, mfps, gop).ok();
+                    h264 = new_h264_encoder(br, gop).ok();
                 }
                 if let Some(enc) = h264.as_mut() {
                     let i420 = I420Source { w: fw as usize, h: fh as usize, data: rgba_to_i420(bytes, fw as usize, fh as usize) };
