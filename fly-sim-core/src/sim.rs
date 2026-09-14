@@ -577,6 +577,13 @@ where
         self.ctrl.debug_pid_iz()
     }
 
+    /// P3-B3：向传感器模型注入软/硬故障（偏置突变/漂移/卡死）。
+    /// 透传 `FlyController::inject_sensor_fault`——故障在"物理真值→传感器读数"
+    /// 处生效，喂给 EKF 与 FDIR。温和温漂可用 `GyroDrift`/`AccelDrift` 缓变注入。
+    pub fn inject_sensor_fault(&mut self, fault: crate::sensor::SensorFault) {
+        self.ctrl.inject_sensor_fault(fault);
+    }
+
     /// 阶段 11-A 诊断：取 PID 控制律内部量（绕开 no_std 无打印）。
     /// 元组：(raw_d, raw_vd, filt_d, filt_vd, ez, iz, des_vz, acc_d, des_thr)。
     pub fn ctrl_debug_pid_internal(&self) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32) {
