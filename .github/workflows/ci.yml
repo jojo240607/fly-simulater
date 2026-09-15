@@ -1,0 +1,13 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: fly-sim-core lib 测试
+        run: cargo test -p fly-sim-core --lib
+      - name: sensor_fault 故障注入
+        run: cargo test --test sensor_fault
