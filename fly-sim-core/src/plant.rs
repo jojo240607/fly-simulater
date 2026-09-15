@@ -15,14 +15,14 @@
 
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::vehicle::{
-    rotate_vec_by_quat_inverse, ActuatorCmd, ImuSample, PosSample, Quaternion, RtkSample,
-    VehicleState, VioSample,
+    rotate_vec_by_quat, rotate_vec_by_quat_inverse, ActuatorCmd, ImuSample, PosSample, Quaternion,
+    RtkSample, VehicleState, VioSample,
 };
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPerSecond};
 
 use crate::physics::{
     ray_obstacle_distance, BodyCollider, ContactInfo, ContactModel, DynamicObstacle, Obstacle,
-    RigidBodyWorld,
+    RigidBodyWorld, ToyWorld,
 };
 use crate::wind::{WindField, WindVec};
 use crate::sensor::{RangeFinderFrame, RangeFinderModel, SensorConfig, SensorFault, SensorModel};
@@ -1078,15 +1078,42 @@ where
         let pos_ned = vec_up_to_ned([tf[0], tf[1], tf[2]]);
         let altitude = -pos_ned[2] as f64; // NED -d = 高度
 
-        // ---- 磁力计机体场 ----
-        // 本仿真里 EKF 的航向(yaw)由陀螺积分驱动，机体初始姿态与 EKF 初值存在约定差异，
-        // 任何非零机体磁场都会让 update_mag 的 yaw 修正与陀螺形成正反馈而发散（实测：
-        // 竖直分量在机体倾斜时也会被旋出水平分量、激活磁修正而发散）。为使飞行稳定，
-        // 这里输出零场 -> update_mag 因幅值 n==0 直接跳过，等价关闭磁航向约束；
-        // 位置/高度控制不依赖磁航向，故无影响。
-        let mag = crate::sensor::MagSample {
-            field: [0.0, 0.0, 0.0],
-        };
+        // ---- 磁力计机体场（真实建模，替代早期零场关闭方案）----
+        // 世界系参考地磁（NED）：水平指向磁北（地理北 + decl，东偏为正），垂直向下为
+        // 负（北半球）。幅值任意（EKF 只取水平方向比做航向锚定），按典型中纬度地磁
+        // 归一缩放（~50uT 水平 + ~40uT 垂直）。
+        // 机体系磁场 = R^T(att)·m_world（真实姿态旋转）+ 安装误差 + 硬/软铁 + 噪声。
+        // 早期（update_mag 硬编码 +X 且无门控时）非零场曾与 EKF 初值约定差异产生
+        // 正反馈发散；现 update_mag 为绕世界 Z 纯 yaw 修正（不动 roll/pitch、水平
+        // 分量 <1e-3 门控），且 SIL EKF 初值 yaw=setpoint.yaw（悬停 0）与物理初始
+        // 姿态一致 → 磁航向锚定稳定收敛，不再需要零场关闭。
+        let decl = self.sensor.cfg().mag_decl_deg.to_radians();
+        let (sd, cd) = decl.sin_cos();
+        let m_world_ned = [0.5 * cd, 0.5 * sd, -0.4]; // (n,e,d) 水平磁北 + 垂向
+        let att_ned = quat_up_to_ned([tf[3], tf[4], tf[5], tf[6]]);
+        // flyctrl 四元数为 f32：世界磁场转 f32 旋到机体系后转回 f64 做误差建模。
+        let m_world_f32 = [
+            m_world_ned[0] as f32,
+            m_world_ned[1] as f32,
+            m_world_ned[2] as f32,
+        ];
+        let mut m_body = rotate_vec_by_quat_inverse(att_ned, m_world_f32);
+        // 安装误差（机体系小角 Z-Y-X，度→弧度）：磁力计轴线相对机体轴的固定偏置。
+        let (mr, mp, my) = (
+            self.sensor.cfg().mag_mount_deg[0].to_radians(),
+            self.sensor.cfg().mag_mount_deg[1].to_radians(),
+            self.sensor.cfg().mag_mount_deg[2].to_radians(),
+        );
+        if mr != 0.0 || mp != 0.0 || my != 0.0 {
+            let q_mount = Quaternion::from_euler(
+                flyctrl_core::units::Radian(mr as f32),
+                flyctrl_core::units::Radian(mp as f32),
+                flyctrl_core::units::Radian(my as f32),
+            );
+            m_body = rotate_vec_by_quat(q_mount, m_body); // f32 机体系旋转
+        }
+        // 硬铁偏置 + 软铁缩放 + 白噪声（SensorModel::process_mag，realistic 开启）。
+        let mag = self.sensor.process_mag(m_body);
         // 气压计仍走 sensor 模型（含噪声/漂移）。
         let baro = self.sensor.process_baro(self.dt, altitude);
         (mag, baro)
@@ -1334,6 +1361,37 @@ fn rotate_by_quat_conj(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn magnetometer_models_world_declination() {
+        // 初始姿态 yaw=0（机头朝北、机体=世界 NED）：磁力计机体系磁场水平分量
+        // 应指向磁北（decl=0 → +N；decl=10° → 旋转 10°），垂直分量向下为负。
+        let vc = VehicleConfig::default_quad();
+        let mut cfg = SensorConfig::default();
+        cfg.mag_decl_deg = 0.0;
+        let mut plant = QuadrotorPlant::new_at(
+            ToyWorld::new(9.81), &vc, 0.004, None, cfg, None, vec![], [0.0, 0.0, -5.0],
+        );
+        let (mag, _) = plant.read_sensors_attitude();
+        assert!(mag.field[0] > 0.4, "decl=0 水平分量应指北(+X)，实际 {:?}", mag.field);
+        assert!(mag.field[1].abs() < 1e-6, "decl=0 东向分量≈0，实际 {:?}", mag.field);
+        assert!(mag.field[2] < 0.0, "北半球垂直分量向下为负，实际 {:?}", mag.field);
+
+        let mut cfg2 = SensorConfig::default();
+        cfg2.mag_decl_deg = 10.0;
+        let mut plant2 = QuadrotorPlant::new_at(
+            ToyWorld::new(9.81), &vc, 0.004, None, cfg2, None, vec![], [0.0, 0.0, -5.0],
+        );
+        let (mag2, _) = plant2.read_sensors_attitude();
+        let ang = mag2.field[1].atan2(mag2.field[0]);
+        assert!(
+            (ang - 10f64.to_radians()).abs() < 0.01,
+            "decl=10° 时水平分量方向应收敛 10°，实际 {:.4} rad ({:.2}°)",
+            ang,
+            ang.to_degrees()
+        );
+    }
 
     #[test]
     fn air_density_decreases_with_altitude() {

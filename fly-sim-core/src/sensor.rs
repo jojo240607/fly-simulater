@@ -70,7 +70,9 @@ pub struct SensorConfig {
     pub gps_pos_noise: f64,       // 位置噪声 std m
     pub gps_vel_noise: f64,       // 速度噪声 std m/s
     pub gps_drop_prob: f64,       // 偶发丢星概率/帧
-    // 磁力计（航向）：机体系硬铁偏置 uT，软铁缩放，白噪声 std uT。
+    // 磁力计（航向）：世界系参考地磁 + 机体系硬铁偏置/软铁缩放/白噪声。
+    pub mag_decl_deg: f64,        // 磁偏角（度，东偏为正）：磁北相对地理北(+N)的偏角
+    pub mag_mount_deg: [f64; 3],  // 磁力计安装偏角（度，机体系 Z-Y-X，默认 0=对准机体轴）
     pub mag_hard_iron: [f64; 3],  // 硬铁偏置 uT
     pub mag_soft_iron: [f64; 3],  // 软铁缩放因子
     pub mag_noise: f64,           // 白噪声 std uT
@@ -97,6 +99,8 @@ impl Default for SensorConfig {
             gps_pos_noise: 0.0,
             gps_vel_noise: 0.0,
             gps_drop_prob: 0.0,
+            mag_decl_deg: 0.0,
+            mag_mount_deg: [0.0, 0.0, 0.0],
             mag_hard_iron: [0.0, 0.0, 0.0],
             mag_soft_iron: [1.0, 1.0, 1.0],
             mag_noise: 0.0,
@@ -126,6 +130,10 @@ impl SensorConfig {
             gps_pos_noise: 0.5,
             gps_vel_noise: 0.1,
             gps_drop_prob: 0.0,
+            // 中纬度典型磁偏角（东偏 4°，如北京 2025 年 ~ -6°W → 用 +4° 示例）+
+            // 安装误差 1°（机体系偏航 1°），验证 EKF decl 修正与安装误差共存。
+            mag_decl_deg: 4.0,
+            mag_mount_deg: [0.0, 0.0, 1.0],
             mag_hard_iron: [0.3, -0.2, 0.4], // uT 硬铁
             mag_soft_iron: [0.98, 1.03, 0.99], // 软铁缩放
             mag_noise: 0.05, // uT
@@ -203,6 +211,11 @@ pub struct SensorModel {
 }
 
 impl SensorModel {
+    /// 只读访问传感器配置（plant 磁力计建模等读取用）。
+    pub fn cfg(&self) -> &SensorConfig {
+        &self.cfg
+    }
+
     pub fn new(cfg: SensorConfig, dt: f64) -> Self {
         let delay_steps = ((cfg.gps_delay / dt).round() as usize).max(1);
         let seed = cfg.seed;
@@ -361,6 +374,18 @@ impl SensorModel {
     /// 阶段 P2-1：磁力计 + 气压计（航向/高度测量）。
     ///
     /// 气压计：真值高度 + 白噪声 + 慢漂移（随机游走）。`altitude` = NED 高度（-d，m）。
+    /// 磁力计误差建模：机体系磁场（几何真值）→ 硬铁偏置 + 软铁缩放 + 白噪声。
+    /// 噪声用模型内部 rng（与 IMU/GPS 同源确定性），plant 侧无需访问 rng。
+    pub fn process_mag(&mut self, m_body: [f32; 3]) -> MagSample {
+        let mut field = [0.0f64; 3];
+        for i in 0..3 {
+            field[i] = m_body[i] as f64 * self.cfg.mag_soft_iron[i]
+                + self.cfg.mag_hard_iron[i]
+                + self.cfg.mag_noise * self.rng.gaussian();
+        }
+        MagSample { field }
+    }
+
     pub fn process_baro(&mut self, dt: f64, altitude: f64) -> BaroSample {
         self.time += dt;
         // 慢漂移：随机游走

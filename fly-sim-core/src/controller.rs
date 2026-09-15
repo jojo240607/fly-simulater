@@ -279,6 +279,9 @@ where
         // 否则 GPS/气压首次校正前 PID 看到 ~5m 位置误差全油门弹射（见 PLAN 阶段 11-A）。
         // 注意：此处需与 `QuadrotorPlant::new_at` 的初始位置保持一一对应。
         ekf.set_initial_position(pos_ned);
+        // 磁偏角注入：plant 磁力计的世界地磁按 sensor_cfg.mag_decl_deg 旋转（磁北），
+        // EKF 参考地磁方向同步该偏角 → 磁航向锚定对准【地理北】（与固件侧 decl 修正一致）。
+        ekf.set_mag_declination(sensor_cfg.mag_decl_deg as f32);
         let dt_s = Second(dt as f32);
         let hil = match kind {
             ControllerKind::Pid => {
