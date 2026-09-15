@@ -246,7 +246,7 @@ read_thrust() 读固件 PWM（TIM1-4 CCR/ARR → duty → 0..1）
 | 定高外环 | kp 0.55 / ki 0.10 / ff tilt×0.14 | thr clamp 0.25-0.95 |
 | 编码 | Baseline / GOP15 / mfps 8 | 桌面 1200k / 手机 800k / 320p 500k |
 | 端口 | 8082 明文 / 8081 HTTPS | socat TLS 代理 |
-| 固件 | /tmp/flyctrl_clean.bin | real-sensors 编译（≈58KB） |
+| 固件 | /tmp/flyctrl_real.bin | real-sensors 编译（≈58KB） |
 | 系统镜像 | joc-base/build_rel/stm32f407_minimal.elf | 模拟 MCU 系统 |
 
 ---
