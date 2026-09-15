@@ -274,7 +274,14 @@ where
         obstacles: Vec<Obstacle>,
         pos_ned: [f32; 3],
     ) -> Self {
-        let mut ekf = EkfEstimator::default_quad();
+        // SIL 用 att_alpha=0.0（纯陀螺积分）：本侧传感器观测密集（每 4ms 全量
+        // IMU/GPS 注入），位置/速度观测持续修正，无需重力锚定；且故障注入测试
+        // `gps_bias_step_offsets_estimate_bounded` 在 0.02 下会翻滚（tilt 81°，
+        // 应 <45°）——锚定把估计拉向比力反方向、估计跟随物理翻滚形成正反馈。
+        // 固件 HIL 侧观测稀疏（模拟器 usb 丢帧下 63ms 一帧），必须保留
+        // default_quad 的 0.02 重力锚定抑制纯陀螺积分漂移（HIL 闭环 4.8s 姿态
+        // 发散回归：0.0 → mcu_p=+0.10 vs 物理 -0.54，推力饱和 0/1 边界翻滚）。
+        let mut ekf = EkfEstimator::new(0.0, 0.05, 0.05, 1e-5, 5e-4, 0.5, 0.3, 0.3);
         // 阶段 11-A：EKF 初始位置估计必须与机体真实初始位置一致（NED），
         // 否则 GPS/气压首次校正前 PID 看到 ~5m 位置误差全油门弹射（见 PLAN 阶段 11-A）。
         // 注意：此处需与 `QuadrotorPlant::new_at` 的初始位置保持一一对应。
