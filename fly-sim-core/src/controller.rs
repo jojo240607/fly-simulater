@@ -563,10 +563,10 @@ where
         // `step_hil` 尾部（SIL 注入、MCU HIL 无此通道则传 None）。
         self.used_step_hil = true;
         let r = match &mut self.hil {
-            CtrlVariant::Pid(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, self.mag.healthy(), &sp, true, armed, true, &mut self.sim_imu),
-            CtrlVariant::Indi(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, self.mag.healthy(), &sp, true, armed, true, &mut self.sim_imu),
-            CtrlVariant::Lqr(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, self.mag.healthy(), &sp, true, armed, true, &mut self.sim_imu),
-            CtrlVariant::Tecs(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, self.mag.healthy(), &sp, true, armed, true, &mut self.sim_imu),
+            CtrlVariant::Pid(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, Some(self.mag.last), &sp, true, armed, true, &mut self.sim_imu),
+            CtrlVariant::Indi(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, Some(self.mag.last), &sp, true, armed, true, &mut self.sim_imu),
+            CtrlVariant::Lqr(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, Some(self.mag.last), &sp, true, armed, true, &mut self.sim_imu),
+            CtrlVariant::Tecs(h) => h.step_hil(imu, gps, baro_alt, self.vio.last, self.rtk.last, Some(self.mag.last), &sp, true, armed, true, &mut self.sim_imu),
         };
         // 记录本拍执行器指令供 `finalize` 回写 plant（与旧 `h.step` 内部
         // `motors.apply` 等价）。
