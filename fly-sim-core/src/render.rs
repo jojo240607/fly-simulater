@@ -12,7 +12,7 @@
 //!
 //! 依赖 `phy` feature（真实渲染原语）；非 `phy` 构建整模块禁用。
 
-#![cfg(feature = "phy")]
+#![cfg(feature = "phy-render")]
 
 use phy_demo::raster::pack;
 use phy_demo::{Camera, Framebuffer};

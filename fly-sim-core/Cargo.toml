@@ -21,7 +21,8 @@ phy-demo = { path = "../../physics/crates/phy-demo", optional = true }
 [features]
 default = []
 # 真实物理引擎路径（P1-2 之外的 SIL/HIL 端到端测试需要）。
-phy = ["phy-sdk", "phy-rigid", "phy-math", "phy-demo"]
+phy = ["phy-sdk", "phy-rigid", "phy-math"]
+phy-render = ["phy", "phy-demo"]
 
 [profile.release]
 opt-level = 3
