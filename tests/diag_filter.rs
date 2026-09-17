@@ -1,6 +1,6 @@
 //! 临时诊断：realistic 噪声下滤波前后 est.omega / 姿态误差演化。
 use fly_sim_core::controller::ControllerKind;
-use fly_sim_core::physics::{RigidBodyWorld, ToyWorld};
+use fly_sim_core::physics::{RigidBodyWorld, PhySdkWorld};
 use fly_sim_core::sensor::SensorConfig;
 use fly_sim_core::sim::SimLoop;
 use flyctrl_core::config::VehicleConfig;
@@ -9,7 +9,7 @@ use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, Radian};
 
 /// 跑 10s realistic 仿真，返回 (最大 tilt°, 末尾 est_att roll/pitch, 末尾 truth tilt°)。
 fn run_scenario(tag: &str, sc: SensorConfig) {
-    let world = ToyWorld::new(9.81);
+    let world = PhySdkWorld::create_empty();
     let cfg = VehicleConfig::default_quad();
     let dt = 0.004;
     let mut sim = SimLoop::new(world, &cfg, dt, None, sc, ControllerKind::Pid, None, Vec::new());
@@ -84,7 +84,7 @@ fn diag_noise_isolation() {
 
 #[test]
 fn diag_omega_evolution() {
-    let world = ToyWorld::new(9.81);
+    let world = PhySdkWorld::create_empty();
     let cfg = VehicleConfig::default_quad();
     let dt = 0.004;
     let mut sim = SimLoop::new(

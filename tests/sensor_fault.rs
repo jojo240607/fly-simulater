@@ -1,4 +1,4 @@
-//! P3-B3 "传感器硬/软故障注入到估计器"验收测试（无头模式，ToyWorld 替身）。
+//! P3-B3 "传感器硬/软故障注入到估计器"验收测试（无头模式，PhySdkWorld 替身）。
 //!
 //! 对应 FIDELITY_ROADMAP P3-B3 目标"偏置突变 / 卡死 / 漂移全链路"，验证故障在
 //! **物理真值 → 传感器读数** 处注入（[`SensorFault`] → [`SensorModel`]）后，
@@ -24,7 +24,7 @@
 //! `common::assert_tru_bounded`（水平漂移/高度/倾角三个归一化量）。
 
 use fly_sim_core::controller::{ControllerKind, FlyController, hover_setpoint};
-use fly_sim_core::physics::{ContactModel, ToyWorld};
+use fly_sim_core::physics::{ContactModel, PhySdkWorld};
 use fly_sim_core::sensor::{SensorConfig, SensorFault};
 use fly_simulater::airframe::load_airframe;
 use flyctrl_core::controller::Setpoint;
@@ -82,7 +82,7 @@ impl FaultDiag {
 fn run_fault(fault: SensorFault, warm_s: f64, window_s: f64, rtk_on: bool, vio_on: bool) -> FaultDiag {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -196,7 +196,7 @@ fn accel_drift_ramps_bounded() {
 fn imu_stuck_triggers_fdir_critical() {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,

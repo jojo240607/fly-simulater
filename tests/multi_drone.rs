@@ -1,6 +1,6 @@
 //! P3-D5 多机互飞 / 机间通信场景验收测试。
 //!
-//! 多实例 `FlyController` 共享同一 `RigidBodyWorld`（`ToyWorld` 替身），经 `DroneLink`
+//! 多实例 `FlyController` 共享同一 `RigidBodyWorld`（`PhySdkWorld` 真实引擎），经 `DroneLink`
 //! 内存链路互发位置/速度（模拟 ADS-B / 机间链路）。三项验收：
 //!
 //! 1) **编队跟随**：3 机 Leader-Follower 队形——leader 北向平移，follower 基于
@@ -18,7 +18,7 @@ use fly_sim_core::controller::{hover_setpoint};
 use fly_sim_core::multi::{
     formation_setpoint, target_with_avoid, telemetry_from_state, DroneTelemetry, MultiDroneSim,
 };
-use fly_sim_core::physics::ToyWorld;
+use fly_sim_core::physics::PhySdkWorld;
 use fly_simulater::airframe::load_airframe;
 
 mod common;
@@ -50,7 +50,7 @@ fn tilt_deg(q: [f64; 4]) -> f64 {
 }
 
 /// 采样节点 `id` 的 TRU 判定量（debug_up → h / d / tilt）。
-fn sample_tru(sim: &MultiDroneSim<ToyWorld>, id: usize, st: &mut TruStats) {
+fn sample_tru(sim: &MultiDroneSim<PhySdkWorld>, id: usize, st: &mut TruStats) {
     let (up, quat) = sim.debug_up(id);
     let h = (up[0] * up[0] + up[2] * up[2]).sqrt();
     let d = -up[1];
@@ -84,7 +84,7 @@ fn multi_formation_follow() {
     let cfg = load_airframe(None).expect("default airframe");
     let cfgs = vec![cfg.clone(), cfg.clone(), cfg.clone()];
     let init = [[0.0, 0.0, -5.0], [0.0, 4.0, -5.0], [0.0, -4.0, -5.0]];
-    let mut sim = MultiDroneSim::new(ToyWorld::new(9.81), &cfgs, &init, DT);
+    let mut sim = MultiDroneSim::new(PhySdkWorld::create_empty(), &cfgs, &init, DT);
 
     let mut stats = [TruStats::default(), TruStats::default(), TruStats::default()];
     let offsets: [[f32; 2]; 3] = [[0.0, 0.0], [0.0, 4.0], [0.0, -4.0]];
@@ -163,7 +163,7 @@ fn multi_formation_follow() {
 fn multi_telemetry_accuracy() {
     let cfg = load_airframe(None).expect("default airframe");
     let init = [[0.0, 0.0, -5.0], [8.0, 0.0, -5.0]];
-    let mut sim = MultiDroneSim::new(ToyWorld::new(9.81), &[cfg.clone(), cfg.clone()], &init, DT);
+    let mut sim = MultiDroneSim::new(PhySdkWorld::create_empty(), &[cfg.clone(), cfg.clone()], &init, DT);
 
     // 悬停 0.5 s（125 步）到稳态。
     let sps = vec![hover_setpoint(0.0, 0.0, -5.0), hover_setpoint(8.0, 0.0, -5.0)];
@@ -210,7 +210,7 @@ fn multi_telemetry_accuracy() {
 fn multi_inter_drone_avoidance() {
     let cfg = load_airframe(None).expect("default airframe");
     let init = [[0.0, 0.0, -5.0], [12.0, 0.0, -5.0]];
-    let mut sim = MultiDroneSim::new(ToyWorld::new(9.81), &[cfg.clone(), cfg.clone()], &init, DT);
+    let mut sim = MultiDroneSim::new(PhySdkWorld::create_empty(), &[cfg.clone(), cfg.clone()], &init, DT);
 
     const DANGER: f32 = 5.0; // 避让激活半径（m）
     const BRAKE_K: f32 = 1.2; // 制动增益

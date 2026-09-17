@@ -9,9 +9,7 @@ flyctrl-core = { path = "../../flyctrl/core" }
 # 共用 MAVLink v2 编解码核心（no_std 帧层 + 全消息编解码，单一事实来源）。
 # 直接依赖 mavlink-core，帧层/编解码不再经 flyctrl-core 间接引用。
 mavlink-core = { path = "../../mavlink-core" }
-# 物理引擎（Rust 源码级依赖，rlib）。可选：仅在启用 `phy` feature（真实引擎 SIL/HIL
-# 路径）时编译；默认关闭后 fly-sim-core 仅靠 ToyWorld 替身即可构建与单测，
-# 避免上游 phy-rigid 工具链不兼容阻断整个 crate 的编译。
+# 物理引擎（Rust 源码级依赖，rlib）。`phy` 为默认 feature：SIL/HIL 一律走真实引擎。
 phy-sdk = { path = "../../physics/crates/phy-sdk", optional = true }
 phy-rigid = { path = "../../physics/crates/phy-rigid", optional = true }
 phy-math = { path = "../../physics/crates/phy-math", optional = true }
@@ -19,8 +17,8 @@ phy-math = { path = "../../physics/crates/phy-math", optional = true }
 phy-demo = { path = "../../physics/crates/phy-demo", optional = true }
 
 [features]
-default = []
-# 真实物理引擎路径（P1-2 之外的 SIL/HIL 端到端测试需要）。
+# 真实物理引擎为默认（ToyWorld 替身已淘汰，删除前仅留 zz_engine_cmp 对照测例）。
+default = ["phy"]
 phy = ["phy-sdk", "phy-rigid", "phy-math"]
 phy-render = ["phy", "phy-demo"]
 

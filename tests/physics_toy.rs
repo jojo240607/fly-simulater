@@ -7,7 +7,7 @@
 //!
 //! 运行：`cargo test --test physics_toy`
 
-use fly_sim_core::{ContactModel, RigidBodyWorld, TerrainField, ToyWorld};
+use fly_sim_core::physics::{ContactModel, RigidBodyWorld, TerrainField, ToyWorld};
 use fly_sim_core::physics::{
     resolve_body_peer_collisions, resolve_ground_contact, resolve_obstacle_contact, BodyCollider,
     DynamicObstacle, Obstacle,

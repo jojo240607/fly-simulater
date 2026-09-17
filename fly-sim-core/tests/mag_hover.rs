@@ -1,13 +1,13 @@
 //! SIL 磁力计闭环回归：真实磁力计建模（decl + 硬/软铁 + 噪声）下悬停稳定。
 //!
-//! 用 ToyWorld 替身物理（无需 phy-sdk），验证：
+//! 用 PhySdkWorld（真实物理引擎）验证：
 //! 1) 磁力计非零场（不再零场关闭）不破坏悬停闭环（位置/姿态收敛）；
 //! 2) EKF 磁航向锚定生效：yaw 被锚定到地理北（0），decl 注入与 plant 世界
 //!    地磁一致 → 磁航向转地理航向正确；
 //! 3) 硬铁/软铁/噪声存在时锚定仍稳定（无正反馈发散）。
 
 use fly_sim_core::controller::{hover_setpoint, ControllerKind, FlyController};
-use fly_sim_core::physics::{ContactModel, ToyWorld};
+use fly_sim_core::physics::{ContactModel, PhySdkWorld};
 use fly_sim_core::sensor::SensorConfig;
 use flyctrl_core::config::VehicleConfig;
 use flyctrl_core::invariants;
@@ -22,7 +22,7 @@ fn hover_stable_with_mag_heading_active() {
     scfg.mag_hard_iron = [0.3, -0.2, 0.4]; // uT 硬铁
     scfg.mag_soft_iron = [0.98, 1.03, 0.99]; // 软铁缩放
     scfg.mag_noise = 0.05; // uT 白噪声
-    let world = ToyWorld::new(9.81);
+    let world = PhySdkWorld::create_empty();
     let mut fc = FlyController::new_at(
         world,
         &cfg,

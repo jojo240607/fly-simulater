@@ -1,4 +1,4 @@
-//! P3-D1 "RC 输入 + 手动/增稳模式"验收测试（无头模式，ToyWorld 替身）。
+//! P3-D1 "RC 输入 + 手动/增稳模式"验收测试（无头模式，PhySdkWorld 替身）。
 //!
 //! 验证遥控完整流程与模式治理：
 //!  1) `rc_flow_unlock_manual_stabilize_position_rtl_land`
@@ -15,7 +15,7 @@
 //! （ned_x=up_x, ned_y=up_z, ned_d=-up_y），与 headless_hover_wind 一致。
 
 use fly_sim_core::controller::{ControllerKind, FlyController};
-use fly_sim_core::physics::{ContactModel, ToyWorld};
+use fly_sim_core::physics::{ContactModel, PhySdkWorld};
 use fly_sim_core::sensor::SensorConfig;
 use fly_simulater::airframe::load_airframe;
 use flyctrl_core::flightmode::FlightMode;
@@ -59,10 +59,10 @@ fn tilt_deg(q: [f64; 4]) -> f64 {
 }
 
 /// 新造一个 Pid 控制律的仿真控制器（RC 直通档不依赖控制律种类）。
-fn new_ctrl() -> FlyController<ToyWorld> {
+fn new_ctrl() -> FlyController<PhySdkWorld> {
     let cfg = load_airframe(None).expect("default airframe");
     FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -75,7 +75,7 @@ fn new_ctrl() -> FlyController<ToyWorld> {
 }
 
 /// 以固定摇杆连续步进 `seconds` 秒，返回 (最坏倾角°, TRU 真值有界统计, 末态 NED)。
-fn run_rc(ctrl: &mut FlyController<ToyWorld>, r: &RcInput, seconds: f64) -> (f64, TruStats, [f32; 3], [f32; 3]) {
+fn run_rc(ctrl: &mut FlyController<PhySdkWorld>, r: &RcInput, seconds: f64) -> (f64, TruStats, [f32; 3], [f32; 3]) {
     let total = (seconds / DT) as u64;
     let mut max_tilt = 0.0f64;
     let mut tru = TruStats::default();

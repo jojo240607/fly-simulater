@@ -18,7 +18,7 @@ mavlink-core = { path = "../mavlink-core" }
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 # 阶段 7：实时 3D 可视化——复用物理引擎的渲染原语（Camera + 软件光栅化 Framebuffer）。
-# 这些依赖仅在 phy feature 下启用（phy-rigid 上游当前工具链下编译不过，非 phy 构建用 ToyWorld 替身）。
+# 这些依赖仅在 phy feature 下启用（3D 可视化前端）。
 phy-demo = { path = "../physics/crates/phy-demo", optional = true }
 # 矩阵/向量数学（与 phy-demo 同一 nalgebra 实例，用于投影矩阵构造）。
 phy-math = { path = "../physics/crates/phy-math", optional = true }
@@ -27,10 +27,10 @@ winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 
 [features]
-default = []
-# 启用真实物理引擎 + 软件渲染（含 3D 可视化 / Web 后端）。
-# 注意：phy-rigid 上游在当前工具链下编译失败，需先修复上游才能用此 feature。
-phy = ["fly-sim-core/phy", "phy-demo", "phy-math", "winit", "softbuffer"]
+# 真实物理引擎为默认（ToyWorld 替身已淘汰）；`phy` 同时启用 3D 可视化
+# （view 依赖 fly-sim-core 的 render 模块 → phy-render）。
+default = ["phy"]
+phy = ["fly-sim-core/phy-render", "phy-demo", "phy-math", "winit", "softbuffer"]
 
 [workspace]
 members = ["fly-sim-core", "fly-sim-hil", "fly-sim-server"]

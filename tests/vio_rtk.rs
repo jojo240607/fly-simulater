@@ -1,4 +1,4 @@
-//! P3-B1 "VIO/RTK-GPS 多源融合"验收测试（无头模式，ToyWorld 替身）。
+//! P3-B1 "VIO/RTK-GPS 多源融合"验收测试（无头模式，PhySdkWorld 替身）。
 //!
 //! 验证三类行为：
 //!  1) `gps_outage_vio_rtk_bridges`      —— GPS 中断时 VIO+RTK 兜底位置：
@@ -15,7 +15,7 @@
 //! `common::assert_tru_bounded`（水平漂移/高度/倾角三个归一化量）。
 
 use fly_sim_core::controller::{ControllerKind, FlyController, hover_setpoint};
-use fly_sim_core::physics::{ContactModel, ToyWorld};
+use fly_sim_core::physics::{ContactModel, PhySdkWorld};
 use fly_sim_core::sensor::SensorConfig;
 use fly_simulater::airframe::load_airframe;
 use flyctrl_core::controller::Setpoint;
@@ -78,7 +78,7 @@ impl Diag {
 fn run_gps_outage(fusion: Fusion, warm_s: f64, outage_s: f64) -> Diag {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,

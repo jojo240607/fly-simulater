@@ -22,7 +22,7 @@ use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, RadianPe
 
 use crate::physics::{
     ray_obstacle_distance, BodyCollider, ContactInfo, ContactModel, DynamicObstacle, Obstacle,
-    RigidBodyWorld, ToyWorld,
+    PhySdkWorld, RigidBodyWorld,
 };
 use crate::wind::{WindField, WindVec};
 use crate::sensor::{RangeFinderFrame, RangeFinderModel, SensorConfig, SensorFault, SensorModel};
@@ -1371,7 +1371,7 @@ mod tests {
         let mut cfg = SensorConfig::default();
         cfg.mag_decl_deg = 0.0;
         let mut plant = QuadrotorPlant::new_at(
-            ToyWorld::new(9.81), &vc, 0.004, None, cfg, None, vec![], [0.0, 0.0, -5.0],
+            PhySdkWorld::create_empty(), &vc, 0.004, None, cfg, None, vec![], [0.0, 0.0, -5.0],
         );
         let (mag, _) = plant.read_sensors_attitude();
         assert!(mag.field[0] > 0.4, "decl=0 水平分量应指北(+X)，实际 {:?}", mag.field);
@@ -1381,7 +1381,7 @@ mod tests {
         let mut cfg2 = SensorConfig::default();
         cfg2.mag_decl_deg = 10.0;
         let mut plant2 = QuadrotorPlant::new_at(
-            ToyWorld::new(9.81), &vc, 0.004, None, cfg2, None, vec![], [0.0, 0.0, -5.0],
+            PhySdkWorld::create_empty(), &vc, 0.004, None, cfg2, None, vec![], [0.0, 0.0, -5.0],
         );
         let (mag2, _) = plant2.read_sensors_attitude();
         let ang = mag2.field[1].atan2(mag2.field[0]);

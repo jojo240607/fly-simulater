@@ -12,11 +12,11 @@
 //! 验收判据（FIDELITY_ROADMAP）：收敛判定必须同时断言 TRU 有界（不只 EST≈TRU）。
 //!
 //! 运行：
-//!   cargo test --test sensor_noise                 # ToyWorld（默认）
+//!   cargo test --test sensor_noise                 # PhySdkWorld（默认）
 //!   cargo test --features phy --test sensor_noise  # PhySdkWorld
 
 use fly_sim_core::controller::ControllerKind;
-use fly_sim_core::physics::{ContactModel, RigidBodyWorld, ToyWorld};
+use fly_sim_core::physics::{ContactModel, RigidBodyWorld, PhySdkWorld};
 use fly_sim_core::sensor::SensorConfig;
 use fly_sim_core::sim::SimLoop;
 use flyctrl_core::config::VehicleConfig;
@@ -24,7 +24,6 @@ use flyctrl_core::controller::Setpoint;
 use flyctrl_core::units::{Meter, MeterPerSecond, MeterPerSecondSquared, Radian};
 
 #[cfg(feature = "phy")]
-use fly_sim_core::physics::PhySdkWorld;
 
 mod common;
 use common::{assert_tru_bounded, TruStats};
@@ -36,7 +35,7 @@ fn make_world() -> impl RigidBodyWorld + 'static {
     }
     #[cfg(not(feature = "phy"))]
     {
-        ToyWorld::new(9.81)
+        PhySdkWorld::create_empty()
     }
 }
 

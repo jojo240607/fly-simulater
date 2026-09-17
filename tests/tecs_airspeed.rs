@@ -1,4 +1,4 @@
-//! P3-A3 "TECS 空速消费"验收测试（无头模式，ToyWorld 替身）。
+//! P3-A3 "TECS 空速消费"验收测试（无头模式，PhySdkWorld 替身）。
 //!
 //! 验证三类行为：
 //!  1) `tecs_hover_converges_headless`            —— TECS 悬停收敛（数值稳定/不翻滚/位置保持）
@@ -11,7 +11,7 @@
 //! （ned_x=up_x, ned_y=up_z, ned_d=-up_y），与 headless_hover_wind 一致。
 
 use fly_sim_core::controller::{ControllerKind, FlyController, hover_setpoint};
-use fly_sim_core::physics::{ContactModel, ToyWorld};
+use fly_sim_core::physics::{ContactModel, PhySdkWorld};
 use fly_sim_core::sensor::SensorConfig;
 use fly_sim_core::wind::{WindConfig, WindField};
 use fly_simulater::airframe::load_airframe;
@@ -88,7 +88,7 @@ fn run_scenario(
     cfg.drag_fwd = cfg_drag_fwd;
     cfg.vmax_xy = vmax_xy;
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         wind,

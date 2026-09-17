@@ -5,7 +5,7 @@
 
 use fly_sim_core::controller::ControllerKind;
 use fly_sim_core::controller::{hover_setpoint, FlyController};
-use fly_sim_core::physics::{TerrainField, ToyWorld};
+use fly_sim_core::physics::TerrainField;
 use fly_sim_core::sensor;
 use fly_sim_core::sim;
 use fly_sim_core::wind;
@@ -179,11 +179,8 @@ fn parse_args() -> Cli {
 }
 
 fn main() {
-    // 1. 物理引擎接入方式取决于 feature。
-    #[cfg(feature = "phy")]
+    // 1. 物理引擎：一律真实引擎（phy-sdk，ToyWorld 替身已淘汰）。
     println!("[main] 物理引擎: phy-sdk (Rust rlib, 源码级依赖)");
-    #[cfg(not(feature = "phy"))]
-    println!("[main] 物理引擎: ToyWorld 替身（未启用 phy feature，仅验证逻辑；高保真需 --features phy）");
 
     // 2. 解析 CLI + 加载机架（外部 TOML 或内置默认，阶段 0）。
     let cli = parse_args();
@@ -230,7 +227,6 @@ fn main() {
     }
 
     // 阶段 7：实时 3D 可视化（后台快跑仿真 + 采样渲染）。窗口关闭即退出。
-    #[cfg(feature = "phy")]
     if cli.view {
         println!("[main] 启动实时 3D 可视化（后台仿真 + 渲染采样）...");
         fly_simulater::view::run_view(
@@ -245,18 +241,10 @@ fn main() {
         );
         return;
     }
-    #[cfg(not(feature = "phy"))]
-    if cli.view {
-        eprintln!("[main] --view 需要以 phy feature 构建（cargo build --features phy）");
-        std::process::exit(2);
-    }
 
     // 阶段 6：批处理式 SIL（命令行 + 可选 CSV）。
-    // 物理世界：phy feature 用真实引擎，否则用玩具级替身（仅验证仿真逻辑，非高保真）。
-    #[cfg(feature = "phy")]
+    // 物理世界：一律真实引擎 PhySdkWorld。
     let world = fly_sim_core::physics::PhySdkWorld::create_empty();
-    #[cfg(not(feature = "phy"))]
-    let world = ToyWorld::new(9.81);
     // 为 MAVLink 场景保留一份传感器配置副本（主 loop_sim 会 move 走原值）。
     let sensor_cfg_mav = sensor_cfg.clone();
     let mut loop_sim = sim::SimLoop::new(
@@ -400,10 +388,7 @@ fn main() {
 
             // 重建 FlyController（与 SimLoop 同构，但需暴露给命令处理）。
             // 独立的物理世界 + 传感器配置副本，避免与上面已 move 进 loop_sim 的资源冲突。
-            #[cfg(feature = "phy")]
             let world_mav = fly_sim_core::physics::PhySdkWorld::create_empty();
-            #[cfg(not(feature = "phy"))]
-            let world_mav = ToyWorld::new(9.81);
             // P3-A 收尾 #2：默认启用地面接触（`Some(default())`），与主 SIL 路径/PhySdkWorld
             // 一致，避免无地面约束时噪声发散被误判为估计器缺陷。真 HIL 接板时地面约束
             // 由真实世界承担，此默认仅作用于 SIL。

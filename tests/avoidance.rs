@@ -14,7 +14,7 @@
 //! - 度量：模拟全程机体到障碍球面的最小净间隙（3D 距离 - 半径）。避障使间隙保持为正，
 //!   基准则被侵入（间隙趋近 / 跌破 0）。
 use fly_sim_core::controller::{ControllerKind, FlyController, hover_setpoint};
-use fly_sim_core::physics::{DynamicObstacle, Obstacle, ToyWorld};
+use fly_sim_core::physics::{DynamicObstacle, Obstacle, PhySdkWorld};
 use fly_sim_core::sensor::{
     AvoidanceConfig, RangeFinderFrame, RangeFinderModel, RayReading, SensorConfig,
 };
@@ -78,7 +78,7 @@ fn tilt_deg(q: [f64; 4]) -> f64 {
 fn run_approach(setup: Option<&AvSetup>, seconds: f64) -> (f64, TruStats) {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -140,7 +140,7 @@ fn run_approach(setup: Option<&AvSetup>, seconds: f64) -> (f64, TruStats) {
 fn run_lateral_slide(setup: Option<&AvSetup>, z_off: f64, seconds: f64) -> (f64, f64, TruStats) {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -258,7 +258,7 @@ fn avoid_velocity_triggers_when_close() {
 fn avoid_ranger_detects_obstacle_in_fov() {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -285,7 +285,7 @@ fn avoid_ranger_detects_obstacle_in_fov() {
 fn avoid_no_false_trigger_when_clear() {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -350,7 +350,7 @@ fn dbg_multi_lateral_slide() {
     let z_off = 3.2;
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -410,7 +410,7 @@ fn dbg_multi_headon() {
     let z_off = 0.0;
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,

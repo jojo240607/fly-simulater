@@ -7,7 +7,7 @@
 //! 曾错误地对引擎四元数做"z 镜像变换"（`(w,x,y,-z)`），导致带偏航悬停被翻成侧躺；
 //! 本测试锁定"引擎悬停四元数本身即水平"这一不变量，防止再次引入坐标变换破坏姿态。
 
-#![cfg(feature = "phy")]
+#![cfg(feature = "phy-render")]
 
 use fly_sim_core::render::RenderInput;
 

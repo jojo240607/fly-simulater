@@ -4,7 +4,7 @@
 //! 轨迹分布（均值±σ、P95 包络、极值）与收敛率/失效率，并把每个标准场景的代表性
 //! 真值轨迹（seed=0 确定性复现）写为 CSV 回放文件（`target/bench/`，git 忽略）。
 //!
-//! 标准基准场景集（闭环保真，`ToyWorld` 替身 + realistic 传感器噪声）：
+//! 标准基准场景集（闭环保真，`PhySdkWorld` 替身 + realistic 传感器噪声）：
 //!   - `hover`       无风悬停（PID，10s）
 //!   - `wind`        2 m/s 逆风悬停（PID，8s）
 //!   - `cruise`      80m 北向巡航 vmax=5（TECS vs PID，14s）—— 回归对比 + 统计显著性
@@ -18,7 +18,7 @@
 //! 显著优于 PID。用 `MC_RUNS` 放大样本即可支撑正式统计显著性分析。
 
 use fly_sim_core::controller::{ControllerKind, FlyController, hover_setpoint};
-use fly_sim_core::physics::{ContactModel, ToyWorld};
+use fly_sim_core::physics::{ContactModel, PhySdkWorld};
 use fly_sim_core::sensor::SensorConfig;
 use fly_sim_core::wind::{WindConfig, WindField};
 use fly_simulater::airframe::load_airframe;
@@ -157,7 +157,7 @@ fn run_one(
         })
     });
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         wind,

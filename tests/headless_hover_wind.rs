@@ -9,11 +9,11 @@
 //!  4) 不被风吹飞太远（水平漂移 < 3 m）。
 //!
 //! 用法：cargo test --test headless_hover_wind -- --nocapture
-//! （默认 ToyWorld 替身即可验证闭环控制逻辑；phy feature 因上游 phy-rigid
+//! （默认 PhySdkWorld 替身即可验证闭环控制逻辑；phy feature 因上游 phy-rigid
 //!  工具链问题暂不可用，但控制律与混控矩阵与物理后端无关。）
 
 use fly_sim_core::controller::{ControllerKind, FlyController, hover_setpoint};
-use fly_sim_core::physics::{ToyWorld, ContactModel};
+use fly_sim_core::physics::{PhySdkWorld, ContactModel};
 use fly_sim_core::sensor::SensorConfig;
 use fly_simulater::airframe::load_airframe;
 use fly_sim_core::wind::{WindConfig, WindField};
@@ -69,7 +69,7 @@ fn run_pid_with_offset(wind_speed: f64, off_n: f64, off_e: f64) -> (bool, TruSta
         None
     };
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         wind,
@@ -154,7 +154,7 @@ fn run_pid_gains(
         None
     };
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         wind,
@@ -197,7 +197,7 @@ fn trace_north_lowgain() {
         let mut cfg = load_airframe(None).expect("default airframe");
         cfg = cfg.with_gains(kp, kd, 0.5, 0.8);
         let mut ctrl = FlyController::new(
-            ToyWorld::new(9.81),
+            PhySdkWorld::create_empty(),
             &cfg,
             DT,
             None,
@@ -251,7 +251,7 @@ fn hover_stability() {
         let mut cfg = load_airframe(None).expect("default airframe");
         cfg = cfg.with_gains(kp, kd, 0.5, 0.8);
         let mut ctrl = FlyController::new(
-            ToyWorld::new(9.81),
+            PhySdkWorld::create_empty(),
             &cfg,
             DT,
             None,
@@ -282,7 +282,7 @@ fn north_step_direction() {    // 无风、设定点北偏 2m（NED north=+2）�
     // 打印全程轨迹：若初段 up.x 正向增长 -> 方向正确，是发散/过冲；若初段即负 -> 符号反。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -322,7 +322,7 @@ fn east_controller_sign() {
     // 对应机体力矩，若 τ_x 为负 -> 控制器命令了 -roll（向西），即 roll 轴符号反。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -351,7 +351,7 @@ fn north_controller_sign() {
     // 即 pitch 轴混控极性反（正反馈翻滚）。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -382,7 +382,7 @@ fn east_step_direction() {
     // （因为 ned_e → up_z = -e，见 vec_ned_to_up）。打印全程轨迹判方向。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -415,7 +415,7 @@ fn probe_tau_direct() {
     // 绕过积分/测量歧义，权威判定每个电机组合控制哪根轴。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -450,7 +450,7 @@ fn probe_translate_back() {
     // 测量平移方向。期望 up.x 负向（南）即与 north 相反；若为北则确认组合正确。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -481,7 +481,7 @@ fn probe_translate_front() {
     // 期望：机体绕 Y 俯仰 -> 推力北/南偏 -> up.x 变化（北）。若 up.z 变化则是轴错位。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -512,7 +512,7 @@ fn probe_physics_pitch() {
     // 测量机体实际绕哪根轴加速。控制器里 q_cmd>0 会增 m0,m2。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -549,7 +549,7 @@ fn probe_physics_roll() {
     // 实证探测 roll 轴：右侧 m0,m3 偏高（控制器 p_cmd>0 的组合）。
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
@@ -597,7 +597,7 @@ fn quat_to_angvel(prev: [f64; 4], cur: [f64; 4], dt: f64) -> [f64; 3] {
 fn probe_physics_torque() {
     let cfg = load_airframe(None).expect("default airframe");
     let mut ctrl = FlyController::new(
-        ToyWorld::new(9.81),
+        PhySdkWorld::create_empty(),
         &cfg,
         DT,
         None,
