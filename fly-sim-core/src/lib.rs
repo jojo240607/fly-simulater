@@ -1,8 +1,8 @@
 //! `fly-sim-core`：四旋翼 SIL 仿真内核（纯计算，无 I/O 边界）。
 //!
 //! 包含：
-//! - `physics`：物理引擎抽象层（`RigidBodyWorld` trait + `PhySdkWorld` 真实适配器；
-//!   `ToyWorld` 替身已淘汰，仅 zz_engine_cmp 对照测例暂留，待删除）。
+//! - `physics`：物理引擎抽象层（`RigidBodyWorld` trait + `PhySdkWorld` 真实适配器）。
+//!   历史 `ToyWorld` 测试替身已彻底删除（含 physics_toy/zz_engine_cmp 对照测例）。
 //! - `wind`：风场与环境模型（基础风/阵风/Dryden 湍流）。
 //! - `sensor`：传感器真实化模型（IMU 噪声/偏置/GPS 延迟丢星）。
 //! - `plant`：四旋翼推进模型（`QuadrotorPlant<W>`），桥接物理引擎与控制律。

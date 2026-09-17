@@ -27,7 +27,7 @@ winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
 
 [features]
-# 真实物理引擎为默认（ToyWorld 替身已淘汰）；`phy` 同时启用 3D 可视化
+# 真实物理引擎为默认（历史 ToyWorld 替身已删除）；`phy` 同时启用 3D 可视化
 # （view 依赖 fly-sim-core 的 render 模块 → phy-render）。
 default = ["phy"]
 phy = ["fly-sim-core/phy-render", "phy-demo", "phy-math", "winit", "softbuffer"]

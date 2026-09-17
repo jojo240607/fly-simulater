@@ -132,7 +132,7 @@ IWDG/WWDG（超时复位）；RTC+BKP；DCMI（帧注入+DMA2）；FSMC（Bank1-
 
 ### 5.2 世界/接触/障碍（physics.rs）
 
-- `RigidBodyWorld`（PhySdkWorld / ToyWorld）：刚体注册、积分、接触求解。
+- `RigidBodyWorld`（PhySdkWorld，唯一实现）：刚体注册、积分、接触求解。
 - `ContactModel`/`ground height_at`：地面高程 + 障碍物（静态 + 动态 `DynamicObstacle::at(t)`）。
 - 地面接触 `resolve_ground_contact`、机体互撞 `resolve_body_peer_collisions`、
   射线测距 `ray_obstacle_distance`（避障场景）。

@@ -179,7 +179,7 @@ fn parse_args() -> Cli {
 }
 
 fn main() {
-    // 1. 物理引擎：一律真实引擎（phy-sdk，ToyWorld 替身已淘汰）。
+    // 1. 物理引擎：一律真实引擎（phy-sdk；历史 ToyWorld 替身已删除）。
     println!("[main] 物理引擎: phy-sdk (Rust rlib, 源码级依赖)");
 
     // 2. 解析 CLI + 加载机架（外部 TOML 或内置默认，阶段 0）。

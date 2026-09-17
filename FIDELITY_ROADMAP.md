@@ -909,3 +909,21 @@
     - **机间避让**：对头接近两机（n=0 北向 vs n=12 南向）经制动+横向让行，**最小间距
       1.528 m**（碰撞球半径和 ≈0.54 m，不触发物理碰撞，间距显著大于 2×0.27）。
   - 既有回归联动：`cargo test --workspace` exit 0 无回归。
+
+---
+
+## ToyWorld 测试替身彻底退场（2026-09 收尾）
+
+- **背景**：`ToyWorld` 原为"无需真实引擎即可跑 plant/控制律单测"的替身，随 `phy`
+  成为默认 feature，其存在只会造成"两套引擎行为差异"与双路径维护成本（历史
+  `zz_engine_cmp`/`zz_diag_noise` 即为此对照而设）。
+- **本次删除**：`fly-sim-core/src/physics.rs` 中 `ToyWorld` 结构体与其两个 impl
+  （约 210 行）、`tests/physics_toy.rs`、`tests/zz_engine_cmp.rs`、
+  `tests/zz_diag_noise.rs`；同步清理 `lib.rs`/`Cargo.toml`/`main.rs`/`sim.rs`/
+  `ARCHITECTURE.md` 中的替身描述。`RigidBodyWorld` 现在只有 `PhySdkWorld` 一个
+  实现（另有 `Rc<RefCell<W>>` 共享世界包装）。
+- **验证**：`cargo build --tests` 通过；`headless_hover_wind` 14/14、
+  `sensor_noise` 全通过；`mcu_simulater` 侧 `x_vperiph_mcusim` 3/3（虚拟外设直通
+  闭环走本 crate 的 `PhySdkWorld`）。
+- 本节所引用的历史条目（上文各处的 `tests/physics_toy.rs`、`ToyWorld 9.81` 等）
+  均为当时状态的记录，保留原样以存史；文件本身已不存在。

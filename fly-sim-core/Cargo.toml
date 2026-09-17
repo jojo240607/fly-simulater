@@ -17,7 +17,7 @@ phy-math = { path = "../../physics/crates/phy-math", optional = true }
 phy-demo = { path = "../../physics/crates/phy-demo", optional = true }
 
 [features]
-# 真实物理引擎为默认（ToyWorld 替身已淘汰，删除前仅留 zz_engine_cmp 对照测例）。
+# 真实物理引擎为默认（历史 ToyWorld 替身已删除，SIL/HIL 一律走真实引擎）。
 default = ["phy"]
 phy = ["phy-sdk", "phy-rigid", "phy-math"]
 phy-render = ["phy", "phy-demo"]
