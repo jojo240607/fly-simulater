@@ -137,8 +137,8 @@ fn new_h264_encoder(bitrate_bps: u32, intra_period: u32) -> Result<Encoder, open
 }
 
 // vperiph 固件/系统镜像路径（与 mcu_simulater tests/x_hover_env.rs 同一套）。
-// SYS 经 mcu_simulater::artifact 解析（JOC_BASE_ELF → 壳工程布局 → 历史路径兜底）。
-const VP_APP: &str = "/tmp/flyctrl_real.bin";
+// SYS 经 JOC_BASE_ELF、APP 经 JOC_APP_FLYCTRL_REAL（默认 /tmp/flyctrl_real.bin），
+// 均由 mcu_simulater::artifact 解析（→ 壳工程布局 → 历史路径兜底）。
 // vperiph 固定 GPS 原点（悬停点附近，与 x_vperiph/x_hover_env 同一约定）。
 const VP_LAT0: f32 = 31.2304;
 const VP_LON0: f32 = 121.4737;
@@ -283,7 +283,8 @@ impl VperiphMc {
 
         m.load_elf(&mcu_simulater::artifact::joc_base_elf())
             .map_err(|e| format!("elf: {e:?}"))?;
-        m.load_app_partition(std::path::Path::new(VP_APP)).map_err(|e| format!("app: {e:?}"))?;
+        m.load_app_partition(&mcu_simulater::artifact::flyctrl_real_app_bin())
+            .map_err(|e| format!("app: {e:?}"))?;
         m.reset().map_err(|e| format!("reset: {e:?}"))?;
         for _ in 0..12 {
             m.run(1_000_000).map_err(|e| format!("boot run: {e:?}"))?;
