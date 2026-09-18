@@ -287,7 +287,7 @@ impl VperiphMc {
             .map_err(|e| format!("app: {e:?}"))?;
         m.reset().map_err(|e| format!("reset: {e:?}"))?;
         for _ in 0..12 {
-            m.run(1_000_000).map_err(|e| format!("boot run: {e:?}"))?;
+            m.run_budget(1_000_000).map_err(|e| format!("boot run: {e:?}"))?;
         }
         let m = Arc::new(Mutex::new(m));
 
@@ -295,7 +295,7 @@ impl VperiphMc {
         let mut mm = m.lock().unwrap();
         let mut z = f32::NAN;
         for i in 0..400 {
-            mm.run(1_000_000).map_err(|e| format!("settle run: {e:?}"))?;
+            mm.run_budget(1_000_000).map_err(|e| format!("settle run: {e:?}"))?;
             z = f32::from_le_bytes(
                 mm.cpu.mem_read(0x2000_9074 + 28, 4).map_err(|e| format!("mem: {e:?}"))?
                     .try_into().unwrap(),
@@ -409,7 +409,7 @@ impl VperiphMc {
     /// + 速率模式，150k（0.22 周期/步 → 控制律 ~18ms 物理/周期）实测稳定与否
     /// 以联调为准。稳定则 fps 7.5→10.5（1.4×），否则回 200k。
     fn run_step(&self) -> Result<(), ()> {
-        self.machine.lock().unwrap().run(200_000).map_err(|e| {
+        self.machine.lock().unwrap().run_budget(200_000).map_err(|e| {
             eprintln!("[vperiph] Unicorn run 失败：{e:?}（重建重启）");
         })
     }
