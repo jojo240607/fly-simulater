@@ -806,6 +806,12 @@ where
         let gyro = gyro_torque(&self.motor_speed, &spin, rotor_i, omega_body);
         tau_body[0] += gyro[0];
         tau_body[1] += gyro[1];
+        // 转动气动阻尼（机体三轴，物理力矩，同 gyro 在伪向量翻转之后叠加）：
+        // 真实四旋翼的螺旋桨/机体角阻尼。缺它则姿态模态只剩控制器 D 项阻尼，
+        // SIL 里近乎无阻尼 → x_hover_demo 60s 悬停 t≈44s 起慢速自激。
+        for i in 0..3 {
+            tau_body[i] -= self.cfg.angular_drag[i] as f64 * omega_body[i];
+        }
         // 阶段 3：推进风场，取当前世界系（UP）风速（P2-B：传入机体位置以启用
         // 空间相关风场 / 风切变廓线）。无风则为 0。
         // 先读取机体位置（独立 immutable 借用），再可变借 wind，避免借用冲突。

@@ -133,6 +133,8 @@ impl AirframeToml {
             inertia: self.inertia,
             motor_tau: self.motor_tau,
             drag_coeff: self.drag_coeff,
+            // 转动气动阻尼：角速度时间常数 τ≈0.1s → c = I/τ（与 default_quad 同口径）
+            angular_drag: [self.inertia[0] / 0.1, self.inertia[1] / 0.1, self.inertia[2] / 0.1],
             induced_drag_coeff: self.induced_drag_coeff,
             disk_area: self.disk_area,
             slipstream_drag_coeff: self.slipstream_drag_coeff,
