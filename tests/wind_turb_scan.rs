@@ -545,3 +545,33 @@ fn mag3d_full_attitude_scan() {
     unsafe { flyctrl_core::estimator::ekf::G_MAG3D_ALPHA = 0.0 };
     assert!(true);
 }
+
+/// **二维组合扫描**：重力锚定 `att_alpha` × 磁全姿态 `mag3d_alpha`。
+///
+/// 目标：**无风 ≤3m 且 B3 ≤3.4m 同时成立**（= 阶段 0 的目标）。
+/// 假设：2.2e 提供加速度免疫的姿态参考后，重力锚定应下调/取消 ——
+/// 若成立，"0.0 vs 0.02"的两难从根上消失。
+#[test]
+fn att_alpha_vs_mag3d_scan() {
+    println!("\n二维扫描：G_ATT_ALPHA × G_MAG3D_ALPHA（位置环 60s）");
+    println!("目标：无风末态 ≤3m 且 B3末态 ≤3.4m（对照基线：改动前 3.12 / 19.22）");
+    println!("{:>10} | {:>9} | {:>9} {:>9} | {:>9} {:>9} | {:>6}", "att_a", "mag3d", "无风末态", "无风峰值", "B3末态", "B3峰值", "达标");
+    println!("{}", "-".repeat(84));
+    let mut any_ok = false;
+    for &aa in &[0.0f32, 0.005, 0.02] {
+        for &m3 in &[0.0f32, 0.1, 0.3, 1.0] {
+            unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = aa };
+            unsafe { flyctrl_core::estimator::ekf::G_MAG3D_ALPHA = m3 };
+            let (_r0, _p0, _x, _y, _f0, d0, e0, ..) = run_var_bias(0.0, 60.0, false, 0, 0);
+            let (_r1, _p1, _x2, _y2, _f1, d1, e1, ..) = run_var_bias(5.4, 60.0, false, 0, 0);
+            let ok = e0 <= 3.0 && e1 <= 3.4;
+            if ok { any_ok = true; }
+            println!("{:>10.3} | {:>9.2} | {:>8.2}m {:>8.2}m | {:>8.2}m {:>8.2}m | {:>6}", aa, m3, e0, d0, e1, d1, if ok { "✅" } else { "" });
+        }
+    }
+    println!("{}", "-".repeat(84));
+    println!("是否存在达标组合：{}", if any_ok { "是 ✅" } else { "否 ❌" });
+    unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = -1.0 };
+    unsafe { flyctrl_core::estimator::ekf::G_MAG3D_ALPHA = 0.0 };
+    assert!(true);
+}
