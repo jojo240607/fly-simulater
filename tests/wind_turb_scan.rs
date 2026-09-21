@@ -599,3 +599,27 @@ fn mag_alpha_attribution_scan() {
     unsafe { flyctrl_core::estimator::ekf::G_MAG_ALPHA = -1.0 };
     assert!(true);
 }
+
+/// **5.4 m/s 漂移悬崖的归因**：是不是"倾角指令饱和"（`tilt_max` 权限不足）？
+///
+/// 物理解释：5.4 m/s 下抗风稳态倾角需 ≈15.3°(pitch)+2.5°(roll)，叠阵风摆动后逼近
+/// `tilt_max=20°` ⇒ 位置环饱和。**判据：漂移随 tilt_max 单调改善则解释成立。**
+#[test]
+fn tilt_max_attribution_scan() {
+    println!("\n5.4m/s 悬崖归因：扫倾角上限 tilt_max（位置环 60s，ki_xy=0.1）");
+    println!("{:>10} | {:>10} | {:>10} {:>10} | {:>9} {:>9}", "tilt_max(度)", "B3上限末态", "峰值", "末|pitch|", "末|roll|", "饱和?");
+    println!("{}", "-".repeat(76));
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = 0.10 };
+    unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = -1.0 };
+    for &deg in &[20.0f32, 25.0, 30.0, 40.0] {
+        unsafe { flyctrl_core::controller::pid::G_TILT_MAX = deg.to_radians() };
+        let (r1, p1, _x, _y, _f1, d1, e1, ..) = run_var_bias(5.4, 60.0, false, 0, 0);
+        let sat = if p1 >= (deg as f64) - 0.5 { "是" } else { "否" };
+        println!("{:>10.1} | {:>9.2}m | {:>9.2}m | {:>9.2} {:>9.2} | {:>4}", deg, e1, d1, p1, r1, sat);
+    }
+    println!("{}", "-".repeat(76));
+    println!("（B3上限 = 5.4m/s；若末态漂移随 tilt_max 单调下降 ⇒ 倾角饱和解释成立）");
+    unsafe { flyctrl_core::controller::pid::G_TILT_MAX = -1.0 };
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
+    assert!(true);
+}
