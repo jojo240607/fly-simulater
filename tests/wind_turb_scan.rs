@@ -727,13 +727,15 @@ fn slow_mode_vs_ki_xy_probe() {
 /// 判据：真值姿态峰值随 `G_GYRO_BIAS_K` 显著下降。
 #[test]
 fn gyro_bias_integral_truth_probe() {
-    println!("\n三轴陀螺零偏积分效果（600s 零噪声 + 陀螺零偏，读真值）");
+    println!("\n层1（持续性+交流门控）下三轴零偏积分效果（600s 零噪声 + 陀螺零偏，读真值）");
     println!("{:>8} | {:>11} {:>11} | {:>10} {:>10}", "GBK", "真值max|roll|", "真值max|pitch|", "末漂移", "末|pitch|");
     println!("{}", "-".repeat(62));
     for &gbk in &[0.0f32, 0.02, 0.05, 0.1, 0.3] {
         unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = gbk };
         unsafe { flyctrl_core::controller::pid::G_KI_XY = 0.10 };
-        unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = -1.0 };
+        // ⚠️ **必须把锚定打开**（0.02）：本测例问的是"零偏学习能否在**有锚定**时
+        // 进一步压住漂移且不劣化真值"。SIL 编译期默认已改为 0，故显式覆盖。
+        unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = 0.02 };
         let cfg = fly_simulater::airframe::load_airframe(None).expect("airframe");
         let mut ctrl = fly_sim_core::controller::FlyController::new(
             fly_sim_core::physics::PhySdkWorld::create_empty(), &cfg, 0.004, None,
@@ -758,7 +760,8 @@ fn gyro_bias_integral_truth_probe() {
         println!("{:>8.3} | {:>10.2}° {:>10.2}° | {:>9.2}m {:>9.2}°", gbk, mr, mp, dr, lp);
     }
     println!("{}", "-".repeat(62));
-    println!("（sil 判据：末窗口真值 |roll|/|pitch| 峰值 < 10°；G_GYRO_BIAS_K=0 为现状）");
+    println!("（锚定 G_ATT_ALPHA=0.02；GBK=0 为现状。判据：真值峰值不劣化 且 漂移下降）");
     unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = 0.0 };
+    unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = -1.0 };
     assert!(true);
 }
