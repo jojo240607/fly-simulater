@@ -34,7 +34,7 @@ fn rp_deg(w: f32, x: f32, y: f32) -> (f64, f64) {
 }
 
 /// 跑一趟：全程 max|roll|/max|pitch| + 后段（>10s）稳态 max（区分启动瞬态与持续失稳）。
-fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64) {
+fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64, f64) {
     let cfg = load_airframe(None).expect("default airframe");
     // **逐字复刻 `x_hover_env` 的风场**，只把 base 北向风速参数化（东向按 2.5:1.0 同比）。
     // **引用唯一真源** `WindConfig::beaufort3()`，只把 base 风速参数化以扫能力曲线。
@@ -64,6 +64,7 @@ fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64
     let steady_from = (10.0 / DT) as u64;
     let (mut mr, mut mp, mut sr, mut sp_, mut fin) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, true);
     let mut drift = 0.0f64;
+    let mut drift_end = 0.0f64;
     for i in 0..total {
         let st = ctrl.step(&sp);
         if !(st.att.w.is_finite() && st.att.x.is_finite() && st.att.y.is_finite() && st.att.z.is_finite()) {
@@ -81,8 +82,9 @@ fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64
         // 这是该模式下真正决定验收成败的量（x_hover_env 现挂在此）。
         let d = ((st.pos[0].0 * st.pos[0].0 + st.pos[1].0 * st.pos[1].0) as f64).sqrt();
         drift = drift.max(d);
+        drift_end = d;
     }
-    (mr, mp, sr, sp_, fin, drift)
+    (mr, mp, sr, sp_, fin, drift, drift_end)
 }
 
 #[test]
@@ -111,7 +113,7 @@ fn wind_turb_scan_all() {
         );
         println!("{}", "-".repeat(88));
         for &v in speeds.iter() {
-            let (mr, mp, sr, sp_, fin, dr) = run(v, 60.0, rm);
+            let (mr, mp, sr, sp_, fin, dr, _de) = run(v, 60.0, rm);
             println!(
                 "{:>7.1} | {:>10.2} | {:>10.2} | {:>12.2} | {:>12.2} | {:>7.2}m | {:>6}",
                 v, mr, mp, sr, sp_, dr, if fin { "yes" } else { "NO" }
@@ -120,5 +122,36 @@ fn wind_turb_scan_all() {
     }
     println!("\n（M 场 x_hover_env 的判据：max|roll| 与 max|pitch| 均 < 25°；其配置为 base=2.5）");
     // 只打印量化对比，不作通过性断言。
+    assert!(true);
+}
+
+/// **水平位置积分增益 `ki_xy` 扫描**（B3 上限风、位置环口径）。
+///
+/// 背景：水平外环原为 **P-only** ⇒ 恒风下稳态偏移 `e = des_v/kp_xy`，实测
+/// B3 风下 6.64m，与 `2.0/0.3 = 6.67m` 吻合。垂向早有 `iz` 抗稳态下沉，水平没有。
+/// 本扫描给水平加积分后的效果量化 —— **默认值不在这里定**，只出数据。
+#[test]
+fn ki_xy_scan_at_beaufort3() {
+    println!("\n水平位置积分 ki_xy 扫描（风=beaufort3 上限 5.4m/s + 阵风 + 湍流，位置环，60s）");
+    println!(
+        "{:>8} | {:>10} | {:>10} | {:>12} | {:>12}",
+        "ki_xy", "max|roll|", "max|pitch|", "水平漂移", "末态漂移"
+    );
+    println!("{}", "-".repeat(64));
+    for &ki in &[0.0f32, 0.005, 0.01, 0.02, 0.05, 0.1] {
+        unsafe { flyctrl_core::controller::pid::G_KI_XY = ki };
+        let (mr, mp, _sr, _sp, fin, dr, de) = run(5.4, 60.0, false);
+        println!(
+            "{:>8.3} | {:>10.2} | {:>10.2} | {:>11.2}m | {:>11.2}m{}",
+            ki,
+            mr,
+            mp,
+            dr,
+            de,
+            if fin { "" } else { "  NOT FINITE" }
+        );
+    }
+    println!("{}", "-".repeat(64));
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 }; // 复位到编译期默认
     assert!(true);
 }
