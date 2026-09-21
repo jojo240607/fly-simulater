@@ -28,7 +28,19 @@ use flyctrl_core::units::{
 };
 use flyctrl_core::vehicle::{ImuSample, PosSample};
 
-const REC_PATH: &str = r"d:\project\game\fly-simulater\.dbg\trae-debug-log-hil-input-replay.ndjson";
+/// 录制文件路径。
+///
+/// ⚠️ 原为**硬编码的 Windows 绝对路径**（`d:\project\game\...`，原开发者机器），
+/// 在本机/CI 永远不存在 ⇒ 该测试永远 FAIL。由于本文件自述为"**诊断 harness，
+/// 无硬断言**"，缺录制时**应当跳过**而非失败。
+///
+/// 现改为：优先取环境变量 `HIL_REPLAY_REC`，否则用仓库相对路径 `.dbg/...`。
+fn rec_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("HIL_REPLAY_REC") {
+        return std::path::PathBuf::from(p);
+    }
+    std::path::PathBuf::from(".dbg/trae-debug-log-hil-input-replay.ndjson")
+}
 
 // ---------------------------------------------------------------- 解析（最小 NDJSON）
 
@@ -92,8 +104,19 @@ struct Lpos {
     z: f32,
 }
 
-fn load() -> (Vec<Inj>, Vec<Att>, Vec<Act>, Vec<Lpos>) {
-    let f = std::fs::File::open(REC_PATH).expect("录制文件不存在（先跑 HIL 录制）");
+/// 载入录制；**文件不存在时返回 `None`**（诊断 harness 应跳过而非失败）。
+fn try_load() -> Option<(Vec<Inj>, Vec<Att>, Vec<Act>, Vec<Lpos>)> {
+    let p = rec_path();
+    let f = match std::fs::File::open(&p) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "[hil_replay] 跳过：录制文件不存在（{}: {e}）。\n                 这是**诊断 harness**（无硬断言），需要真实 HIL 录制才能运行：\n                 设 `HIL_REPLAY_REC=<path>` 指向 `.ndjson` 录制文件即可启用。",
+                p.display()
+            );
+            return None;
+        }
+    };
     let mut injs = vec![];
     let mut atts = vec![];
     let mut acts = vec![];
@@ -147,7 +170,7 @@ fn load() -> (Vec<Inj>, Vec<Att>, Vec<Act>, Vec<Lpos>) {
             _ => {}
         }
     }
-    (injs, atts, acts, lposs)
+    Some((injs, atts, acts, lposs))
 }
 
 // ---------------------------------------------------------------- 回放核心
@@ -417,7 +440,11 @@ fn report(name: &str, sim: &[TickOut], atts: &[Att], acts: &[Act], lposs: &[Lpos
 
 #[test]
 fn hil_replay_recorded_input() {
-    let (injs, atts, acts, lposs) = load();
+    // 诊断 harness：缺录制则**跳过**（原为硬编码 Windows 路径 ⇒ 在 Linux/CI 永远 FAIL）。
+    let (injs, atts, acts, lposs) = match try_load() {
+        Some(v) => v,
+        None => return, // 已打印跳过原因
+    };
     println!(
         "录制: inj={} att={} act={} lpos={} | 帧 sim 覆盖 {:.3}s | 墙钟 {:.1}s",
         injs.len(),
