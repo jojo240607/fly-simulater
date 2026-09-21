@@ -37,18 +37,13 @@ fn rp_deg(w: f32, x: f32, y: f32) -> (f64, f64) {
 fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64) {
     let cfg = load_airframe(None).expect("default airframe");
     // **逐字复刻 `x_hover_env` 的风场**，只把 base 北向风速参数化（东向按 2.5:1.0 同比）。
-    let wind = Some(WindField::new(WindConfig {
-        base: [speed, 0.0, -0.4 * speed / 2.5],
-        gust_amp: [1.2, 0.0, 0.0],
-        gust_freq: 0.12,
-        turb_sigma: [0.3, 0.1, -0.3],
-        turb_tau: 0.5,
-        seed: 0x1234_5678,
-        shear_exponent: 0.2,
-        shear_ref_height: 10.0,
-        spatial_scale: 2.0,
-        ..WindConfig::default()
-    }));
+    // **引用唯一真源** `WindConfig::beaufort3()`，只把 base 风速参数化以扫能力曲线。
+    // 原先此处手抄一份风场、与 M 场 `x_hover_env` 的参数并不一致 —— 那样两场输入
+    // 不可比，H 场结论无法作为 M 场验收依据。
+    let mut w = WindConfig::beaufort3();
+    let dir = if w.base[0].abs() > 1e-9 { w.base[2] / w.base[0] } else { 0.0 };
+    w.base = [speed, 0.0, dir * speed];
+    let wind = Some(WindField::new(w));
     let mut ctrl = FlyController::new(
         PhySdkWorld::create_empty(),
         &cfg,
