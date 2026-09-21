@@ -34,7 +34,7 @@ fn rp_deg(w: f32, x: f32, y: f32) -> (f64, f64) {
 }
 
 /// 跑一趟：全程 max|roll|/max|pitch| + 后段（>10s）稳态 max（区分启动瞬态与持续失稳）。
-fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool) {
+fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64) {
     let cfg = load_airframe(None).expect("default airframe");
     // **逐字复刻 `x_hover_env` 的风场**，只把 base 北向风速参数化（东向按 2.5:1.0 同比）。
     let wind = Some(WindField::new(WindConfig {
@@ -68,6 +68,7 @@ fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool) {
     let total = (secs / DT) as u64;
     let steady_from = (10.0 / DT) as u64;
     let (mut mr, mut mp, mut sr, mut sp_, mut fin) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, true);
+    let mut drift = 0.0f64;
     for i in 0..total {
         let st = ctrl.step(&sp);
         if !(st.att.w.is_finite() && st.att.x.is_finite() && st.att.y.is_finite() && st.att.z.is_finite()) {
@@ -81,8 +82,12 @@ fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool) {
             sr = sr.max(r.abs());
             sp_ = sp_.max(p.abs());
         }
+        // 水平漂移（真值，NED 水平模长）——ALT_HOLD/rate 模式下位置环被旁路，
+        // 这是该模式下真正决定验收成败的量（x_hover_env 现挂在此）。
+        let d = ((st.pos[0].0 * st.pos[0].0 + st.pos[1].0 * st.pos[1].0) as f64).sqrt();
+        drift = drift.max(d);
     }
-    (mr, mp, sr, sp_, fin)
+    (mr, mp, sr, sp_, fin, drift)
 }
 
 #[test]
@@ -98,7 +103,7 @@ fn wind_turb_scan_all() {
         }
     }
     println!("\n[knob] G_MAG_ALPHA = {mag_alpha}（-1 = 编译期默认 0.05；0 = 关闭磁锚定）");
-    let speeds = [0.0f64, 1.0, 2.0, 2.5, 3.0, 4.0];
+    let speeds = [0.0f64, 2.5, 3.4, 5.4, 7.9]; // B0/旧基线/B3下限/B3上限/B4上限
     for &(label, rm) in &[
         ("位置环开启（step/自主设定点路径，H 场既有口径）", false),
         ("rate_mode_xy=true（固件 ALT_HOLD 口径，M 场 x_hover_env 实际在跑的）", true),
@@ -106,15 +111,15 @@ fn wind_turb_scan_all() {
         println!("\n=== {label} ===");
         println!("复刻 x_hover_env 风场（阵风 1.2m/s@0.12Hz + Dryden 湍流固定注入），只变 base 恒风");
         println!(
-            "{:>7} | {:>10} | {:>10} | {:>12} | {:>12} | {:>6}",
-            "base", "max|roll|", "max|pitch|", "稳态roll(>10s)", "稳态pitch", "finite"
+            "{:>7} | {:>10} | {:>10} | {:>12} | {:>12} | {:>8} | {:>6}",
+            "base", "max|roll|", "max|pitch|", "稳态roll(>10s)", "稳态pitch", "水平漂移", "finite"
         );
-        println!("{}", "-".repeat(74));
+        println!("{}", "-".repeat(88));
         for &v in speeds.iter() {
-            let (mr, mp, sr, sp_, fin) = run(v, 40.0, rm);
+            let (mr, mp, sr, sp_, fin, dr) = run(v, 60.0, rm);
             println!(
-                "{:>7.1} | {:>10.2} | {:>10.2} | {:>12.2} | {:>12.2} | {:>6}",
-                v, mr, mp, sr, sp_, if fin { "yes" } else { "NO" }
+                "{:>7.1} | {:>10.2} | {:>10.2} | {:>12.2} | {:>12.2} | {:>7.2}m | {:>6}",
+                v, mr, mp, sr, sp_, dr, if fin { "yes" } else { "NO" }
             );
         }
     }
