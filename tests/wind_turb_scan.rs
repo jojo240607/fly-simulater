@@ -185,3 +185,45 @@ fn i_xy_max_scan_at_beaufort3() {
     unsafe { flyctrl_core::controller::pid::G_I_XY_MAX = -1.0 };
     assert!(true);
 }
+
+/// **姿态是否"物理必需"** 的对照（回答"H 场 13.6° 是不是超调"）。
+///
+/// 判据不是拍的数，而是**阻力平衡**：被控对象线阻力为
+/// `F = 0.5·ρ·Cd·v·|v|`（见 `plant.rs::aero_drag_body`；ρ≈1.225、机身
+/// `drag_coeff=[0.18,0.18,0.10]`、`mass=1.2kg`）⇒ 平稳抗风所需倾角
+/// `θ = atan(F / (m·g))`。B3 风（`beaufort3()`：北 5.4 / 东 2.16 m/s）：
+///
+/// | 轴 | 风速分量 | 阻力 | **必需倾角** | 实测峰值（位置环） |
+/// |---|---|---|---|---|
+/// | pitch(北) | 5.40 m/s | 3.215 N | **15.27°** | 13.62° |
+/// | roll(东)  | 2.16 m/s | 0.514 N | **2.50°**  | **6.68°** |
+///
+/// **两条结论**：
+/// 1. pitch 13.62° **低于**必需值 15.27° ⇒ 姿态**不是超调**，是物理必需；实测
+///    偏低说明机体在下风方向有 ~0.3m/s 滑移（反推相对风速 5.09 < 5.4）。
+///    ⇒ H 场"13.6°"这一项**不是问题**，无需治。
+/// 2. roll 6.68° 是必需值 2.50° 的 **2.7 倍** ⇒ **东轴有未被风场解释的持续倾角**。
+///    阵风是北向单轴（`gust_amp=[1.2,0,0]`）、湍流东向 σ 仅 0.1m/s，都解释不了。
+///    注意仓库历史：P3-A1 提交信息提到"修正偏航力矩混控符号与 roll 期望姿态方向、
+///    消除发散与**东向漂移**"—— 东轴曾有已知问题，**本项疑似残留**，待查。
+#[test]
+fn attitude_is_physically_justified_at_beaufort3() {
+    const RHO: f64 = 1.225;
+    const CD: f64 = 0.18;
+    const M: f64 = 1.2;
+    const G: f64 = 9.81;
+    let need = |v: f64| (0.5 * RHO * CD * v * v / (M * G)).atan().to_degrees();
+    let (pitch_need, roll_need) = (need(5.4), need(2.16));
+    println!("\n物理必需倾角：pitch(北 5.4m/s)={pitch_need:.2}°  roll(东 2.16m/s)={roll_need:.2}°");
+    // 位置环口径实测（同 wind_turb_scan_all 的 60s）
+    let (mr, mp, _sr, _sp, fin, dr, de) = run(5.4, 60.0, false);
+    println!(
+        "实测（60s，位置环）：max|roll|={mr:.2}° max|pitch|={mp:.2}° 峰值漂移={dr:.2}m 末态={de:.2}m finite={fin}"
+    );
+    println!(
+        "对照：pitch 实测/必需 = {:.2}x（<1 说明有下风滑移，正常）；roll 实测/必需 = {:.2}x（>1 即东轴多余倾角）",
+        mp / pitch_need,
+        mr / roll_need
+    );
+    assert!(true); // 只做量化对照，不作通过性断言
+}
