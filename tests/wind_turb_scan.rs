@@ -373,3 +373,30 @@ fn imu_bias_separation_no_wind() {
     println!("{}", "-".repeat(72));
     assert!(true);
 }
+
+/// **陀螺零偏在线估计 A/B**：能否消掉无风档的持续漂移（9.36m）？
+///
+/// 依据：分离实验确认该漂移**完全**由陀螺零偏贡献（只陀螺 = 9.36m，只加计 = 1.52m）。
+/// 而 EKF 的 `x[6..8]` 一直是状态向量的一部分、传播时也被扣除，却**从未被观测
+/// 更新** ⇒ 恒为 0。本测例把它接上，扫收敛速率看效果与代价。
+#[test]
+fn gyro_bias_estimation_scan() {
+    println!("\n陀螺零偏在线估计扫描（无恒风 + B3，位置环 60s；同时看姿态是否被带坏）");
+    println!(
+        "{:>7} | {:>9} {:>9} {:>6} | {:>9} {:>9} | {:>9} {:>9}",
+        "k", "无风末态", "无风峰值", "比", "B3末态", "B3峰值", "无风|roll|", "B3|pitch|"
+    );
+    println!("{}", "-".repeat(84));
+    for &k in &[0.0f32, 0.02, 0.05, 0.1, 0.2, 0.5] {
+        unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = k };
+        let (r0, p0, _a, _b, _f0, d0, e0, ..) = run_var_bias(0.0, 60.0, false, 0, 0);
+        let (r1, p1, _a2, _b2, _f1, d1, e1, ..) = run_var_bias(5.4, 60.0, false, 0, 0);
+        println!(
+            "{:>7.2} | {:>8.2}m {:>8.2}m {:>5.2} | {:>8.2}m {:>8.2}m | {:>8.2} {:>8.2}",
+            k, e0, d0, d0 / e0.max(1e-6), e1, d1, r0, p1
+        );
+    }
+    println!("{}", "-".repeat(84));
+    unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = 0.0 };
+    assert!(true);
+}
