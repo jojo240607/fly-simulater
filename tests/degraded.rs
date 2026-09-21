@@ -67,8 +67,19 @@ fn eff_scales_motor_command_not_zero() {
 }
 
 #[test]
-fn degraded_full_loss_diverges() {
-    // eff=0.0（完全停转）注入后姿控应发散：存活步数有限（< 注入后 8s 窗口）。
+fn degraded_motor_loss_stays_bounded() {
+    // 单电机实效 = 0（完全停转该路）后，姿控应**保持有界**（分配器把"退化即失控"
+    // 变成"可维持"）。
+    //
+    // ⚠️ **判据重定（2026-09-21）**：本测例原名 `degraded_full_loss_diverges`，
+    // 断言"完全停转应致姿控发散、存活步数 < 2000"。该前提是**分配器之前的固定混控
+    // 行为**，已被代码演进推翻 —— 同文件的 `tolerance_boundary_allocator_stabilizes_degraded`
+    // 的注释正文明写："接入分配器后，退化悬停的姿控不再快速发散…验证分配器把
+    // '退化即失控'变成'可维持'"。实测也确认：8s 窗口内全程存活（`survived == 2000`）。
+    //
+    // 按项目纪律（判据要能追溯到真实需求或物理上限，而不是拍脑袋的数）：
+    // 真实需求是"**退化下有界、可维持**"，不是"必须发散"。故改为断言有界性。
+    // （路线图早前已把本项登记为"纯 HEAD 即失败、待单独定性"，此处完成定性。）
     let mut ctrl = make_ctrl();
     let sp = hover_setpoint(0.0, 0.0, -5.0);
     // 稳态 4s。
@@ -77,16 +88,32 @@ fn degraded_full_loss_diverges() {
     }
     ctrl.set_motor_eff([0.0, 1.0, 1.0, 1.0]);
     let mut survived = 0u64;
+    let mut max_rate = 0.0f32;
+    let mut finite = true;
     for _ in 0..2000 {
         ctrl.step(&sp);
         let w = ctrl.world_state().omega;
-        let rate = (w[0].0 * w[0].0 + w[1].0 * w[1].0 + w[2].0 * w[2].0).sqrt();
+        let s: [f32; 3] = [w[0].0, w[1].0, w[2].0];
+        if !s.iter().all(|v| v.is_finite()) {
+            finite = false;
+            break;
+        }
+        let rate = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
+        max_rate = max_rate.max(rate);
         if rate > 1.0 {
             break;
         }
         survived += 1;
     }
-    assert!(survived < 2000, "完全停转应致姿控发散（存活步数有限），got {}", survived);
+    assert!(finite, "单电机停转下状态必须有限（无 NaN/Inf）");
+    assert!(
+        survived >= 2000,
+        "单电机停转后姿控应**有界可维持**（存活满 8s 窗口），实际仅存活 {} 步、峰值角速率 {:.2} rad/s。\n\
+         注：若此项回归，说明分配器的退化维持能力被破坏（对照 \
+         `tolerance_boundary_allocator_stabilizes_degraded`）。",
+        survived,
+        max_rate
+    );
 }
 
 #[test]
