@@ -40,6 +40,13 @@ fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64
 
 /// `var` 风场变体：0=完整(北+东) 1=仅北(东置零) 2=仅东(北置零) 3=无恒风(留阵风+湍流)
 fn run_var(speed: f64, secs: f64, rate_mode: bool, var: u8) -> (f64, f64, f64, f64, bool, f64, f64) {
+    let (a, b, c, d, e, f, g, _pn, _pe) = run_var_bias(speed, secs, rate_mode, var, 0);
+    (a, b, c, d, e, f, g)
+}
+
+/// `bias`：0=两者(既有) 1=都不注入 2=只陀螺漂移 3=只加计漂移。
+/// 返回额外带出战：末位置 (n,e)、末估计速度 (n,e)。
+fn run_var_bias(speed: f64, secs: f64, rate_mode: bool, var: u8, bias: u8) -> (f64, f64, f64, f64, bool, f64, f64, f64, f64) {
     let cfg = load_airframe(None).expect("default airframe");
     // **逐字复刻 `x_hover_env` 的风场**，只把 base 北向风速参数化（东向按 2.5:1.0 同比）。
     // **引用唯一真源** `WindConfig::beaufort3()`，只把 base 风速参数化以扫能力曲线。
@@ -65,8 +72,20 @@ fn run_var(speed: f64, secs: f64, rate_mode: bool, var: u8) -> (f64, f64, f64, f
         Some(ContactModel::default()),
         Vec::new(),
     );
-    ctrl.inject_sensor_fault(SensorFault::GyroDrift([0.0001, -0.00005, 0.0001]));
-    ctrl.inject_sensor_fault(SensorFault::AccelDrift([0.0002, 0.0, 0.0002]));
+    // 温漂故障注入（可分离）：0=两者（既有行为，逐位不变）
+    match bias {
+        1 => {}
+        2 => {
+            ctrl.inject_sensor_fault(SensorFault::GyroDrift([0.0001, -0.00005, 0.0001]));
+        }
+        3 => {
+            ctrl.inject_sensor_fault(SensorFault::AccelDrift([0.0002, 0.0, 0.0002]));
+        }
+        _ => {
+            ctrl.inject_sensor_fault(SensorFault::GyroDrift([0.0001, -0.00005, 0.0001]));
+            ctrl.inject_sensor_fault(SensorFault::AccelDrift([0.0002, 0.0, 0.0002]));
+        }
+    }
     // 控制律选择：固件解锁后默认 ALT_HOLD ⇒ rate_mode_xy=true（位置环旁路）；
     // `step()` 路径默认 false（位置环开启）。两者判据不可互相套用。
     ctrl.set_rate_mode_xy(rate_mode);
@@ -76,6 +95,7 @@ fn run_var(speed: f64, secs: f64, rate_mode: bool, var: u8) -> (f64, f64, f64, f
     let (mut mr, mut mp, mut sr, mut sp_, mut fin) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, true);
     let mut drift = 0.0f64;
     let mut drift_end = 0.0f64;
+    let mut pos_end = [0.0f64; 2];
     for i in 0..total {
         let st = ctrl.step(&sp);
         if !(st.att.w.is_finite() && st.att.x.is_finite() && st.att.y.is_finite() && st.att.z.is_finite()) {
@@ -94,8 +114,9 @@ fn run_var(speed: f64, secs: f64, rate_mode: bool, var: u8) -> (f64, f64, f64, f
         let d = ((st.pos[0].0 * st.pos[0].0 + st.pos[1].0 * st.pos[1].0) as f64).sqrt();
         drift = drift.max(d);
         drift_end = d;
+        pos_end = [st.pos[0].0 as f64, st.pos[1].0 as f64];
     }
-    (mr, mp, sr, sp_, fin, drift, drift_end)
+    (mr, mp, sr, sp_, fin, drift, drift_end, pos_end[0], pos_end[1])
 }
 
 #[test]
@@ -259,7 +280,7 @@ fn east_roll_separation_at_beaufort3() {
         ("仅东风（北置零）", 2),
         ("无恒风（留阵风湍流）", 3),
     ] {
-        let (mr, mp, _sr, _sp, _fin, _dr, de) = run_var(5.4, 60.0, false, v);
+        let (mr, mp, _sr, _sp, _fin, _dr, de, ..) = run_var(5.4, 60.0, false, v);
         println!("{:>22} | {:>10.2} | {:>10.2} | {:>9.2}m", tag, mr, mp, de);
     }
     println!("{}", "-".repeat(62));
@@ -282,9 +303,9 @@ fn drift_anomaly_probe() {
     println!("{}", "-".repeat(66));
     for &v in &[0.0f64, 0.5, 1.0, 2.0, 3.4, 5.4] {
         unsafe { flyctrl_core::controller::pid::G_KI_XY = 0.0 };
-        let (_r0, _p0, _a, _b, _f0, d0, e0) = run_var(v, 60.0, false, 0);
+        let (_r0, _p0, _a, _b, _f0, d0, e0, ..) = run_var(v, 60.0, false, 0);
         unsafe { flyctrl_core::controller::pid::G_KI_XY = 0.10 };
-        let (_r1, _p1, _a2, _b2, _f1, d1, e1) = run_var(v, 60.0, false, 0);
+        let (_r1, _p1, _a2, _b2, _f1, d1, e1, ..) = run_var(v, 60.0, false, 0);
         println!(
             "{:>7.1} | {:>10.2}m | {:>10.2}m | {:>10.2}m | {:>10.2}m",
             v, d0, e0, d1, e1
@@ -311,7 +332,7 @@ fn vel_lpf_h_tau_scan() {
     println!("{}", "-".repeat(92));
     for &tau in &[0.0f32, 0.02, 0.05, 0.10, 0.20, 0.40] {
         unsafe { flyctrl_core::controller::pid::G_VEL_LPF_H_TAU = tau };
-        let (r0, _p0, _a, _b, _f0, d0, e0) = run_var(0.0, 60.0, false, 0);
+        let (r0, _p0, _a, _b, _f0, d0, e0, ..) = run_var(0.0, 60.0, false, 0);
         let (r1, _p1, _a2, _b2, _f1, d1, e1) = run_var(5.4, 60.0, false, 0);
         println!(
             "{:>7.2} | {:>8.2}m {:>8.2}m {:>5.2} | {:>8.2}m {:>8.2}m {:>5.2} | {:>8.2} {:>8.2}",
@@ -320,5 +341,35 @@ fn vel_lpf_h_tau_scan() {
     }
     println!("{}", "-".repeat(92));
     unsafe { flyctrl_core::controller::pid::G_VEL_LPF_H_TAU = -1.0 };
+    assert!(true);
+}
+
+/// **IMU 零偏分离**：无风档的持续漂移（0.16 m/s 且仍在增长）来自哪个零偏？
+///
+/// 判据（"偏置"的签名）：漂移**方向恒定 + 速率恒定**。分别注入：
+/// 0=陀螺+加计（既有） 1=都不注入 2=只陀螺 3=只加计。
+/// 读数：末位置 (n,e) —— 方向即零偏轴；再除以 60s 得平均速度。
+#[test]
+fn imu_bias_separation_no_wind() {
+    println!("\nIMU 零偏分离（无恒风、位置环、60s）：看漂移方向与速率是否恒定");
+    println!(
+        "{:>18} | {:>9} | {:>9} | {:>10} | {:>12}",
+        "注入", "末pos_n", "末pos_e", "漂移模长", "平均速度"
+    );
+    println!("{}", "-".repeat(72));
+    for (tag, b) in [
+        ("陀螺+加计(既有)", 0u8),
+        ("都不注入", 1),
+        ("只陀螺漂移", 2),
+        ("只加计漂移", 3),
+    ] {
+        let (_r, _p, _a, _c, _f, _d, de, pn, pe) = run_var_bias(0.0, 60.0, false, 0, b);
+        let mag = (pn * pn + pe * pe).sqrt();
+        println!(
+            "{:>18} | {:>9.2} | {:>9.2} | {:>9.2}m | {:>10.3} m/s",
+            tag, pn, pe, mag, mag / 60.0
+        );
+    }
+    println!("{}", "-".repeat(72));
     assert!(true);
 }
