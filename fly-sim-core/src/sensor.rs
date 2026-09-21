@@ -134,6 +134,15 @@ impl SensorConfig {
             // 安装误差 1°（机体系偏航 1°），验证 EKF decl 修正与安装误差共存。
             mag_decl_deg: 4.0,
             mag_mount_deg: [0.0, 0.0, 1.0],
+            // 硬铁 `[0.3, −0.2, 0.4]`：与世界地磁**同量级**（未标定量级）。
+            //
+            // [已回退 2026-09-20] 曾一度改为“已标定残余” `[0.02,−0.015,0.03]`，
+            // 动机是追 M 场 `x_hover_noise`（闭环）的劣化。但：
+            //   ① 对**任何阶段 1（姿态估计）测试结果零影响**（实测数值一字不差）；
+            //   ② 它改动的是**跨阶段共享**的传感器配置，会波及阶段 2/4/6 的判据；
+            //   ③ 越出了阶段 1 的范围。
+            // 故回退。是否重标定为“已标定残余”属阶段 2/4 的测试台决策，
+            // 连同 `x_hover_noise` 一并移交。详见 `docs/stage1-attitude-findings.md` F7。
             mag_hard_iron: [0.3, -0.2, 0.4], // uT 硬铁
             mag_soft_iron: [0.98, 1.03, 0.99], // 软铁缩放
             mag_noise: 0.05, // uT
@@ -179,6 +188,15 @@ pub enum SensorFault {
     GyroStuck(Option<[f64; 3]>),
     /// 硬：GPS 卡死（位置/速度输出冻结为给定 NED 值 [n,e,d,vn,ve,vd]；`None` 解除）。
     GpsStuck(Option<[f64; 6]>),
+    /// 软：气压高度**阶跃偏置**（m，向上为正，叠加在真值上）。
+    ///
+    /// 动机（阶段 3.6）：`EnvScenario` 有 `BaroStep/BaroFreeze`，而 H 场原本
+    /// **没有任何 baro 故障变体** → 3.6 无法在 H 场做。气压是垂向通道的
+    /// **绝对观测**，其故障直接影响定高，必须覆盖。
+    BaroStep(f64),
+    /// 硬：气压高度**冻结**（输出固定为该高度 m；`None` 解除）。
+    /// 数据仍“正常”（有读数）→ FDIR 不误报，靠估计器鲁棒性。
+    BaroStuck(Option<f64>),
 }
 
 /// 传感器模型运行状态。
@@ -208,6 +226,10 @@ pub struct SensorModel {
     accel_stuck: Option<[f64; 3]>,
     gyro_stuck: Option<[f64; 3]>,
     gps_stuck: Option<[f64; 6]>,
+    /// 气压阶跃偏置（m，向上为正，叠加在真值上）。
+    baro_bias_extra: f64,
+    /// 气压冻结值（m）；`None` = 不冻结。
+    baro_stuck: Option<f64>,
 }
 
 impl SensorModel {
@@ -237,6 +259,8 @@ impl SensorModel {
             accel_stuck: None,
             gyro_stuck: None,
             gps_stuck: None,
+            baro_bias_extra: 0.0,
+            baro_stuck: None,
         }
     }
 
@@ -256,6 +280,8 @@ impl SensorModel {
             SensorFault::AccelStuck(s) => self.accel_stuck = s,
             SensorFault::GyroStuck(s) => self.gyro_stuck = s,
             SensorFault::GpsStuck(s) => self.gps_stuck = s,
+            SensorFault::BaroStep(b) => self.baro_bias_extra += b,
+            SensorFault::BaroStuck(s) => self.baro_stuck = s,
         }
     }
 
@@ -391,7 +417,15 @@ impl SensorModel {
         // 慢漂移：随机游走
         self.baro_bias += self.cfg.baro_drift * self.rng.gaussian() * dt.sqrt();
         self.baro_bias = self.baro_bias.clamp(-50.0, 50.0);
-        let alt_meas = altitude + self.baro_bias + self.cfg.baro_noise * self.rng.gaussian();
+        // 硬故障：冻结——输出固定为该高度（覆盖噪声/漂移/真值）。
+        if let Some(stuck) = self.baro_stuck {
+            let pressure = 1013.25 * (-stuck / 8434.0).exp();
+            return BaroSample {
+                altitude: stuck,
+                pressure,
+            };
+        }
+        let alt_meas = altitude + self.baro_bias_extra + self.baro_bias + self.cfg.baro_noise * self.rng.gaussian();
         // 气压：标准大气近似（每 10m 约 1.2hPa 变化），海平面 1013.25hPa。
         let pressure = 1013.25 * (-alt_meas / 8434.0).exp();
         BaroSample { altitude: alt_meas, pressure }

@@ -1095,7 +1095,11 @@ where
         // 姿态一致 → 磁航向锚定稳定收敛，不再需要零场关闭。
         let decl = self.sensor.cfg().mag_decl_deg.to_radians();
         let (sd, cd) = decl.sin_cos();
-        let m_world_ned = [0.5 * cd, 0.5 * sd, -0.4]; // (n,e,d) 水平磁北 + 垂向
+        // 历史 bug：原为 `-0.4`，注释写“垂直向下为负”——但 NED 的 z 轴就是向下，
+        // 故这是**符号错**（等价于南半球），与 `EnvScenario` 的世界场 `[0.2,0,0.4]`
+        // 不一致。`update_mag` 只用水平分量，所以暂未致错；但任何**依赖模长/符号**
+        // 的门控会因两通路不一致而失效（见 `docs/stage1-attitude-findings.md` F7）。
+        let m_world_ned = [0.5 * cd, 0.5 * sd, 0.4]; // (n,e,d) 水平磁北 + 垂向（NED 向下为正）
         let att_ned = quat_up_to_ned([tf[3], tf[4], tf[5], tf[6]]);
         // flyctrl 四元数为 f32：世界磁场转 f32 旋到机体系后转回 f64 做误差建模。
         let m_world_f32 = [
@@ -1382,7 +1386,7 @@ mod tests {
         let (mag, _) = plant.read_sensors_attitude();
         assert!(mag.field[0] > 0.4, "decl=0 水平分量应指北(+X)，实际 {:?}", mag.field);
         assert!(mag.field[1].abs() < 1e-6, "decl=0 东向分量≈0，实际 {:?}", mag.field);
-        assert!(mag.field[2] < 0.0, "北半球垂直分量向下为负，实际 {:?}", mag.field);
+        assert!(mag.field[2] > 0.0, "NED 下北半球垂直分量向下为正，实际 {:?}", mag.field);
 
         let mut cfg2 = SensorConfig::default();
         cfg2.mag_decl_deg = 10.0;
