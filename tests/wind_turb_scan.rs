@@ -138,7 +138,7 @@ fn ki_xy_scan_at_beaufort3() {
         "ki_xy", "max|roll|", "max|pitch|", "水平漂移", "末态漂移"
     );
     println!("{}", "-".repeat(64));
-    for &ki in &[0.0f32, 0.005, 0.01, 0.02, 0.05, 0.1] {
+    for &ki in &[0.0f32, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50] {
         unsafe { flyctrl_core::controller::pid::G_KI_XY = ki };
         let (mr, mp, _sr, _sp, fin, dr, de) = run(5.4, 60.0, false);
         println!(
@@ -153,5 +153,35 @@ fn ki_xy_scan_at_beaufort3() {
     }
     println!("{}", "-".repeat(64));
     unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 }; // 复位到编译期默认
+    assert!(true);
+}
+
+/// **水平积分上限 `I_XY_MAX` 扫描**（固定 ki_xy=0.10，B3 风，位置环，60s）。
+///
+/// 动机：ki_xy=0.10 时稳态残值 0.85m 反推 `des_v_need = 0.3×0.85 + 2.0 = 2.26`
+/// **超过默认上限 2.0** ⇒ 积分撞夹子，残值被夹死为 `(需要值 − 上限)/kp_xy`。
+/// 本扫描量化"抬高上限"的收益（注意上限越大，抗饱和保护越弱：饱和后回算可
+/// 把积分推到很大的值，恢复期可能甩尾）。
+#[test]
+fn i_xy_max_scan_at_beaufort3() {
+    println!("\n水平积分上限 I_XY_MAX 扫描（ki_xy=0.10 固定，B3 风，位置环，60s）");
+    println!(
+        "{:>9} | {:>10} | {:>10} | {:>12} | {:>12}",
+        "I_XY_MAX", "max|roll|", "max|pitch|", "水平漂移", "末态漂移"
+    );
+    println!("{}", "-".repeat(66));
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = 0.10 };
+    for &im in &[2.0f32, 2.5, 3.0, 3.5, 5.0] {
+        unsafe { flyctrl_core::controller::pid::G_I_XY_MAX = im };
+        let (mr, mp, _sr, _sp, fin, dr, de) = run(5.4, 60.0, false);
+        println!(
+            "{:>9.1} | {:>10.2} | {:>10.2} | {:>11.2}m | {:>11.2}m{}",
+            im, mr, mp, dr, de,
+            if fin { "" } else { "  NOT FINITE" }
+        );
+    }
+    println!("{}", "-".repeat(66));
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
+    unsafe { flyctrl_core::controller::pid::G_I_XY_MAX = -1.0 };
     assert!(true);
 }
