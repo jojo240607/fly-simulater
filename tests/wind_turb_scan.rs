@@ -524,3 +524,24 @@ fn wind_observer_convergence() {
     }
     assert!(true);
 }
+
+/// **路线 2.2e 闭环验证**：用磁场做全姿态修正，能否同时拿到"无风≤3m 且 B3≤3.4m"？
+///
+/// 依据：比力锚定被水平加速度污染（A 项根源），而磁场与加速度无耦合。
+/// 零件已验证（硬铁补偿前 39.54°/后 0°）。本测例量闭环效果与代价。
+/// 强度旋钮 `G_MAG3D_ALPHA`：0 = 关闭（既有行为）。
+#[test]
+fn mag3d_full_attitude_scan() {
+    println!("\n路线 2.2e 闭环扫描（磁全姿态修正，位置环 60s）");
+    println!("{:>8} | {:>9} {:>9} | {:>9} {:>9} | {:>9} {:>9}", "alpha", "无风末态", "无风峰值", "B3末态", "B3峰值", "无风|roll|", "B3|pitch|");
+    println!("{}", "-".repeat(78));
+    for &a in &[0.0f32, 0.05, 0.1, 0.2, 0.5, 1.0] {
+        unsafe { flyctrl_core::estimator::ekf::G_MAG3D_ALPHA = a };
+        let (r0, p0, _x, _y, _f0, d0, e0, ..) = run_var_bias(0.0, 60.0, false, 0, 0);
+        let (r1, p1, _x2, _y2, _f1, d1, e1, ..) = run_var_bias(5.4, 60.0, false, 0, 0);
+        println!("{:>8.2} | {:>8.2}m {:>8.2}m | {:>8.2}m {:>8.2}m | {:>8.2} {:>8.2}", a, e0, d0, e1, d1, r0, p1);
+    }
+    println!("{}", "-".repeat(78));
+    unsafe { flyctrl_core::estimator::ekf::G_MAG3D_ALPHA = 0.0 };
+    assert!(true);
+}

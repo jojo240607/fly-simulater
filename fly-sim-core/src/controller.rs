@@ -317,6 +317,14 @@ where
         // 修法：仿真侧注入了多少硬铁，就同步告诉估计器多少（离线标定语义）。
         // 注：部分测试原本**手工**调用 `set_mag_hard_iron`；本处为 setter 语义（非累加），
         // 故手工传入同值时不会重复补偿。
+        // 路线 2.2e：设置世界系**三维**磁参考（含倾角），供全姿态磁修正用。
+        // 与 `plant.rs::aero_drag_body` 的世界场同源：`[0.5·cosδ, 0.5·sinδ, 0.4]`。
+        // 强度由 `G_MAG3D_ALPHA` 控制（默认 0 = 关闭 ⇒ 只修 yaw 的既有行为不变）。
+        {
+            let d = (sensor_cfg.mag_decl_deg as f32).to_radians();
+            ekf.set_mag_ref3d([0.5 * d.cos(), 0.5 * d.sin(), 0.4]);
+        }
+
         ekf.set_mag_hard_iron([
             sensor_cfg.mag_hard_iron[0] as f32,
             sensor_cfg.mag_hard_iron[1] as f32,
