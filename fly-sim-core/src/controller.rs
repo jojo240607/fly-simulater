@@ -1122,6 +1122,16 @@ where
         self.mag.last
     }
 
+    /// 阶段 2：EKF 的水平风估计（世界系 NED，m/s）。`drag_k=0` 时恒为 [0,0]。
+    pub fn wind_estimate(&self) -> [f32; 2] {
+        match &self.hil {
+            CtrlVariant::Pid(h) => h.est.wind_estimate(),
+            CtrlVariant::Indi(h) => h.est.wind_estimate(),
+            CtrlVariant::Lqr(h) => h.est.wind_estimate(),
+            CtrlVariant::Tecs(h) => h.est.wind_estimate(),
+        }
+    }
+
     /// 调试：返回最近一次姿态控制器输出（`(err[3], pqr[3], om[3])`）。
     pub fn dbg_att(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         match &self.hil {

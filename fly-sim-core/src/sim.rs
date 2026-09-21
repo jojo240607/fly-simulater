@@ -550,6 +550,11 @@ where
         self.ctrl.last_mag()
     }
 
+    /// 阶段 2：EKF 的水平风估计（世界系 NED，m/s）。
+    pub fn wind_estimate(&self) -> [f32; 2] {
+        self.ctrl.wind_estimate()
+    }
+
     /// 阶段 7+：取引擎世界系（Y-up）真实位姿 (pos xyz, quat wxyz)。绕开 NED 映射，
     /// 供渲染直接使用（渲染世界系与引擎同为 Y-up，仅 z 轴反号）。
     pub fn debug_up(&self) -> ([f64; 3], [f64; 4]) {

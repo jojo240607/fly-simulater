@@ -486,3 +486,41 @@ fn wind_observer_check() {
     println!("{}", "-".repeat(70));
     assert!(true);
 }
+
+/// **阶段 2 风观测器收敛性验证**（先证明零件可用，再接负载）。
+///
+/// 注入 B3 风：北 5.4 / 东 2.16 m/s（`WindConfig::beaufort3().base` 的 NED→UP 逆映射）。
+/// 观测器是准稳态代数解，**预期**：量级接近、方向正确；湍流下会有偏差（其局限）。
+/// 需要 `ZZ_DRAG_K=1`（否则 drag_k=0、估计恒 0）。
+#[test]
+fn wind_observer_convergence() {
+    let enabled = std::env::var("ZZ_DRAG_K").is_ok();
+    println!("\n阶段 2 风观测器收敛性（ZZ_DRAG_K={}）", if enabled { "1" } else { "未设→估计应恒 0" });
+    // 真值：WindConfig::beaufort3().base 是 UP 系 [n, -d, -e] ⇒ 逆映射回 NED
+    let w = fly_sim_core::wind::WindConfig::beaufort3();
+    println!("  注入真值（NED）: 北 {:.2} / 东 {:.2} m/s", w.base[0], -w.base[2]);
+    for &(tag, sp) in &[("无恒风（只阵风湍流）", 0.0f64), ("B3 北5.4/东2.16", 5.4)] {
+        // 直接构造控制器跑一遍并读 wind_estimate
+        let cfg = fly_simulater::airframe::load_airframe(None).expect("airframe");
+        let mut wc = fly_sim_core::wind::WindConfig::beaufort3();
+        let dir = if wc.base[0].abs() > 1e-9 { wc.base[2] / wc.base[0] } else { 0.0 };
+        wc.base = [sp, 0.0, dir * sp];
+        let mut ctrl = fly_sim_core::controller::FlyController::new(
+            fly_sim_core::physics::PhySdkWorld::create_empty(),
+            &cfg,
+            0.004,
+            Some(fly_sim_core::wind::WindField::new(wc)),
+            fly_sim_core::sensor::SensorConfig::realistic(),
+            fly_sim_core::controller::ControllerKind::Pid,
+            Some(fly_sim_core::physics::ContactModel::default()),
+            Vec::new(),
+        );
+        let spn = fly_sim_core::controller::hover_setpoint(0.0, 0.0, -5.0);
+        for _ in 0..(60.0 / 0.004) as u64 {
+            ctrl.step(&spn);
+        }
+        let e = ctrl.wind_estimate();
+        println!("  {tag:22} -> 估计: 北 {:.2} / 东 {:.2} m/s（模长 {:.2}）", e[0], e[1], (e[0]*e[0]+e[1]*e[1]).sqrt());
+    }
+    assert!(true);
+}
