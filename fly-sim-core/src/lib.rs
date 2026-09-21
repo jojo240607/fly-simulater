@@ -15,7 +15,9 @@
 pub mod alloc;
 pub mod controller;
 pub mod log;
+pub mod maneuver;
 pub mod mavlink;
+pub mod metrics;
 pub mod multi;
 pub mod physics;
 pub mod plant;
@@ -27,6 +29,11 @@ pub mod wind;
 // 便捷再导出：runner 最常用到的类型。
 pub use controller::{ControllerKind, FlyController, RealFlyController};
 pub use log::LogRow;
+pub use maneuver::{Maneuver, TrajSample, Trajectory, G_NED};
+pub use metrics::{
+    angle_diff_deg, euler_err_deg, quat_angle_error_deg, AttMetrics, PosVelMetrics, RateMetrics,
+    SatMetrics, StepTrace, TrackMetrics,
+};
 pub use mavlink::{loopback_telemetry, MavlinkBridge, MavlinkStreamParser};
 pub use multi::{formation_setpoint, inter_drone_avoid_vel, target_with_avoid, DroneLink, DroneTelemetry, MultiDroneSim};
 pub use physics::{ContactInfo, ContactModel, PhySdkWorld, resolve_ground_contact, RigidBodyWorld, RigidTransform, TerrainField};
