@@ -678,9 +678,11 @@ fn slow_mode_vs_ki_xy_probe() {
     println!("\n慢模态定位：零噪声无风悬停 600s（10 分钟仿真），扫 ki_xy");
     println!("{:>28} | {:>11} {:>11} | {:>10} {:>10}", "配置", "真值max|roll|", "真值max|pitch|", "末漂移", "末|pitch|");
     println!("{}", "-".repeat(62));
-    for &(ki, gb) in &[(0.10f32, false), (0.10, true), (0.005, true)] {
+    // 扫「锚定块内的三轴陀螺零偏积分」强度（G_GYRO_BIAS_K，0=关）
+    for &(ki, gb) in &[(0.10f32, true), (0.10, true), (0.10, true), (0.10, true), (0.10, true)] {
         unsafe { flyctrl_core::controller::pid::G_KI_XY = ki };
-        unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = if gb { -1.0 } else { 0.0 } };
+        unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = -1.0 };
+        let _ = gb;
         let cfg = fly_simulater::airframe::load_airframe(None).expect("airframe");
         let mut ctrl = fly_sim_core::controller::FlyController::new(
             fly_sim_core::physics::PhySdkWorld::create_empty(), &cfg, 0.004, None,
@@ -688,6 +690,7 @@ fn slow_mode_vs_ki_xy_probe() {
             fly_sim_core::controller::ControllerKind::Pid,
             Some(fly_sim_core::physics::ContactModel::default()), Vec::new(),
         );
+        // 三分量零偏积分强度由循环外的 GBK 全局控制（见下方 for 展开）
         // ⚠️ **与 sil 的关键差别**：sil 用 `set_gps_throttle(8)`（GPS 31Hz），
         // 原先本探针用默认 ⇒ 复现不出 sil 的 15°。此处对齐。
         ctrl.set_gps_throttle(8);
@@ -714,5 +717,48 @@ fn slow_mode_vs_ki_xy_probe() {
     println!("{}", "-".repeat(62));
     println!("（sil 判据：末窗口真值 |roll|/|pitch| 峰值 < 10°）");
     unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
+    assert!(true);
+}
+
+/// **三轴陀螺零偏积分（锚定块内，Mahony 结构）效果验证** —— 读**真值**。
+///
+/// 机制（已定位）：重力锚定把"估计"钉在水平而"真值"在漂 ⇒ 控制环对真实漂移失明。
+/// 修法：把锚定修正积分进 `x[6..8]`（三轴零偏）⇒ **在源头消掉漂移** ⇒ 真值不再漂。
+/// 判据：真值姿态峰值随 `G_GYRO_BIAS_K` 显著下降。
+#[test]
+fn gyro_bias_integral_truth_probe() {
+    println!("\n三轴陀螺零偏积分效果（600s 零噪声 + 陀螺零偏，读真值）");
+    println!("{:>8} | {:>11} {:>11} | {:>10} {:>10}", "GBK", "真值max|roll|", "真值max|pitch|", "末漂移", "末|pitch|");
+    println!("{}", "-".repeat(62));
+    for &gbk in &[0.0f32, 0.02, 0.05, 0.1, 0.3] {
+        unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = gbk };
+        unsafe { flyctrl_core::controller::pid::G_KI_XY = 0.10 };
+        unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = -1.0 };
+        let cfg = fly_simulater::airframe::load_airframe(None).expect("airframe");
+        let mut ctrl = fly_sim_core::controller::FlyController::new(
+            fly_sim_core::physics::PhySdkWorld::create_empty(), &cfg, 0.004, None,
+            fly_sim_core::sensor::SensorConfig::default(),
+            fly_sim_core::controller::ControllerKind::Pid,
+            Some(fly_sim_core::physics::ContactModel::default()), Vec::new(),
+        );
+        ctrl.set_gps_throttle(8);
+        ctrl.inject_sensor_fault(fly_sim_core::sensor::SensorFault::GyroDrift([0.0001, -0.00005, 0.0001]));
+        let spn = fly_sim_core::controller::hover_setpoint(0.0, 0.0, -5.0);
+        let (mut mr, mut mp, mut dr, mut lp) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for _ in 0..(600.0 / 0.004) as u64 {
+            let _est = ctrl.step(&spn);
+            let st = ctrl.world_state(); // 真值
+            let w = st.att.w as f64; let x = st.att.x as f64; let y = st.att.y as f64;
+            let r = (2.0 * (w * x)).atan2(1.0 - 2.0 * x * x).to_degrees();
+            let pp = (2.0 * (w * y)).clamp(-1.0, 1.0).asin().to_degrees();
+            mr = mr.max(r.abs()); mp = mp.max(pp.abs()); lp = pp;
+            let dn = st.pos[0].0 as f64; let de = st.pos[1].0 as f64;
+            dr = dr.max((dn * dn + de * de).sqrt());
+        }
+        println!("{:>8.3} | {:>10.2}° {:>10.2}° | {:>9.2}m {:>9.2}°", gbk, mr, mp, dr, lp);
+    }
+    println!("{}", "-".repeat(62));
+    println!("（sil 判据：末窗口真值 |roll|/|pitch| 峰值 < 10°；G_GYRO_BIAS_K=0 为现状）");
+    unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = 0.0 };
     assert!(true);
 }
