@@ -666,3 +666,46 @@ fn att_alpha_limit_cycle_probe() {
     unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = -1.0 };
     assert!(true);
 }
+
+/// **`sil` 慢模态定位**：零噪声长时悬停（10 分钟仿真 ≈ 数秒墙钟）扫水平积分 `ki_xy`。
+///
+/// 线索：`sil` 实测（10min 零噪声）真值姿态在**分钟**尺度缓慢振荡（采样点 ±3°、
+/// 峰值达 15°），而估计被钉在 ~0。怀疑是**控制环自身的低频模态**，
+/// 且 `ki_xy`（本会话新增的水平积分）的积分零点可能正落在该模态上。
+/// 判据：真值姿态峰值随 `ki_xy` 显著变化 ⇒ 确认由它引入。
+#[test]
+fn slow_mode_vs_ki_xy_probe() {
+    println!("\n慢模态定位：零噪声无风悬停 600s（10 分钟仿真），扫 ki_xy");
+    println!("{:>28} | {:>11} {:>11} | {:>10} {:>10}", "配置", "真值max|roll|", "真值max|pitch|", "末漂移", "末|pitch|");
+    println!("{}", "-".repeat(62));
+    for &(ki, gb) in &[(0.10f32, false), (0.10, true), (0.005, true)] {
+        unsafe { flyctrl_core::controller::pid::G_KI_XY = ki };
+        unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = if gb { -1.0 } else { 0.0 } };
+        let cfg = fly_simulater::airframe::load_airframe(None).expect("airframe");
+        let mut ctrl = fly_sim_core::controller::FlyController::new(
+            fly_sim_core::physics::PhySdkWorld::create_empty(), &cfg, 0.004, None,
+            fly_sim_core::sensor::SensorConfig::default(),
+            fly_sim_core::controller::ControllerKind::Pid,
+            Some(fly_sim_core::physics::ContactModel::default()), Vec::new(),
+        );
+        if gb {
+            ctrl.inject_sensor_fault(fly_sim_core::sensor::SensorFault::GyroDrift([0.0001, -0.00005, 0.0001]));
+        }
+        let spn = fly_sim_core::controller::hover_setpoint(0.0, 0.0, -5.0);
+        let (mut mr, mut mp, mut dr, mut lp) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for _ in 0..(600.0 / 0.004) as u64 {
+            let st = ctrl.step(&spn);
+            let w = st.att.w as f64; let x = st.att.x as f64; let y = st.att.y as f64;
+            let r = (2.0 * (w * x)).atan2(1.0 - 2.0 * x * x).to_degrees();
+            let p = (2.0 * (w * y)).clamp(-1.0, 1.0).asin().to_degrees();
+            mr = mr.max(r.abs()); mp = mp.max(p.abs()); lp = p;
+            let dn = st.pos[0].0 as f64; let de = st.pos[1].0 as f64;
+            dr = dr.max((dn * dn + de * de).sqrt());
+        }
+        println!("ki={:<5.3} 陀螺零偏={:<5} | {:>9.2}° {:>9.2}° | {:>9.2}m {:>9.2}°", ki, gb, mr, mp, dr, lp);
+    }
+    println!("{}", "-".repeat(62));
+    println!("（sil 判据：末窗口真值 |roll|/|pitch| 峰值 < 10°）");
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
+    assert!(true);
+}
