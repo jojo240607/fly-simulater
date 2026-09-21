@@ -723,6 +723,7 @@ dependencies = [
 name = "flyctrl-core"
 version = "0.1.0"
 dependencies = [
+ "fpmath",
  "libm",
  "mavlink-core",
 ]
@@ -753,6 +754,12 @@ name = "foreign-types-shared"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
+
+[[package]]
+name = "fpmath"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f617488244e3bd5aa86da93efaf4072579a301832ca5a9c7e3493563b509a43d"
 
 [[package]]
 name = "futures-core"
