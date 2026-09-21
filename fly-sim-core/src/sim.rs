@@ -545,6 +545,11 @@ where
         self.ctrl.last_baro_alt()
     }
 
+    /// HIL 模式：最近一次磁力计样本（机体系）。与 SIL 控制律同源。
+    pub fn last_mag(&self) -> [f32; 3] {
+        self.ctrl.last_mag()
+    }
+
     /// 阶段 7+：取引擎世界系（Y-up）真实位姿 (pos xyz, quat wxyz)。绕开 NED 映射，
     /// 供渲染直接使用（渲染世界系与引擎同为 Y-up，仅 z 轴反号）。
     pub fn debug_up(&self) -> ([f64; 3], [f64; 4]) {
