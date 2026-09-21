@@ -575,3 +575,27 @@ fn att_alpha_vs_mag3d_scan() {
     unsafe { flyctrl_core::estimator::ekf::G_MAG3D_ALPHA = 0.0 };
     assert!(true);
 }
+
+/// **B3 劣化归因**：是不是"磁航向锚定在风下把航向钉死"？
+///
+/// 线索：同为 att_alpha=0，F7 接通（磁参考变正确）后 B3 由 3.39m 劣化到 11.20m。
+/// 本测例直接扫 `G_MAG_ALPHA`（磁航向锚定强度）：若降它能把 B3 救回，则归因成立。
+/// 判据：存在 mag_alpha 值使 B3 显著下降，且无风档不劣化。
+#[test]
+fn mag_alpha_attribution_scan() {
+    println!("\nB3 劣化归因：扫磁航向锚定 G_MAG_ALPHA（位置环 60s）");
+    println!("{:>9} | {:>9} {:>9} | {:>9} {:>9} | {:>6}", "mag_a", "无风末态", "无风峰值", "B3末态", "B3峰值", "B3改善");
+    println!("{}", "-".repeat(72));
+    let mut base_b3 = 0.0f64;
+    for &ma in &[-1.0f32, 0.0, 0.01, 0.02, 0.05, 0.1] {
+        unsafe { flyctrl_core::estimator::ekf::G_MAG_ALPHA = ma };
+        let (_r0, _p0, _x, _y, _f0, d0, e0, ..) = run_var_bias(0.0, 60.0, false, 0, 0);
+        let (_r1, _p1, _x2, _y2, _f1, d1, e1, ..) = run_var_bias(5.4, 60.0, false, 0, 0);
+        if ma < 0.0 { base_b3 = e1; }
+        println!("{:>9.3} | {:>8.2}m {:>8.2}m | {:>8.2}m {:>8.2}m | {:>5.2}x", ma, e0, d0, e1, d1, if base_b3 > 0.0 { base_b3 / e1.max(1e-6) } else { 0.0 });
+    }
+    println!("{}", "-".repeat(72));
+    println!("（-1 = 用编译期值 0.05；B3改善 = 基线B3 / 本行B3，>1 表示改善）");
+    unsafe { flyctrl_core::estimator::ekf::G_MAG_ALPHA = -1.0 };
+    assert!(true);
+}
