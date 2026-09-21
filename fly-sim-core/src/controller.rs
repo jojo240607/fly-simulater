@@ -295,6 +295,22 @@ where
         // 否则 GPS/气压首次校正前 PID 看到 ~5m 位置误差全油门弹射（见 PLAN 阶段 11-A）。
         // 注意：此处需与 `QuadrotorPlant::new_at` 的初始位置保持一一对应。
         ekf.set_initial_position(pos_ned);
+        // 阶段 2：注入阻力加速度系数 k = 0.5·ρ·Cd/m，启用水平风观测器。
+        // 参数与 `plant.rs::aero_drag_body` 同源（同一 VehicleConfig 字段）。
+        // 风估计用于把"模型化阻力"从比力中扣掉，使重力锚定在湍流风下不被污染。
+        // ⚠️ **默认关闭**（纪律：默认可关、既有行为逐位不变）。启用方式见下：
+        // `ZZ_DRAG_K=1` 时按 VehicleConfig 注入；否则 drag_k=0 ⇒ 风观测器完全不执行、
+        // 且 `wind_est` 恒为 0 ⇒ 与未加阶段 2 时逐位一致。
+        // （阶段 2.3 的"锚定比力扣减"尚未实现，故当前即使开启也只是把估计算出来、
+        //   并无消费者；开启是为了先用数据验证估计本身的收敛性。）
+        if std::env::var("ZZ_DRAG_K").is_ok() {
+            let rho = cfg.air_density as f32;
+            let cd_h = cfg.drag_coeff[0];
+            let m = cfg.mass;
+            if m > 1e-6 {
+                ekf.set_drag_k(0.5 * rho * cd_h / m);
+            }
+        }
         // 磁偏角注入：plant 磁力计的世界地磁按 sensor_cfg.mag_decl_deg 旋转（磁北），
         // EKF 参考地磁方向同步该偏角 → 磁航向锚定对准【地理北】（与固件侧 decl 修正一致）。
         ekf.set_mag_declination(sensor_cfg.mag_decl_deg as f32);

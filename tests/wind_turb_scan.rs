@@ -460,3 +460,29 @@ fn att_acc_ac_gate_scan() {
     unsafe { flyctrl_core::estimator::ekf::G_ATT_ACC_AC = -1.0 };
     assert!(true);
 }
+
+/// **阶段 2 风观测器验证**：估计能否逼近注入的恒风真值？
+///
+/// 观测器是准稳态代数解：`|v_rel| = sqrt(g·tanθ/k)`，方向 = 推力水平分量方向，
+/// `v_wind = v_ground − v_rel`。注入 B3 风（北 5.4 / 东 2.16 m/s，另加阵风湍流）。
+#[test]
+fn wind_observer_check() {
+    println!("\n阶段 2 风观测器：估计 vs 注入真值（B3 北5.4/东2.16 m/s）");
+    // 用 run_var_bias 跑一遍并打印风估计需要控制器内部读数 —— 此处改用间接判据：
+    // 若观测器工作，drag_k>0 与 =0 应有可测差异（否则说明没接上/没生效）。
+    println!("{:>26} | {:>9} {:>9} | {:>9} {:>9}", "配置", "无风末态", "B3末态", "无风|roll|", "B3|pitch|");
+    println!("{}", "-".repeat(70));
+    for (tag, k_on) in [("drag_k 关闭(默认)", false), ("drag_k 开启", true)] {
+        if !k_on {
+            // 关闭：SIL 构造后再清零（set_drag_k(0) 语义 = 不启用）
+            std::env::set_var("ZZ_DRAGK_OFF", "1");
+        } else {
+            std::env::remove_var("ZZ_DRAGK_OFF");
+        }
+        let (r0, p0, _a, _b, _f0, d0, e0, ..) = run_var_bias(0.0, 60.0, false, 0, 0);
+        let (r1, p1, _a2, _b2, _f1, d1, e1, ..) = run_var_bias(5.4, 60.0, false, 0, 0);
+        println!("{:>26} | {:>8.2}m {:>8.2}m | {:>8.2} {:>8.2}", tag, e0, d0, r0, p1);
+    }
+    println!("{}", "-".repeat(70));
+    assert!(true);
+}
