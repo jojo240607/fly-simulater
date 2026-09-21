@@ -87,6 +87,17 @@ fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool) {
 
 #[test]
 fn wind_turb_scan_all() {
+    // 同口径旋钮：H 场与 M 场用**同一个**环境变量控制 `mag_alpha`，使"两端关磁锚"
+    // 的对照实验两侧配置一致（M 场经 apply_env_calib 写固件的 G_MAG_ALPHA）。
+    // 哨兵：-1 = 用编译期值（默认 0.05）；0 = 显式关闭磁锚定。
+    let mut mag_alpha = -1.0f32;
+    if let Ok(v) = std::env::var("ZZ_MAG_ALPHA") {
+        if let Ok(t) = v.parse::<f32>() {
+            mag_alpha = t;
+            unsafe { flyctrl_core::estimator::ekf::G_MAG_ALPHA = t };
+        }
+    }
+    println!("\n[knob] G_MAG_ALPHA = {mag_alpha}（-1 = 编译期默认 0.05；0 = 关闭磁锚定）");
     let speeds = [0.0f64, 1.0, 2.0, 2.5, 3.0, 4.0];
     for &(label, rm) in &[
         ("位置环开启（step/自主设定点路径，H 场既有口径）", false),
