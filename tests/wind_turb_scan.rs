@@ -431,3 +431,32 @@ fn att_acc_gate_scan() {
     unsafe { flyctrl_core::estimator::ekf::G_ATT_ACC_GATE = -1.0 };
     assert!(true);
 }
+
+/// **交流能量门控扫描**：用 a_h 的**交流幅度**（而非瞬时值/均值）调锚定增益。
+///
+/// 依据：扰动是零均值交流 ⇒ 瞬时值抖（前一轮实测 2.0 阈值处无风档 88.73m）、
+/// 均值≈0 抓不住。故改用 `a_h` 的 EMA 绝对偏差（一阶包络）作门控信号。
+/// 目标：无风档 ≤3m（拿陀螺零偏抑制收益）**且** B3 档回到 ≤3.4m（修复前水平）。
+#[test]
+fn att_acc_ac_gate_scan() {
+    println!("\n交流能量门控扫描（位置环 60s；阈值<=0 = 关闭；瞬时门控置 0 隔离本项）");
+    println!(
+        "{:>8} | {:>9} {:>9} | {:>9} {:>9} | {:>9} {:>9}",
+        "阈值", "无风末态", "无风峰值", "B3末态", "B3峰值", "无风|roll|", "B3|pitch|"
+    );
+    println!("{}", "-".repeat(78));
+    unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = 0.0 };
+    unsafe { flyctrl_core::estimator::ekf::G_ATT_ACC_GATE = 0.0 }; // 瞬时门控关，隔离
+    for &g in &[0.0f32, 0.1, 0.2, 0.4, 0.8, 1.5, 3.0] {
+        unsafe { flyctrl_core::estimator::ekf::G_ATT_ACC_AC = g };
+        let (r0, p0, _a, _b, _f0, d0, e0, ..) = run_var_bias(0.0, 60.0, false, 0, 0);
+        let (r1, p1, _a2, _b2, _f1, d1, e1, ..) = run_var_bias(5.4, 60.0, false, 0, 0);
+        println!(
+            "{:>8.1} | {:>8.2}m {:>8.2}m | {:>8.2}m {:>8.2}m | {:>8.2} {:>8.2}",
+            g, e0, d0, e1, d1, r0, p1
+        );
+    }
+    println!("{}", "-".repeat(78));
+    unsafe { flyctrl_core::estimator::ekf::G_ATT_ACC_AC = -1.0 };
+    assert!(true);
+}
