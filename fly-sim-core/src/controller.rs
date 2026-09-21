@@ -671,12 +671,30 @@ where
         // 2) 模式治理：RC 模式开关槽位 → 目标模式（0/1/2/3/4/5 = 手动/增稳/
         //    定高/定点/返航/降落；6 位档位开关）。
         //    经合法性校验后生效；健康恶化主动降级；`self.mode` 与治理器保持同步。
-        // ⚠️ 改用**唯一真源** `flightmode::mode_from_rc_switch`（2026-09-21）：
-        // 原先此处按 6 位槽位解释 `rc.mode`，而固件 SBUS 驱动只解析 **3 位**
-        // （`sbus.rs`：ch[5] <600→0 / <1400→1 / 其余→2）⇒ 同一个 `rc.mode=1`
-        // 在两边含义不同（此处曾是 Stabilize，固件本意是 ALT_HOLD）。
-        // 两边模式语义不一致，H 场的模式相关结论就无法作为 M 场验收依据。
-        let target = flyctrl_core::flightmode::mode_from_rc_switch(rc.mode);
+        // ⚠️ **两场的"模式开关"是不同的硬件，语义本就不同**（2026-09-21 定案）：
+        //
+        // - **SIL（此处）**：模拟 **6 位档位开关**，`slot 0 = Manual`（无估计直通，
+        //   是 SIL 独有的测试能力：可用于"绕过估计器"的对照实验）；
+        // - **固件**：SBUS `ch[5]` 是 **3 位开关**（`sbus.rs`：<600→0 / <1400→1 /
+        //   其余→2），最低档映射 `COPTER_MODE_STABILIZE`，**固件没有 Manual 档**。
+        //
+        // 曾一度用 `flightmode::mode_from_rc_switch` 把两边"统一"（按固件口径），
+        // 代价是**打断了 SIL 的 `slot 0 = Manual` 约定**、`rc_modes` 两项失败。
+        // **结论：这不是不一致，而是两个不同的开关模型。** "输入等价"要统一的是
+        // **被测输入**（传感器/风场/硬铁），不是**模式枚举表** —— 强统会丢掉
+        // "无估计直通"这一测试能力。
+        //
+        // 若将来确实要求两边模式语义一致，正确做法是在**固件侧**也支持 Manual 档
+        // （而不是在 SIL 侧砍掉它）—— 属项目决策。
+        let slots: [FlightMode; 6] = [
+            FlightMode::Manual,
+            FlightMode::Stabilize,
+            FlightMode::Altitude,
+            FlightMode::Position,
+            FlightMode::Rtl,
+            FlightMode::Land,
+        ];
+        let target = slots[(rc.mode as usize).min(slots.len() - 1)];
         let ctx = ModeContext::new(self.armed, self.health(), self.gps.healthy());
         self.mode_gov.request(target, &ctx);
         self.mode_gov.degrade_on_health(&ctx);
