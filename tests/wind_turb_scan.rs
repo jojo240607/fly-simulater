@@ -623,3 +623,46 @@ fn tilt_max_attribution_scan() {
     unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
     assert!(true);
 }
+
+/// **极限环定位**：零噪声下姿态摆幅 vs 重力锚定强度 `att_alpha`。
+///
+/// 线索（来自两项红的实际失败信息）：**零噪声**下悬停真值姿态峰值达 **15°**（要求 <10°）
+/// —— 零噪声下还有 15° 摆幅 ⇒ **不是漂移而是振荡/极限环**：
+/// 锚定修正姿态 → 位置环响应 → 反过来激励姿态（闭环自激）。
+/// 本测例用确定性（零噪声、无风）环境扫 `G_ATT_ALPHA`，看摆幅是否随它增长
+/// —— 若是，则极限环确由锚定驱动，并能找到"摆幅 <10° 的增益上限"。
+#[test]
+fn att_alpha_limit_cycle_probe() {
+    println!("\n极限环定位：零噪声无风悬停，姿态峰值 vs G_ATT_ALPHA（60s）");
+    println!("{:>9} | {:>10} {:>10} | {:>10} {:>10}", "att_alpha", "max|roll|", "max|pitch|", "末|roll|", "末|pitch|");
+    println!("{}", "-".repeat(60));
+    for &aa in &[0.0f32, 0.005, 0.01, 0.02, 0.04, 0.08] {
+        unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = aa };
+        // 零噪声 + 无风：确定性
+        let cfg = fly_simulater::airframe::load_airframe(None).expect("airframe");
+        let mut ctrl = fly_sim_core::controller::FlyController::new(
+            fly_sim_core::physics::PhySdkWorld::create_empty(),
+            &cfg,
+            0.004,
+            None,
+            fly_sim_core::sensor::SensorConfig::default(), // 零噪声
+            fly_sim_core::controller::ControllerKind::Pid,
+            Some(fly_sim_core::physics::ContactModel::default()),
+            Vec::new(),
+        );
+        let spn = fly_sim_core::controller::hover_setpoint(0.0, 0.0, -5.0);
+        let (mut mr, mut mp, mut lr, mut lp) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for _ in 0..(60.0 / 0.004) as u64 {
+            let st = ctrl.step(&spn);
+            let w = st.att.w as f64; let x = st.att.x as f64; let y = st.att.y as f64;
+            let r = (2.0 * (w * x)).atan2(1.0 - 2.0 * x * x).to_degrees();
+            let p = (2.0 * (w * y)).clamp(-1.0, 1.0).asin().to_degrees();
+            mr = mr.max(r.abs()); mp = mp.max(p.abs()); lr = r; lp = p;
+        }
+        println!("{:>9.3} | {:>9.2}° {:>9.2}° | {:>9.2}° {:>9.2}°", aa, mr, mp, lr, lp);
+    }
+    println!("{}", "-".repeat(60));
+    println!("（两项红的要求：零噪声下真值 |roll|/|pitch| 峰值 < 10°）");
+    unsafe { flyctrl_core::estimator::ekf::G_ATT_ALPHA = -1.0 };
+    assert!(true);
+}
