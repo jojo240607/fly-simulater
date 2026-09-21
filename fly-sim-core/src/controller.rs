@@ -705,6 +705,38 @@ where
             FlightMode::Land => 5,
             FlightMode::Mission => 6,
         };
+        // 与**固件同口径**的水平位置环开关。
+        //
+        // 固件 `flyctrl/app/src/flyctrl/control.rs:234`：
+        //   let rate_mode = matches!(cmd_mode, COPTER_MODE_STABILIZE | COPTER_MODE_ALT_HOLD);
+        //   hil.ctrl.set_rate_mode_xy(rate_mode);
+        // 即 **STABILIZE / ALT_HOLD 下水平位置环被旁路**（期望速度 = 摇杆直通）。
+        // 本仓库的模式枚举对应：Stabilize -> STABILIZE、Altitude -> ALT_HOLD。
+        //
+        // ⚠️ 历史：本函数原先只映射模式号、**从不设置 rate_mode_xy**，于是 SIL 侧
+        // 永远跑「位置环开启」，而固件解锁后默认进 ALT_HOLD 是「位置环旁路」
+        // —— 两场测的不是同一个控制律（实测同一风场下 max|pitch| 差 7.6 倍）。
+        // 现按固件口径补齐。仅 `step_rc` 路径调用本函数，故 `step`（自主设定点）
+        // 路径行为不变，既有判据不受影响。
+        let rate_mode = matches!(
+            self.mode_gov.mode(),
+            FlightMode::Stabilize | FlightMode::Altitude
+        );
+        self.set_rate_mode_xy(rate_mode);
+    }
+
+    /// 设置水平速率模式（位置外环旁路，期望速度 = 设定点速度）。
+    ///
+    /// 暴露出来是为了让测试能**显式选择控制律**：固件解锁后默认进 ALT_HOLD，
+    /// 此时位置环是被旁路的；而 `step()`（自主设定点）路径默认位置环开启。
+    /// 两者是不同的控制律，判据不可互相套用。
+    pub fn set_rate_mode_xy(&mut self, on: bool) {
+        match &mut self.hil {
+            CtrlVariant::Pid(h) => h.ctrl.inner_mut().set_rate_mode_xy(on),
+            CtrlVariant::Indi(h) => h.ctrl.inner_mut().set_rate_mode_xy(on),
+            // LQR/TECS 的内层不是 PidController，无此旋钮：显式忽略而非静默。
+            CtrlVariant::Lqr(_) | CtrlVariant::Tecs(_) => {}
+        }
     }
 
     /// 推模式第一步：采集当帧传感器样本并写入传感器 trait。

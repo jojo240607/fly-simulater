@@ -34,7 +34,7 @@ fn rp_deg(w: f32, x: f32, y: f32) -> (f64, f64) {
 }
 
 /// 跑一趟：全程 max|roll|/max|pitch| + 后段（>10s）稳态 max（区分启动瞬态与持续失稳）。
-fn run(speed: f64, secs: f64) -> (f64, f64, f64, f64, bool) {
+fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool) {
     let cfg = load_airframe(None).expect("default airframe");
     // **逐字复刻 `x_hover_env` 的风场**，只把 base 北向风速参数化（东向按 2.5:1.0 同比）。
     let wind = Some(WindField::new(WindConfig {
@@ -61,6 +61,9 @@ fn run(speed: f64, secs: f64) -> (f64, f64, f64, f64, bool) {
     );
     ctrl.inject_sensor_fault(SensorFault::GyroDrift([0.0001, -0.00005, 0.0001]));
     ctrl.inject_sensor_fault(SensorFault::AccelDrift([0.0002, 0.0, 0.0002]));
+    // 控制律选择：固件解锁后默认 ALT_HOLD ⇒ rate_mode_xy=true（位置环旁路）；
+    // `step()` 路径默认 false（位置环开启）。两者判据不可互相套用。
+    ctrl.set_rate_mode_xy(rate_mode);
     let sp = hover_setpoint(0.0, 0.0, -5.0);
     let total = (secs / DT) as u64;
     let steady_from = (10.0 / DT) as u64;
@@ -85,18 +88,26 @@ fn run(speed: f64, secs: f64) -> (f64, f64, f64, f64, bool) {
 #[test]
 fn wind_turb_scan_all() {
     let speeds = [0.0f64, 1.0, 2.0, 2.5, 3.0, 4.0];
-    println!("\n复刻 x_hover_env 风场（阵风 1.2m/s@0.12Hz + Dryden 湍流固定注入），只变 base 恒风");
-    println!("{:>7} | {:>10} | {:>10} | {:>12} | {:>12} | {:>6}", "base", "max|roll|", "max|pitch|", "稳态roll(>10s)", "稳态pitch", "finite");
-    println!("{}", "-".repeat(74));
-    for &v in speeds.iter() {
-        let (mr, mp, sr, sp_, fin) = run(v, 40.0);
+    for &(label, rm) in &[
+        ("位置环开启（step/自主设定点路径，H 场既有口径）", false),
+        ("rate_mode_xy=true（固件 ALT_HOLD 口径，M 场 x_hover_env 实际在跑的）", true),
+    ] {
+        println!("\n=== {label} ===");
+        println!("复刻 x_hover_env 风场（阵风 1.2m/s@0.12Hz + Dryden 湍流固定注入），只变 base 恒风");
         println!(
-            "{:>7.1} | {:>10.2} | {:>10.2} | {:>12.2} | {:>12.2} | {:>6}",
-            v, mr, mp, sr, sp_, if fin { "yes" } else { "NO" }
+            "{:>7} | {:>10} | {:>10} | {:>12} | {:>12} | {:>6}",
+            "base", "max|roll|", "max|pitch|", "稳态roll(>10s)", "稳态pitch", "finite"
         );
+        println!("{}", "-".repeat(74));
+        for &v in speeds.iter() {
+            let (mr, mp, sr, sp_, fin) = run(v, 40.0, rm);
+            println!(
+                "{:>7.1} | {:>10.2} | {:>10.2} | {:>12.2} | {:>12.2} | {:>6}",
+                v, mr, mp, sr, sp_, if fin { "yes" } else { "NO" }
+            );
+        }
     }
-    println!("{}", "-".repeat(74));
-    println!("（M 场 x_hover_env 的判据：max|roll| 与 max|pitch| 均 < 25°；其配置为 base=2.5）\n");
+    println!("\n（M 场 x_hover_env 的判据：max|roll| 与 max|pitch| 均 < 25°；其配置为 base=2.5）");
     // 只打印量化对比，不作通过性断言。
     assert!(true);
 }
