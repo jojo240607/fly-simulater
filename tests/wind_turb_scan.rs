@@ -35,6 +35,11 @@ fn rp_deg(w: f32, x: f32, y: f32) -> (f64, f64) {
 
 /// 跑一趟：全程 max|roll|/max|pitch| + 后段（>10s）稳态 max（区分启动瞬态与持续失稳）。
 fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64, f64) {
+    run_var(speed, secs, rate_mode, 0)
+}
+
+/// `var` 风场变体：0=完整(北+东) 1=仅北(东置零) 2=仅东(北置零) 3=无恒风(留阵风+湍流)
+fn run_var(speed: f64, secs: f64, rate_mode: bool, var: u8) -> (f64, f64, f64, f64, bool, f64, f64) {
     let cfg = load_airframe(None).expect("default airframe");
     // **逐字复刻 `x_hover_env` 的风场**，只把 base 北向风速参数化（东向按 2.5:1.0 同比）。
     // **引用唯一真源** `WindConfig::beaufort3()`，只把 base 风速参数化以扫能力曲线。
@@ -43,6 +48,12 @@ fn run(speed: f64, secs: f64, rate_mode: bool) -> (f64, f64, f64, f64, bool, f64
     let mut w = WindConfig::beaufort3();
     let dir = if w.base[0].abs() > 1e-9 { w.base[2] / w.base[0] } else { 0.0 };
     w.base = [speed, 0.0, dir * speed];
+    match var {
+        1 => w.base[2] = 0.0,          // 仅北风
+        2 => w.base[0] = 0.0,          // 仅东风
+        3 => { w.base = [0.0, 0.0, 0.0]; } // 无恒风（阵风/湍流仍在）
+        _ => {}
+    }
     let wind = Some(WindField::new(w));
     let mut ctrl = FlyController::new(
         PhySdkWorld::create_empty(),
@@ -226,4 +237,31 @@ fn attitude_is_physically_justified_at_beaufort3() {
         mr / roll_need
     );
     assert!(true); // 只做量化对照，不作通过性断言
+}
+
+/// **东轴多余倾角的分离实验**：滚转到底是"风驱动的"还是"内部不对称"？
+///
+/// 背景：完整 B3 风（北 5.4 + 东 2.16 m/s）下实测 max|roll|=6.68°，而按阻力平衡
+/// 东分量只该要 2.50°（2.67 倍）。本测例把风场拆开，直接判定来源：
+/// - 仅北风（东置零）后滚转若**仍在** ⇒ 与东向风无关 ⇒ **内部不对称**（控制/混控/估计）；
+/// - 仅北风后滚转**消失** ⇒ 确实是东向风驱动 ⇒ 说明阻力模型或我的换算低估了。
+#[test]
+fn east_roll_separation_at_beaufort3() {
+    println!("\n东轴分离实验（位置环，60s）：拆开风场看滚转从哪来");
+    println!(
+        "{:>22} | {:>10} | {:>10} | {:>10}",
+        "风场变体", "max|roll|", "max|pitch|", "末态漂移"
+    );
+    println!("{}", "-".repeat(62));
+    for (tag, v) in [
+        ("完整 B3（北5.4+东2.16）", 0u8),
+        ("仅北风（东置零）", 1),
+        ("仅东风（北置零）", 2),
+        ("无恒风（留阵风湍流）", 3),
+    ] {
+        let (mr, mp, _sr, _sp, _fin, _dr, de) = run_var(5.4, 60.0, false, v);
+        println!("{:>22} | {:>10.2} | {:>10.2} | {:>9.2}m", tag, mr, mp, de);
+    }
+    println!("{}", "-".repeat(62));
+    assert!(true);
 }
