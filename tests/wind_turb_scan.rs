@@ -688,13 +688,20 @@ fn slow_mode_vs_ki_xy_probe() {
             fly_sim_core::controller::ControllerKind::Pid,
             Some(fly_sim_core::physics::ContactModel::default()), Vec::new(),
         );
+        // ⚠️ **与 sil 的关键差别**：sil 用 `set_gps_throttle(8)`（GPS 31Hz），
+        // 原先本探针用默认 ⇒ 复现不出 sil 的 15°。此处对齐。
+        ctrl.set_gps_throttle(8);
         if gb {
             ctrl.inject_sensor_fault(fly_sim_core::sensor::SensorFault::GyroDrift([0.0001, -0.00005, 0.0001]));
         }
         let spn = fly_sim_core::controller::hover_setpoint(0.0, 0.0, -5.0);
         let (mut mr, mut mp, mut dr, mut lp) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
         for _ in 0..(600.0 / 0.004) as u64 {
-            let st = ctrl.step(&spn);
+            let _est = ctrl.step(&spn);
+            // ⚠️ **必须读 `world_state()`（真值）**：`step()` 返回的是【估计】。
+            // 这是本探针此前三次"复现不出 sil 的 15°"的根因 —— 一直在测那个被
+            // 重力锚定钉在 ~0 的估计量，而不是真值（sil 的判据用的正是真值）。
+            let st = ctrl.world_state();
             let w = st.att.w as f64; let x = st.att.x as f64; let y = st.att.y as f64;
             let r = (2.0 * (w * x)).atan2(1.0 - 2.0 * x * x).to_degrees();
             let p = (2.0 * (w * y)).clamp(-1.0, 1.0).asin().to_degrees();
