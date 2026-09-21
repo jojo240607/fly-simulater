@@ -294,3 +294,31 @@ fn drift_anomaly_probe() {
     unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
     assert!(true);
 }
+
+/// **水平速度低通（`vel_lpf_h_tau` A/B）**：能否界住"零均值扰动下的无界游走"？
+///
+/// 诊断依据：水平位置/速度此前**无任何低通**直驱倾角指令（垂向一直有）。
+/// 签名：无恒风时漂移**峰值≡末态**（60s 仍在增长 = 无界游走）；有恒风时峰值在
+/// 中途（有界）。故本扫描同时看两档，并用"峰值/末态"比判断是否仍有增长趋势。
+/// 另记姿态（低通的代价不只是相位滞后，还可能改变摆幅）。
+#[test]
+fn vel_lpf_h_tau_scan() {
+    println!("\n水平速度低通 tau 扫描（位置环，60s；峰值/末态比 -> 1 表示仍在增长）");
+    println!(
+        "{:>7} | {:>9} {:>9} {:>6} | {:>9} {:>9} {:>6} | {:>9} {:>9}",
+        "tau", "无风峰值", "无风末态", "比", "B3峰值", "B3末态", "比", "无风|roll|", "B3|roll|"
+    );
+    println!("{}", "-".repeat(92));
+    for &tau in &[0.0f32, 0.02, 0.05, 0.10, 0.20, 0.40] {
+        unsafe { flyctrl_core::controller::pid::G_VEL_LPF_H_TAU = tau };
+        let (r0, _p0, _a, _b, _f0, d0, e0) = run_var(0.0, 60.0, false, 0);
+        let (r1, _p1, _a2, _b2, _f1, d1, e1) = run_var(5.4, 60.0, false, 0);
+        println!(
+            "{:>7.2} | {:>8.2}m {:>8.2}m {:>5.2} | {:>8.2}m {:>8.2}m {:>5.2} | {:>8.2} {:>8.2}",
+            tau, d0, e0, d0 / e0.max(1e-6), d1, e1, d1 / e1.max(1e-6), r0, r1
+        );
+    }
+    println!("{}", "-".repeat(92));
+    unsafe { flyctrl_core::controller::pid::G_VEL_LPF_H_TAU = -1.0 };
+    assert!(true);
+}
