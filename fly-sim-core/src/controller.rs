@@ -303,6 +303,26 @@ where
         // 且 `wind_est` 恒为 0 ⇒ 与未加阶段 2 时逐位一致。
         // （阶段 2.3 的"锚定比力扣减"尚未实现，故当前即使开启也只是把估计算出来、
         //   并无消费者；开启是为了先用数据验证估计本身的收敛性。）
+        // ---- F7 使用约定：把仿真注入的硬铁告诉 EKF ----
+        //
+        // `SensorConfig::realistic()` 会给磁力计注入硬铁偏置（`mag_hard_iron`，
+        // 默认 `[0.3,-0.2,0.4]`）。而估计器默认 `mag_hard_iron=[0;3]`（视为已标定）
+        // ⇒ **磁场矢量与估计器的假设不一致**。
+        //
+        // 危害（已量化）：|B|=0.640、|h|=0.539 ⇒ |h|/|B|=0.84 ⇒ 磁场方向偏差最大
+        // `atan(0.84)=40.1°`（最坏；取决于朝向不可预测）。这使得**磁参考无法用于
+        // 修正 roll/pitch**（只能用水平分量修 yaw，且仍有畸变）—— 即"磁参考全姿态"
+        // 路线的前置条件。
+        //
+        // 修法：仿真侧注入了多少硬铁，就同步告诉估计器多少（离线标定语义）。
+        // 注：部分测试原本**手工**调用 `set_mag_hard_iron`；本处为 setter 语义（非累加），
+        // 故手工传入同值时不会重复补偿。
+        ekf.set_mag_hard_iron([
+            sensor_cfg.mag_hard_iron[0] as f32,
+            sensor_cfg.mag_hard_iron[1] as f32,
+            sensor_cfg.mag_hard_iron[2] as f32,
+        ]);
+
         if std::env::var("ZZ_DRAG_K").is_ok() {
             let rho = cfg.air_density as f32;
             let cd_h = cfg.drag_coeff[0];
