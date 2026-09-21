@@ -265,3 +265,32 @@ fn east_roll_separation_at_beaufort3() {
     println!("{}", "-".repeat(62));
     assert!(true);
 }
+
+/// **"扰动越少漂移越大"的反常追查**。
+///
+/// 假设：恒风给出**直流扰动**（积分可消除）⇒ 残差只剩波动；无恒风时扰动是
+/// **纯交流**（阵风+湍流）⇒ 积分消不掉零均值扰动，反而可能**注入自身动态去放大它**。
+/// 若假设成立，则：**关掉积分（ki_xy=0）应让"无恒风"一档的漂移变小**（而带恒风的
+/// 那档应变大）—— 这是一条可否证的判据，不是解释性说辞。
+#[test]
+fn drift_anomaly_probe() {
+    println!("\n反常追查：恒风扫描 + 积分开关对照（位置环，60s）");
+    println!(
+        "{:>7} | {:>11} | {:>11} | {:>11} | {:>11}",
+        "base风", "ki=0峰值", "ki=0末态", "ki=0.1峰值", "ki=0.1末态"
+    );
+    println!("{}", "-".repeat(66));
+    for &v in &[0.0f64, 0.5, 1.0, 2.0, 3.4, 5.4] {
+        unsafe { flyctrl_core::controller::pid::G_KI_XY = 0.0 };
+        let (_r0, _p0, _a, _b, _f0, d0, e0) = run_var(v, 60.0, false, 0);
+        unsafe { flyctrl_core::controller::pid::G_KI_XY = 0.10 };
+        let (_r1, _p1, _a2, _b2, _f1, d1, e1) = run_var(v, 60.0, false, 0);
+        println!(
+            "{:>7.1} | {:>10.2}m | {:>10.2}m | {:>10.2}m | {:>10.2}m",
+            v, d0, e0, d1, e1
+        );
+    }
+    println!("{}", "-".repeat(66));
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
+    assert!(true);
+}
