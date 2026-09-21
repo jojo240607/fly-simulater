@@ -290,7 +290,7 @@ where
         // 0.02），而不是靠 SIL 侧调成 0.0 藏起来。
         //
         // 注：本处其余参数（q_vel 等）与 default_quad 仍有差异，属另案。
-        let mut ekf = EkfEstimator::new(0.02, 0.05, 0.05, 1e-5, 5e-4, 0.5, 0.3, 0.3);
+        let mut ekf = EkfEstimator::new(0.005, 0.05, 0.05, 1e-5, 5e-4, 0.5, 0.3, 0.3);
         // 阶段 11-A：EKF 初始位置估计必须与机体真实初始位置一致（NED），
         // 否则 GPS/气压首次校正前 PID 看到 ~5m 位置误差全油门弹射（见 PLAN 阶段 11-A）。
         // 注意：此处需与 `QuadrotorPlant::new_at` 的初始位置保持一一对应。
