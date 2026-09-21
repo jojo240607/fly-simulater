@@ -400,3 +400,34 @@ fn gyro_bias_estimation_scan() {
     unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = 0.0 };
     assert!(true);
 }
+
+/// **水平加速度门控阈值扫描**：能否同时拿到"无风不漂"与"有风不劣化"？
+///
+/// 背景：att_alpha 统一到 0.02 后，无风档 9.36m -> 3.12m（受益），但 B3 档
+/// 3.39m -> 19.22m（劣化，且连带 4 项测试失败）。原因是锚定的前提"比力=重力"
+/// 在水平加速（阵风/湍流/机动）时不成立，而**原有三个门控都看不出来**
+/// （稳态抗风时幅值仍=g、方向仍竖直、|ω| 仍小）。
+/// 新增第四个门控：`a_h = |R·a| 水平分量`（世界系非重力水平加速度）。
+/// 本扫描找"无风也好、有风也好"的阈值。阈值 <=0 表示门控关闭（= 修复前行为）。
+#[test]
+fn att_acc_gate_scan() {
+    println!("\n水平加速度门控阈值扫描（位置环 60s；阈值<=0 = 门控关闭，即修复前）");
+    println!(
+        "{:>8} | {:>9} {:>9} | {:>9} {:>9} | {:>9} {:>9}",
+        "阈值", "无风末态", "无风峰值", "B3末态", "B3峰值", "无风|roll|", "B3|pitch|"
+    );
+    println!("{}", "-".repeat(78));
+    unsafe { flyctrl_core::estimator::ekf::G_GYRO_BIAS_K = 0.0 };
+    for &g in &[0.0f32, 5.0, 3.0, 2.0, 1.5, 1.0, 0.5] {
+        unsafe { flyctrl_core::estimator::ekf::G_ATT_ACC_GATE = g };
+        let (r0, p0, _a, _b, _f0, d0, e0, ..) = run_var_bias(0.0, 60.0, false, 0, 0);
+        let (r1, p1, _a2, _b2, _f1, d1, e1, ..) = run_var_bias(5.4, 60.0, false, 0, 0);
+        println!(
+            "{:>8.1} | {:>8.2}m {:>8.2}m | {:>8.2}m {:>8.2}m | {:>8.2} {:>8.2}",
+            g, e0, d0, e1, d1, r0, p1
+        );
+    }
+    println!("{}", "-".repeat(78));
+    unsafe { flyctrl_core::estimator::ekf::G_ATT_ACC_GATE = -1.0 };
+    assert!(true);
+}
