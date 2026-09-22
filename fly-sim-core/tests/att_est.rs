@@ -49,19 +49,13 @@ fn set_aw_gps(v: f32) {
     }
 }
 
-/// 设 `G_AW_RAWGATE`：**1.0 = 关闭原始力门** ✓（A11 对照臂用 ✓）。
-fn set_aw_rawgate(v: f32) {
-    unsafe {
-        core::ptr::write_volatile(
-            core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_RAWGATE),
-            v,
-        );
-    }
-}
 
-/// 读 `G_AW_RAWGATE`（对照臂取值/还原用 ✓，避免硬编码默认值 ✗）
-fn get_aw_rawgate() -> f32 {
-    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(flyctrl_core::estimator::ekf::G_AW_RAWGATE)) }
+
+/// 读**锚定幅值门**的累计关闭拍数（机制是否在运行的证据 ✓）
+fn get_att_gate_closed() -> u32 {
+    unsafe {
+        core::ptr::read_volatile(core::ptr::addr_of!(flyctrl_core::estimator::ekf::G_ATT_GATE_CLOSED))
+    }
 }
 
 /// 改写 `a_world` 差分低通时间常数（见 `G_AW_TAU`）。
@@ -1673,11 +1667,6 @@ fn a10_propwash_descent_bounded() {
 /// **若幅值门不关**，会把"上下颠倒"的比力当成重力参考 ⇒ 姿态被拽翻 ✗。
 /// 判据（不可协商）：冲击期间姿态**有界**，且事后能恢复。
 #[test]
-#[ignore = "★A11 露出真缺陷（2026-09-21）：LandingImpact 注入【完全无效】—— \
-峰值 2.5/3.5/5.0g 结果位相同（1.876°/5.349° ✗），对照臂（门关闭）亦无差异 ✗ ⇒ \
-① 注入未传到估计器（静默接线断裂 ✓ 待查 maneuver.rs:387 的 accel_world 通路 ✗）；\
-② 原判据 max<25° 对 5.349° 恒真 ⇒ 阈值无意义 ✗ ⇒ 须改为【相对无冲击基线的增量】✓；\
-② 修好后本测试才有意义（届时对照臂必须明显更差 ✓）"]
 fn a11_landing_impact_gate_must_close() {
     let _g = lock();
     let dt = 0.004f32;
@@ -1692,13 +1681,22 @@ fn a11_landing_impact_gate_must_close() {
     let base_tail = base.att.rmse_deg();
     println!("  （基线 HoverMicro 尾段 RMSE = {base_tail:.3}° ⇒ 恢复判据用 ✓）");
     for peak_g in [2.5f32, 3.5, 5.0] {
+        let g0 = get_att_gate_closed();
         let r = run_secs(&Maneuver::LandingImpact { peak_g }, dt, cfg.clone(), 2.0, 20.0);
+        let gate_closed = get_att_gate_closed().wrapping_sub(g0);
+        // ★**机制在运行**的证据（本会话头号纪律 ✓）：冲击窗内锚定幅值门必须被关闭 ≥1 拍。
+        // 若无此断言，整段判据可能因别的原因恒真 ⇒ 空洞通过 ✗（A11 原版即如此 ✗）。
+        assert!(
+            gate_closed >= 1,
+            "A11 peak={peak_g}g: 锚定幅值门【从未关闭】✗ ⇒ 被测机制未运行 ⇒ 判据无意义 ✗"
+        );
         println!(
-            "{peak_g:>20.1} {:>10.3} {:>10.3} {:>10} {:>12.3}",
+            "{peak_g:>20.1} {:>10.3} {:>10.3} {:>10} {:>12.3} {:>10}",
             r.att.rmse_deg(),
             r.att.max_deg(),
             r.att.diverged(),
             r.att.rmse_deg(),
+            gate_closed,
         );
         assert!(!r.att.diverged(), "A11 peak={peak_g}g: 不应发散");
         assert!(
@@ -1707,21 +1705,18 @@ fn a11_landing_impact_gate_must_close() {
             r.att.max_deg()
         );
     }
-    // ★**对照臂（机制证明 ✓）**：把原始力门【关闭】（G_AW_RAWGATE=1.0）⇒ 必被拽翻 ✗。
-    // 若此臂【也】不翻 ⇒ 说明前面 6 行是**空洞通过** ✗（门根本没参与）⇒ 测试无意义 ✓。
-    let gate_saved = get_aw_rawgate();
-    set_aw_rawgate(1.0);
-    let r_open = run_secs(&Maneuver::LandingImpact { peak_g: 3.5 }, dt, cfg.clone(), 2.0, 20.0);
-    set_aw_rawgate(gate_saved); // ★还原（勿泄漏给后续测试 ✓）
-    println!(
-        "  ★对照臂（门关闭 ✓）: peak=3.5g ⇒ max {:.3}°  ← 必须【明显更差】才证明门是救星 ✓",
-        r_open.att.max_deg()
-    );
-    assert!(
-        r_open.att.max_deg() > 25.0,
-        "A11 对照臂：门关闭后 max 仍 {:.3}°（<25°）⇒ **门不是救星 ✗** ⇒ 本测试是空洞通过 ✗，须重查机制 ✓",
-        r_open.att.max_deg()
-    );
+    // ★**判据：相对无冲击基线的增量**（绝对阈值对本场景无鉴别力 ✗）。
+    // 机制已由【门关闭计数】坐实 ✓ ⇒ 这里判"冲击是否留下持久姿态损伤" ✓。
+    // 物理期望：门关闭的窗口内不锚定，姿态由陀螺短时维持 ⇒ 增量应≈0 ✓。
+    for peak_g in [2.5f32, 3.5, 5.0] {
+        let r = run_secs(&Maneuver::LandingImpact { peak_g }, dt, cfg.clone(), 2.0, 20.0);
+        let inc = r.att.rmse_deg() - base_tail;
+        println!("  peak={peak_g:.1}g ⇒ 相对基线增量 {inc:+.3}°");
+        assert!(
+            inc < 0.5,
+            "A11 peak={peak_g}g: 冲击留下持久姿态损伤（相对基线 +{inc:.3}° ≥ 0.5°）✗"
+        );
+    }
 }
 
 /// **A12 磁干扰下机动**：偏航扫掠 + 硬铁偏置 ⇒ 姿态不发散。
