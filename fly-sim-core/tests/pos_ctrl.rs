@@ -474,6 +474,61 @@ fn outer_position_step() {
             // ---- §9.7 正解检验：用【加速度门】关掉污染时段的锚定（而非简单置 att_alpha=0）----
             // 背景：att_alpha=0 能解决阶跃 ✓，但会丢掉【陀螺长期漂移抑制】✗（故默认用 0.02）
             // 正解应是：保留 0.02，但用 G_ATT_ACC_GATE 在【高加速度时段】关掉锚定 ✓
+            // ---- §9.8 危害来源分支：重力锚定 vs 【其他锚定路径】(3D磁/磁偏航) ----
+            // 线索：加速度门只约束【重力路径】✓，而 §9.7 实测它对结果无效 ✗
+            // ⇒ 嫌疑：危害来自【不受加速度门约束】的其他锚定 ✓
+            println!("  [§9.8] 保留 att_alpha=0.02(重力锚定)，分别关掉其他锚定路径:");
+            for (nm, g3d, gmag) in [
+                ("全开(基准)      ", -1.0f32, -1.0f32),
+                ("关 3D磁修正     ", 0.0, -1.0),
+                ("关 磁偏航锚定   ", -1.0, 0.0),
+                ("两者都关        ", 0.0, 0.0),
+            ] {
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                        0.02,
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_MAG3D_ALPHA),
+                        g3d,
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_MAG_ALPHA),
+                        gmag,
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                        0.8,
+                    );
+                }
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 1.0, 1.0, 1.0);
+                println!(
+                    "    {nm}: tail_osc={:.4} settle={:.3}s ss_err={:.4}",
+                    rr.north.tail_osc(),
+                    rr.north.settle_s(),
+                    rr.north.ss_err()
+                );
+            }
+            unsafe {
+                for st in [
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                ] {
+                    core::ptr::write_volatile(st, -1.0);
+                }
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_MAG3D_ALPHA),
+                    -1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_MAG_ALPHA),
+                    -1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                    -1.0,
+                );
+            }
             println!("  [§9.7] 保留 att_alpha=0.02，扫加速度门 G_ATT_ACC_GATE（目标：尾部趋近 0.1245）:");
             for gate in [-1.0f32, 0.3, 0.5, 1.0, 2.0, 5.0] {
                 unsafe {
