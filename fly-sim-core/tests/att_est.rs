@@ -2476,3 +2476,52 @@ fn a7_diagnose_axis_and_timeseries() {
     }
     println!("  → 判读：若仍是 yaw 类 ⇒ 与 A4 同源；若含 roll/pitch ⇒ 另有机动耦合（0.5g 平移 ✓）");
 }
+
+/// **A7 第二问题诊断：自旋 × 加速度 二维扫描**（已标定档 ⇒ 隔离磁因素 ✓）。
+///
+/// 判读设计（先定标准再测量 ✓）：
+///  · 只随【自旋】增长 ⇒ 旋转导致的世界/机体投影错 ✗
+///  · 只随【加速度】增长 ⇒ 补偿源的延迟/低通 ✗（与自旋无关）
+///  · 需要【两者同时】⇒ 旋转+平移耦合 ✓（A7 的假设）
+#[test]
+fn a7_second_problem_2d_sweep() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let euler_rp = |q: [f32; 4]| -> (f64, f64) {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+        let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+        (roll.to_degrees(), pitch.to_degrees())
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    println!("\n[A7 二维扫描] 已标定档；roll/pitch 均值误差（度）");
+    println!("{:>10} {:>12} {:>12} {:>12}", "自旋°/s", "加速度g", "roll均值", "pitch均值");
+    for yaw_dps in [0.0f32, 30.0, 60.0, 90.0] {
+        for accel_g in [0.0f32, 0.5] {
+            let m = Maneuver::SpinTranslate { yaw_dps, accel_g };
+            let (cfg, c) = tier_setup(MagCalibTier::Calibrated);
+            set_mag_calib(c);
+            let (mut rs, mut ps, mut n) = (0.0f64, 0.0f64, 0u64);
+            let _ = run_observed(&m, dt, cfg, 2.0, None, |_t, tr, est| {
+                let (er, ep) = euler_rp([est.att.w, est.att.x, est.att.y, est.att.z]);
+                let (trr, tp) = euler_rp(tr.quat);
+                rs += wrap(er - trr).abs();
+                ps += wrap(ep - tp).abs();
+                n += 1;
+            });
+            set_mag_calib([0.0; 3]);
+            let k = n.max(1) as f64;
+            println!(
+                "{yaw_dps:>10.0} {accel_g:>12.1} {:>12.2} {:>12.2}",
+                rs / k,
+                ps / k
+            );
+        }
+    }
+    println!("  → 判读：只随自旋 ⇒ 投影错；只随加速度 ⇒ 补偿源延迟；需两者 ⇒ 耦合 ✓");
+}
