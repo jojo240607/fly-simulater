@@ -3043,7 +3043,6 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
 /// 但 **姿态耦合项的候选式构造有误** ✗（偏差 ~8，量级差约 2 个数量级 —— 疑缺 `dt` 且结构不对）。
 /// **这不构成"§5 错误"的证据** ✗ —— 只是我的对照候选没写对 ✓。数值数据已由打印保存 ✓：
 /// `∂δv/∂δθ` 行0 = [0.000000, -0.089705, -0.010252]（dt=0.01）⇒ 下一步据此重建候选式 ✓。
-#[ignore = "δv 姿态耦合项的候选式待重建（bias 块已通过 ✓）；数值已打印保存 ✓"]
 #[test]
 fn c1_f_velocity_block_numeric_check() {
     use flyctrl_core::vehicle::{rotate_vec_by_quat, Quaternion};
@@ -3080,13 +3079,16 @@ fn c1_f_velocity_block_numeric_check() {
     }
     // 候选：项 [i][j] = ±(R·(a × e_j))[i]（a 为机体系比力净量 ✓）
     let a_net = [am[0] - ba[0], am[1] - ba[1], am[2] - ba[2]];
-    let mut cand_neg = [[0.0f32; 3]; 3];
+    // ★正确形式（§12.8 ✓）：∂δv/∂δθ = +[a_world×]·dt —— 叉乘做在【世界系】✓
+    //   （此前写成 R·[f×] 是结构性错误 ✗：少了 Rᵀ 的相似变换 ✓）
+    let a_world = rotate_vec_by_quat(qhat, a_net);
     let mut cand_pos = [[0.0f32; 3]; 3];
+    let mut cand_neg = [[0.0f32; 3]; 3];
     for j in 0..3 {
-        let col = rotate_vec_by_quat(qhat, cross(a_net, basis[j]));
+        let col = cross(a_world, basis[j]); // 世界系叉乘 ✓
         for i in 0..3 {
-            cand_neg[i][j] = -col[i];
-            cand_pos[i][j] = col[i];
+            cand_pos[i][j] = col[i] * dt;
+            cand_neg[i][j] = -col[i] * dt;
         }
     }
     let dev = |a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]| -> f32 {
