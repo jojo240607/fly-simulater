@@ -2083,3 +2083,82 @@ fn b_stage_raw_gate_acceptance() {
         assert!(g < off, "② {n} 的补偿收益应保持（有门 {g:.3} 应 < 补偿关 {off:.3}）");
     }
 }
+
+/// **B 阶段转正决胜测量**：平移幅值门下限 `G_AW_MAG_GATE` 扫描。
+///
+/// 已知：`G_AW_GPS=1` 时 A1 悬停 −148.6% ✗ / A2 巡航 −2391% ✗✗（多普勒噪声的伪参考
+/// 超过硬编码的 0.05g 门限 ✗）；而 A3 +81% / A7 +93% 的收益必须保留 ✓。
+/// 本测例扫门限，找同时满足【A1/A2 不劣化 ✓ 且 A3/A7 保持 ✓】的值 ✓。
+#[test]
+fn b_stage_mag_gate_sweep_for_default_flip() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let cases: [(&str, Maneuver, f32); 5] = [
+        ("A1 悬停", Maneuver::HoverMicro { amp_deg: 3.0 }, 30.0),
+        (
+            "A2 巡航",
+            Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 20.0 },
+            30.0,
+        ),
+        (
+            "A3 急刹",
+            Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s: 15.0 },
+            40.0,
+        ),
+        ("A7 慢转+0.5g", Maneuver::SpinTranslate { yaw_dps: 30.0, accel_g: 0.5 }, 40.0),
+        ("A9 自由落体", Maneuver::FreeFall { jitter_deg: 1.0 }, 20.0),
+    ];
+    // 基线：补偿关
+    println!("\n[B 转正决胜] 门限扫描（均为 G_AW_GPS=1 + G_AW_RAWGATE=0.3）");
+    print!("{:>14}", "门限");
+    for (n, _, _) in &cases {
+        print!(" {n:>12}");
+    }
+    println!();
+    // 先出"补偿关"基线
+    set_aw_gps(0.0);
+    safe_set_mag_gate(-1.0);
+    print!("{:>14}", "补偿关(基线)");
+    let mut base = Vec::new();
+    for (_, m, dur) in &cases {
+        let r = run_secs(m, dt, SensorConfig::realistic(), 2.0, *dur);
+        print!(" {:>12.3}", r.att.rmse_deg());
+        base.push(r.att.rmse_deg());
+    }
+    println!();
+    for lo in [-1.0f32, 0.1, 0.2, 0.3, 0.5] {
+        set_aw_gps(1.0);
+        safe_set_mag_gate(lo);
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_RAWGATE),
+                0.3,
+            );
+        }
+        let tag = if lo < 0.0 { "默认0.05".to_string() } else { format!("{lo:.2}") };
+        print!("{tag:>14}");
+        for (_, m, dur) in &cases {
+            let r = run_secs(m, dt, SensorConfig::realistic(), 2.0, *dur);
+            print!(" {:>12.3}", r.att.rmse_deg());
+        }
+        println!();
+    }
+    set_aw_gps(0.0);
+    safe_set_mag_gate(-1.0);
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_RAWGATE),
+            -1.0,
+        );
+    }
+    println!("  → 判读：找【A1/A2 ≈ 基线 ✓ 且 A3/A7 明显低于基线 ✓】的门限");
+}
+
+fn safe_set_mag_gate(v: f32) {
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_MAG_GATE),
+            v,
+        );
+    }
+}
