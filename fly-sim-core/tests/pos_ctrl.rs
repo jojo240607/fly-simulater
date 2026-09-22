@@ -437,7 +437,14 @@ fn outer_position_step() {
                     );
                 }
                 let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 0.0, 0.0, 0.0);
-                println!("    kv_xy={kv:>4.1}: {}", rr.north.summary("north"));
+                println!(
+                    "    kv_xy={kv:>4.1}: tail_peak={:.4} tail_osc={:.4} tail_mean={:.4} ss_err={:.4} settle={:.3}s",
+                    rr.north.tail_peak(),
+                    rr.north.tail_osc(),
+                    rr.north.tail_mean(),
+                    rr.north.ss_err(),
+                    rr.north.settle_s()
+                );
             }
             unsafe {
                 core::ptr::write_volatile(
@@ -455,7 +462,12 @@ fn outer_position_step() {
                 ("全真值(对照)    ", 0.0, 0.0, 0.0),
             ] {
                 let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, aa, va, pa);
-                println!("    {nm}: {}", rr.north.summary("north"));
+                println!(
+                    "    {nm}: tail_peak={:.4} tail_osc={:.4} tail_mean={:.4}",
+                    rr.north.tail_peak(),
+                    rr.north.tail_osc(),
+                    rr.north.tail_mean()
+                );
             }
             unsafe {
                 core::ptr::write_volatile(
