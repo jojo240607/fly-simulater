@@ -422,6 +422,50 @@ fn outer_position_step() {
             // ---- §9.3 阻尼整定（主因）----
             // 诊断结论：±5% 带在【理想反馈】下也达不到（全真值尾部 0.169m ✗ > 0.150m ✓）
             // ⇒ 位置环自身阻尼不足（主因）。此处固定【全真值反馈】扫速度环 P（阻尼来源）✓
+            // ---- §9.4 灵敏度曲线：姿态估计权重 att_a 连续插值 ----
+            // 病因已分解：姿态估计贡献 +0.23m 的【振荡】（tail_osc 0.361 -> 0.126 ✓）
+            // 目的：看该贡献是【阈值型/非线性】还是【线性】
+            //   · 阈值型 ⇒ 指向具体机制（如失锁、门控、相位翻转）✓
+            //   · 线性   ⇒ 是估计精度问题 ⇒ 指向滤波器带宽 ✓
+            println!("  [§9.4] 姿态估计权重 att_a 灵敏度（其余固定：G_AW_GPS=1、ki_v=0）:");
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_GPS),
+                    1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KI_V_XY),
+                    0.0,
+                );
+            }
+            for aa in [0.0f32, 0.1, 0.25, 0.5, 0.75, 1.0] {
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, aa, 1.0, 1.0);
+                println!(
+                    "    att_a={aa:>4.2}: tail_osc={:.4} tail_peak={:.4} settle={:.3}s ss_err={:.4}",
+                    rr.north.tail_osc(),
+                    rr.north.tail_peak(),
+                    rr.north.settle_s(),
+                    rr.north.ss_err()
+                );
+            }
+            // ---- §9.4b 跳变附近精细扫描（离散 ⇒ 开关；陡峭连续 ⇒ 非线性）----
+            println!("  [§9.4b] 跳变附近精细扫描（离散跳变 ⇒ 开关/门控；陡峭连续 ⇒ 非线性）:");
+            for aa in [0.75f32, 0.80, 0.85, 0.90, 0.95, 0.98, 1.00] {
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, aa, 1.0, 1.0);
+                // 同时给出姿态误差信息（若有）：track 的 h/v 分量与水平 RMSE
+                println!(
+                    "    att_a={aa:>4.2}: tail_osc={:.4} settle={:.3}s ss_err={:.4}",
+                    rr.north.tail_osc(),
+                    rr.north.settle_s(),
+                    rr.north.ss_err()
+                );
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KI_V_XY),
+                    -1.0,
+                );
+            }
             println!("  [§9.3] 全真值反馈下扫 kv_xy（位置阶跃的阻尼；目标尾部 <0.150m）:");
             unsafe {
                 core::ptr::write_volatile(
