@@ -276,34 +276,33 @@ fn circle_tracking_and_amplification() {
         amp_pos, amp_att
     );
     // **放大判据**（阶段 5 关键指标）：估计误差是否被制导放大（>2× 则回阶段 3/4）。
-    // ⚠️ **姿态侧的放大判据暂时无法判定**（据实标注，不放宽阈值 ✗）：
-    // 判据基线（位置 0.5m、姿态 **2.0°**）是**按旧指标**（roll/pitch 之差）在 `pos_est`
-    // 的机动场景里量的；而本会话把姿态指标改成了**四元数夹角**（无缠绕、且**含偏航**）✗
-    // ⇒ 二者**不可比**（实测同一轨迹：旧指标 1.18° / 新指标 4.29° ⇒ 放大 0.59x vs 2.15x）。
+    // **姿态侧：判据基线改为【同指标、同一次运行内实测】的无制导悬停** ✓
     //
-    // 按项目纪律（判据要能追溯到与它**同指标**测出的基线）：须用四元数夹角取得新基线。
-    //
-    // ⚠️ **进一步核查发现更严重的问题**（2026-09-21）：`metrics.rs` 里其实**早已有**
-    // 无缠绕指标 `quat_angle_error_deg` / `euler_err_deg`，但**没有任何测试在用它们**
-    // （grep 全仓无引用）；而 `pos_est` 也**不断言任何姿态误差**（它是位置测试）。
-    // ⇒ **姿态基线 2.0 度从来没有可追溯的来源** —— 它是凭印象取的（pos_est 机动场景的
-    // 姿态量级），违反了项目**自己写在路线图里的纪律**（判据要能追溯到真实需求或物理
-    // 上限，而不是拍脑袋定的数）。
-    //
-    // ⇒ 正确做法：基线须取自**姿态估计器在阶段 3 机动场景下的误差**，且用**同一指标**
-    // （`metrics::quat_angle_error_deg`，仓库已有）。在此之前姿态侧**不作通过性断言**。
-    // 在此之前**不作通过性断言**（既不放宽阈值 ✗，也不假装通过 ✗）。
-    let _ = amp_att;
+    // 依据（2026-09-21 两次修正）：
+    // ① 旧指标（roll/pitch 之差）有 atan2 缠绕假象 ✗ ⇒ 改用 `quat_angle_error_deg` 等价式；
+    // ② 旧基线（2.0°）**无可追溯来源**（`metrics::quat_angle_error_deg` 仓库早有却无测试
+    //    引用、`pos_est` 不断言姿态误差）⇒ 凭印象取值 ✗，违反项目纪律。
+    // ⇒ 现基线 = **同一套被控对象/传感器/控制器、只把轨迹换成定点悬停**下的姿态估计误差
+    //   （同一次运行内实测）✓ 完全可追溯。
+    let amp_att_true = st.est_att_max_deg / baseline_att_hover_deg().max(1e-6);
+    println!(
+        "  放大判据（同指标基线）：位置 {:.2}x（基线 0.5m）  姿态 {:.2}x（基线 {:.2}° 无制导悬停）",
+        amp_pos,
+        amp_att_true,
+        baseline_att_hover_deg()
+    );
     assert!(
         amp_pos < 2.0,
         "估计位置误差被制导放大 {:.2}x（>2× 应回阶段 3/4）：{:.3}m",
         amp_pos,
         st.est_pos_max
     );
-    println!(
-        "  ⚠️ 姿态侧放大待判：新指标（四元数夹角）= {:.2}x（旧指标基线 2.0° 不可比，\
-         须用同指标重跑 pos_est 取基线）",
-        amp_att
+    assert!(
+        amp_att_true < 2.0,
+        "估计姿态误差被制导放大 {:.2}x（同指标基线 {:.2}°，>2× 应回阶段 3/4）：{:.2}°",
+        amp_att_true,
+        baseline_att_hover_deg(),
+        st.est_att_max_deg
     );
 }
 
@@ -643,4 +642,76 @@ fn quaternion_convention_selfcheck() {
     let got2 = rotate_vec_by_quat(q_full, [0.0, 0.0, 1.0]);
     println!("  自检④：q_yaw*q_align 把 (0,0,1) 映射到 {got2:?}（zb={zb:?}）");
     println!("  ⇒ 若 got2≈zb，则『世界系左乘偏航』的乘法序正确；否则序反了");
+}
+
+/// **判据基线（同指标）**：无制导定点悬停下的姿态估计误差（四元数夹角，度）。
+///
+/// 供 `circle_tracking_and_amplification` 的放大判据**内联调用** ⇒ 基线与被测量
+/// **同一指标、同一套被控对象/传感器/控制器、同一次运行** ✓ 完全可追溯。
+fn baseline_att_hover_deg() -> f64 {
+    use flyctrl_core::units::{Meter, Second};
+    struct Fixed(flyctrl_core::guidance::TrajectorySample);
+    impl TrajectorySource for Fixed {
+        fn duration(&self) -> Second {
+            Second(12.0)
+        }
+        fn at(&self, _t: Second) -> flyctrl_core::guidance::TrajectorySample {
+            self.0
+        }
+    }
+    let hov = flyctrl_core::guidance::TrajectorySample::hover(
+        [Meter(0.0), Meter(0.0), Meter(-5.0)],
+        flyctrl_core::units::Radian(0.0),
+    );
+    run_track(Fixed(hov), None).est_att_max_deg
+}
+
+/// **基线：无制导闭环下的姿态估计误差**（用与判据**同一指标**：四元数夹角）。
+///
+/// 判据原意（路线图阶段 5）："**估计误差是否被制导放大**（对比阶段 3 的单模块误差）"。
+/// 但此前基线取的是凭印象的 2.0° ✗，而 `metrics::quat_angle_error_deg` 仓库早有、
+/// 却**无任何测试引用** ✗。本测例补上**同指标**的基线：
+/// 同一套被控对象/传感器/控制器，**只把轨迹换成定点悬停**（无制导前馈、无闭环跟踪）
+/// ⇒ 得到"单模块"级的姿态估计误差基线 ✓。
+///
+/// 判读：把它与制导轨迹下的姿态估计误差相比 ⇒ 才是"制导是否放大估计误差" ✓。
+#[test]
+fn baseline_att_error_without_guidance() {
+    use flyctrl_core::units::{Meter, Second};
+    println!("\n基线（同一指标 quat_angle）：无制导定点悬停 vs 制导轨迹");
+    // 悬停基线（无制导）：直接给定点 Setpoint，不经 Guidance
+    let hov = flyctrl_core::guidance::TrajectorySample::hover(
+        [Meter(0.0), Meter(0.0), Meter(-5.0)],
+        flyctrl_core::units::Radian(0.0),
+    );
+    struct Fixed(flyctrl_core::guidance::TrajectorySample);
+    impl TrajectorySource for Fixed {
+        fn duration(&self) -> Second {
+            Second(12.0)
+        }
+        fn at(&self, _t: Second) -> flyctrl_core::guidance::TrajectorySample {
+            self.0
+        }
+    }
+    let st_hover = run_track(Fixed(hov), None);
+    // 制导轨迹（同 12s 尺度：圆 3 圈 ≈ 18.8s，取 2 圈 ≈ 12.6s 对齐）
+    let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 2.0);
+    let st_circ = run_track(FixedYaw(c), None);
+
+    println!(
+        "  定点悬停（无制导）: 姿态估计误差(四元数夹角) max={:.2}°",
+        st_hover.est_att_max_deg
+    );
+    println!(
+        "  制导圆轨迹        : 姿态估计误差(四元数夹角) max={:.2}°",
+        st_circ.est_att_max_deg
+    );
+    let ratio = st_circ.est_att_max_deg / st_hover.est_att_max_deg.max(1e-6);
+    println!(
+        "  ⇒ 制导/无制导 = {:.2}x（阶段 5 判据：>2× 则回阶段 3/4）",
+        ratio
+    );
+    // 基线随环境而定，故只作**同指标对照**，不作绝对阈值断言；
+    // 判据（>2×）由调用方按同一指标判定（此处打印，供填回 `circle_tracking_and_amplification`）。
+    assert!(st_hover.est_att_max_deg.is_finite() && st_circ.est_att_max_deg.is_finite());
 }
