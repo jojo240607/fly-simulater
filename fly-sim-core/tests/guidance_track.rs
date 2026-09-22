@@ -84,6 +84,9 @@ struct TrackStat {
     pub sat_ratio: f64,
     /// **偏航误差**峰值（设定偏航 vs 真值偏航，度；已归一到 ±180）
     pub yaw_err_max_deg: f64,
+    /// **速度误差**峰值（设定速度 vs 真值速度，水平，m/s）—— 用于区分
+    /// "位置环滞后"与"速度环跟不上"（若实际速度 < 设定速度，位置误差必然累积）
+    pub vel_err_max: f64,
     /// 估计误差（估计 vs 真值）：位置 max / 姿态 max（度）
     pub est_pos_max: f64,
     pub est_att_max_deg: f64,
@@ -214,6 +217,7 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
     let mut axis_max = [0.0f64; 3];
     let (mut max_thrust_sum, mut sat_n, mut sat_tot) = (0.0f64, 0u64, 0u64);
     let mut yaw_err_max = 0.0f64;
+    let mut vel_err_max = 0.0f64;
     let mut diverged = false;
     while !g.done() && n < 200_000 {
         let sp = g.step();
@@ -238,6 +242,12 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
             while d > std::f64::consts::PI { d -= 2.0 * std::f64::consts::PI; }
             while d < -std::f64::consts::PI { d += 2.0 * std::f64::consts::PI; }
             yaw_err_max = yaw_err_max.max(d.abs().to_degrees());
+        }
+        // 速度误差（设定 vs 真值，水平）
+        {
+            let vx = truth.vel[0].0 as f64 - sp.vel[0].0 as f64;
+            let vy = truth.vel[1].0 as f64 - sp.vel[1].0 as f64;
+            vel_err_max = vel_err_max.max((vx * vx + vy * vy).sqrt());
         }
         // 跟踪误差：真值位置 vs 期望位置
         let d = ((truth.pos[0].0 - sp.pos[0].0).powi(2)
@@ -278,6 +288,7 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
         max_thrust_sum,
         sat_ratio: if sat_tot > 0 { sat_n as f64 / sat_tot as f64 } else { 0.0 },
         yaw_err_max_deg: yaw_err_max,
+        vel_err_max,
         est_pos_max: epmax,
         est_att_max_deg: eamax,
         diverged,
@@ -904,15 +915,47 @@ fn yaw_rate_feasible_tracking() {
         let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
         let st = run_track(YawRate { inner: c, rate }, None);
         println!(
-            "  偏航速率 {:>4.1} | 稳态 {:7.3}m | 北 {:6.3} 东 {:6.3} 下 {:6.3} | 饱和 {:5.1}% | 偏航误差 {:6.1}deg",
+            "  偏航速率 {:>4.1} | 稳态 {:7.3}m | 北 {:6.3} 东 {:6.3} 下 {:6.3} | 饱和 {:5.1}% | 偏航误差 {:6.1}deg | 速度误差 {:.3}m/s",
             rate,
             st.err_max_ss,
             st.err_axis_ss[0],
             st.err_axis_ss[1],
             st.err_axis_ss[2],
             st.sat_ratio * 100.0,
-            st.yaw_err_max_deg
+            st.yaw_err_max_deg,
+            st.vel_err_max
         );
     }
     println!("（判读：若 0~0.3 rad/s 下稳态≈1.3m、饱和≈0% ⇒ 原 17.85m 纯属轨迹不可行）");
+}
+
+/// **可行轨迹复测**：按实测能力反推参数后的"切向偏航圆"。
+///
+/// # 设计规则（由实测能力导出）
+/// ```text
+/// 切向偏航 ψ̇ = v/R  =>  R ≥ v / ψ̇_max          （ψ̇_max ≈ 0.3 rad/s，实测）
+/// 侧向加速度 a = v²/R，倾角 θ = atan(a/g) ≤ tilt_max = 25°  =>  a ≤ 4.57 m/s²
+/// 取 v = 2 m/s（既有口径）=> R ≥ 6.7 m
+/// ```
+/// **原测试 r=2m、v=2m/s ⇒ ψ̇ = 1 rad/s ✗ 超能力**（这就是"切向偏航 17.85m"的根源）。
+/// 本测例保持**同速度**、把半径放大到 7m ⇒ ψ̇ = 0.286 rad/s ✓、a = 0.57 m/s²、
+/// θ = 3.3° ✓（远小于 25°）。
+#[test]
+fn feasible_tangent_yaw_circle() {
+    use flyctrl_core::units::Meter;
+    println!("\n可行切向偏航轨迹复测（v=2m/s 不变，R 由 2m 放大到 7m）");
+    println!("规则：R ≥ v/psi_max = 2/0.3 = 6.7m；a = v^2/R ≤ g*tan(25deg) = 4.57");
+    for &r in &[2.0f32, 7.0] {
+        let v = 2.0f32;
+        let omega = v / r; // 切向偏航 ⇒ ψ̇ = ω = v/R
+        let a_lat = v * v / r;
+        let tilt_deg = (a_lat / 9.81).atan().to_degrees();
+        let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(r), omega, 3.0);
+        let st = run_track(c, None); // 切向偏航（nose_tangent 默认 true）
+        println!(
+            "  R={:>4.1}m psi={:.3}rad/s a={:.2}m/s^2 tilt={:.1}deg | 稳态 {:7.3}m | 饱和 {:5.1}% | 偏航误差 {:6.1}deg | 速度误差 {:.3}m/s",
+            r, omega, a_lat, tilt_deg, st.err_max_ss, st.sat_ratio * 100.0, st.yaw_err_max_deg, st.vel_err_max
+        );
+    }
+    println!("（判读：R=7m 应落在与固定偏航同量级 ~1.3m、饱和 ~0%）");
 }
