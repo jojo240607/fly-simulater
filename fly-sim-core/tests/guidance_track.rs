@@ -166,9 +166,15 @@ unsafe fn reset_knobs() {
 }
 
 fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32, vmax: f32) -> TrackStat {
+    run_track_v(src, wind, ki_xy, vmax, -1.0)
+}
+
+/// 全参数版 v2：再加 `ki_v_xy`（水平**速度环**积分增益）。
+fn run_track_v<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32, vmax: f32, ki_v: f32) -> TrackStat {
     unsafe { reset_knobs() } // 先复位，再设本次要用的
     unsafe { flyctrl_core::controller::pid::G_KI_XY = ki_xy };
     unsafe { flyctrl_core::controller::pid::G_VMAX_XY = vmax };
+    unsafe { flyctrl_core::controller::pid::G_KI_V_XY = ki_v };
     // **生效自检**（本轮新增纪律）：扫描前先确认"设定值确实改变了可观测量"，
     // 否则扫描结果会像本轮初版那样"逐位相同"却其实是旋钮没接上 ✗。
     if vmax > 0.0 {
@@ -989,4 +995,30 @@ fn feasible_tangent_yaw_circle() {
         );
     }
     println!("（判读：R=7m 应落在与固定偏航同量级 ~1.3m、饱和 ~0%）");
+}
+
+
+/// **水平速度环积分扫描** —— 验证唯一开放项的修法。
+///
+/// 根因：速度环 P-only ⇒ 平飞巡航需非零倾角（平衡阻力）⇒ `acc≠0` ⇒ `des_v≠v`
+/// ⇒ 固有速度偏置 ⇒ 位置斜坡。成熟飞控的速度环含 I（PX4 PID / ArduPilot PID）。
+/// 判据：`ki_v_xy` 上升时，**速度误差**与**位置滞后**应同时下降。
+#[test]
+fn vel_loop_integral_scan() {
+    use flyctrl_core::units::Meter;
+    println!("\n水平速度环积分扫描（直线 2m/s + 可行切向偏航圆）");
+    println!("{:>9} | {:>12} {:>10} | {:>12} {:>10}", "ki_v_xy", "直线稳态", "速度误差", "圆稳态", "速度误差");
+    println!("{}", "-".repeat(66));
+    for &kiv in &[0.0f32, 0.1, 0.3, 1.0, 3.0] {
+        let l = Line { start: [Meter(0.0), Meter(0.0), Meter(-5.0)], vel_n: 2.0, dur: 12.0 };
+        let st_l = run_track_v(l, None, 0.0, -1.0, kiv);
+        let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(7.0), 2.0 / 7.0, 3.0);
+        let st_c = run_track_v(YawRate { inner: c, rate: 2.0 / 7.0 }, None, 0.0, -1.0, kiv);
+        println!(
+            "{:>9.2} | {:>11.3}m {:>9.3}m/s | {:>11.3}m {:>9.3}m/s",
+            kiv, st_l.err_max_ss, st_l.vel_err_max, st_c.err_max_ss, st_c.vel_err_max
+        );
+    }
+    println!("{}", "-".repeat(66));
+    println!("（判读：速度误差与位置滞后应随 ki_v_xy 同时下降 ⇒ 根因确认、修法有效）");
 }
