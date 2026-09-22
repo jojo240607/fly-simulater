@@ -99,6 +99,8 @@ static mut GPS_SLOT: [f32; 6] = [0.0; 6];
 static mut BARO_SLOT: f32 = 0.0;
 /// C2 对接用：机体三轴磁（带噪 ✓）
 static mut MAG_SLOT: [f32; 3] = [0.0; 3];
+/// C2：地磁先验（WMM 的角色 ✓）—— 真实系统用地磁模型；此处用已知量级 ✓
+const MAG_I_PRIOR: [f32; 3] = [0.2, 0.0, 0.4];
 
 pub fn run(m: &Maneuver, dt: f32, cfg: SensorConfig, settle_s: f32) -> RunOut {
     run_secs(m, dt, cfg, settle_s, m.duration())
@@ -3648,9 +3650,9 @@ fn c1_integration_step3_side_by_side() {
 ///   `SensorConfig::realistic()`（硬铁 = HI_EXTREME ✓）+ `set_mag_calib(HI_EXTREME)` ✓
 /// ⇒ 本测例用**同一配置**跑同一机动，同时跟踪 Legacy 与 C1 ✓
 /// 判据（§15.4 ✓，预先约定）：C1 必须【显著优于】该配置下的 Legacy ✓
-#[ignore = "§4 验收未通过（C1=5.92° vs 已标定 Legacy=1.54°）⇒ 按 §15.4 停止投入；\
-            转作 C2 的验收工装：C2 落地后去 ignore，要求【两个配置下都不劣】✓"]
 #[test]
+#[ignore = "§4 验收未通过（C1=5.92° vs 已标定 Legacy=1.54°）⇒ 按 §15.4 停止投入；\
+            另：接入 C2 磁链后反而变差（7.834° ✗）⇒ 该整合尚需修正 ✓（见下）"]
 fn c1_integration_step4_acceptance_vs_calibrated() {
     use flyctrl_core::estimator::c1::{align_static, C1Filter};
     let _g = lock();
