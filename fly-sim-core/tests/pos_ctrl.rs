@@ -406,6 +406,41 @@ fn outer_position_step() {
             println!("  [§9.2 诊断] 4B 北向阶跃随 ki_v_xy（tail_peak 为判据关注量）:");
             // 2×2 隔离（2026-09-21 第二层）：平移补偿(G_AW_GPS) × 速度积分(ki_v_xy)
             // 线索：4A 真值反馈尾部 0.101 ✓ vs 4B 估计反馈 0.376 ✗ ⇒ 差异在估计/补偿链 ✓
+            // ---- §9.2 三层：逐通道隔离估计链（0=全真值，1=全估计）----
+            // 线索：真值反馈 0.101 ✓ vs 最佳估计反馈 0.376 ✗ ⇒ 约 0.28m 来自估计链 ✓
+            // 固定最佳配置（G_AW_GPS=1、ki_v_xy=0），仅切换通道来源 ⇒ 定位是哪一项 ✓
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_GPS),
+                    1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KI_V_XY),
+                    0.0,
+                );
+            }
+            println!("  [§9.2 三层] 逐通道切换（0=真值，1=估计；G_AW_GPS=1、ki_v=0）:");
+            for (nm, aa, va, pa) in [
+                ("全估计(基准)    ", 1.0f32, 1.0f32, 1.0f32),
+                ("姿态用真值      ", 0.0, 1.0, 1.0),
+                ("速度用真值      ", 1.0, 0.0, 1.0),
+                ("位置用真值      ", 1.0, 1.0, 0.0),
+                ("姿态+速度用真值 ", 0.0, 0.0, 1.0),
+                ("全真值(对照)    ", 0.0, 0.0, 0.0),
+            ] {
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, aa, va, pa);
+                println!("    {nm}: {}", rr.north.summary("north"));
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KI_V_XY),
+                    -1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_GPS),
+                    1.0,
+                );
+            }
             println!("  [§9.2 二层] 4B：平移补偿 × 速度积分（尾部峰值为关注量）:");
             for aw in [0.0f32, 1.0] {
                 for ki in [0.0f32, 1.0] {
