@@ -615,33 +615,42 @@ fn quaternion_convention_selfcheck() {
         "约定②：rotate(att, 机体) 应得世界系（att 为机体→世界），实测 {world_v:?}"
     );
 
-    // ③ **推力矢量构造的必备断言**：构造出的 q 必须把机体 +Z 映射到指定世界方向
-    //    （推力沿机体 -Z ⇒ 若机体 +Z 世界系 = -f_w/|f_w|，则推力方向 = f_w ✓）
-    let zb = [0.3f32, -0.2, 0.93]; // 任取一个"朝下偏一点"的方向（近似单位）
-    let n = (zb[0] * zb[0] + zb[1] * zb[1] + zb[2] * zb[2]).sqrt();
-    let zb = [zb[0] / n, zb[1] / n, zb[2] / n];
-    let ax = -zb[1];
-    let ay = zb[0];
-    let s = (ax * ax + ay * ay).sqrt();
-    let c = zb[2].clamp(-1.0, 1.0);
-    let q_align = if s < 1e-9 {
-        Quaternion::IDENTITY
-    } else {
-        Quaternion::from_axis_angle([ax / s, ay / s, 0.0], Radian(s.atan2(c)))
-    };
-    let got = rotate_vec_by_quat(q_align, [0.0, 0.0, 1.0]);
+    // ③ **推力矢量构造的必备断言**：直接调用**产品代码**的 `thrust_to_attitude`
+    //    （不再在测试里重写一遍 —— 此前正是"自检通过但 pid 内是另一份实现" ✗）
+    let f_w = [1.2f32, -0.8, 9.5]; // 期望比力（世界系 NED，含重力）
+    let n = (f_w[0] * f_w[0] + f_w[1] * f_w[1] + f_w[2] * f_w[2]).sqrt();
+    let zb_expect = [-f_w[0] / n, -f_w[1] / n, -f_w[2] / n];
+    let yaw = Radian(0.7);
+    let q = flyctrl_core::vehicle::thrust_to_attitude(f_w, yaw);
+    let got = rotate_vec_by_quat(q, [0.0, 0.0, 1.0]);
     assert!(
-        approx(got, zb),
-        "约定③：q_align 应把 (0,0,1) 旋到 zb。期望 {zb:?}，实测 {got:?} —— \
-         若此处失败，则推力矢量构造的轴/角约定有误（本次 355° 姿态误差的根源）"
+        approx(got, zb_expect),
+        "约定③：thrust_to_attitude 应把机体 (0,0,1) 映到 -f_w/|f_w|。期望 {zb_expect:?}，实测 {got:?}"
+    );
+    // 契约②：推力方向 = 机体 -Z 的世界系像，应指向 f_w
+    let thrust_dir = rotate_vec_by_quat(q, [0.0, 0.0, -1.0]);
+    let fw_hat = [f_w[0] / n, f_w[1] / n, f_w[2] / n];
+    assert!(
+        approx(thrust_dir, fw_hat),
+        "约定③b：机体 -Z 应指向 f_w（推力方向）。期望 {fw_hat:?}，实测 {thrust_dir:?}"
+    );
+    // 契约③：偏航被正确保留 —— 机体 +X 的水平投影方向应 ≈ yaw
+    let xb = rotate_vec_by_quat(q, [1.0, 0.0, 0.0]);
+    let yaw_got = xb[1].atan2(xb[0]);
+    assert!(
+        (yaw_got - yaw.0).abs() < 0.05,
+        "约定③c：偏航应被保留。期望 {:.3} rad，实测 {:.3} rad",
+        yaw.0,
+        yaw_got
     );
 
-    // ④ 叠加偏航后仍应保持"机体 +Z → zb"（偏航绕 zb 轴施加不改变 +Z）
-    let q_yaw = Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(0.5));
-    let q_full = q_yaw * q_align;
-    let got2 = rotate_vec_by_quat(q_full, [0.0, 0.0, 1.0]);
-    println!("  自检④：q_yaw*q_align 把 (0,0,1) 映射到 {got2:?}（zb={zb:?}）");
-    println!("  ⇒ 若 got2≈zb，则『世界系左乘偏航』的乘法序正确；否则序反了");
+    // ④ 乘法序（记录性）：若把顺序写成 `q_yaw * q_align`（错序），(0,0,1) 的像会**偏离** zb
+    let q_align = Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(0.0)); // 占位，见下
+    let _ = q_align;
+    println!(
+        "  自检④（记录）：本仓 A*B = 先 A 后 B；故实现须写 `q_align * q_yaw`。\
+         错序会让对准覆盖偏航 ⇒ 姿态假误差 355°（本会话实测）。"
+    );
 }
 
 /// **判据基线（同指标）**：无制导定点悬停下的姿态估计误差（四元数夹角，度）。
