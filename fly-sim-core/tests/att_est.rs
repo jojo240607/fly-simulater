@@ -1795,3 +1795,94 @@ fn a12_mechanism_probe() {
     }
     println!("  → 形态判读：若在若干秒内单调放大 ⇒ 【渐进拖拽】；若一跳到位 ⇒ 【阶跃/失锁】");
 }
+
+/// **A12 自检第二步**：偏航通道怀疑点 —— 磁锚定 vs 陀螺。
+///
+/// 对照线索：A13 的 1500°/s **绕X(横滚)** 通过 ✓，而这里 60°/s **绕Z(偏航)** 坏 ✗
+/// ⇒ 只差在【通道】⇒ 嫌疑是偏航独有的**磁锚定/重力锚定**环节 ✓。
+/// 本实验用零值/双配置对照把它分离：同一机动，分别在
+///   ① realistic（磁源带硬铁+噪声）② low_noise（磁源理想）③ 甩掉磁（全零场）
+/// 下看估计 yaw 是否仍偏离参考 ✓。
+#[test]
+fn a12_selfcheck_yaw_channel() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let yaw_of = |q: [f32; 4]| -> f64 {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z)).to_degrees()
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    // 三档磁源：realistic / low_noise / low_noise+零磁
+    let mut zero_mag = low_noise();
+    zero_mag.mag_noise = 0.0;
+    zero_mag.mag_decl_deg = 0.0;
+    for (name, cfg) in [
+        ("realistic", SensorConfig::realistic()),
+        ("low_noise", low_noise()),
+        ("low+零硬铁", zero_mag),
+    ] {
+        let m = Maneuver::MagDisturbSweep { rate_dps: 20.0, bias_gauss: 0.0 };
+        let mut worst = 0.0f64;
+        let mut samples: Vec<(f32, f64, f64)> = Vec::new();
+        let r = run_observed(&m, dt, cfg, 2.0, None, |t, tr, est| {
+            let e = wrap(yaw_of([est.att.w, est.att.x, est.att.y, est.att.z]) - yaw_of(tr.quat));
+            if e.abs() > worst.abs() { worst = e; }
+            if (t * 3.0).fract() < dt * 2.0 {
+                samples.push((t, yaw_of(tr.quat), e));
+            }
+        });
+        println!(
+            "\n  [{name}] RMSE {:.3}°  max {:.3}°  最差yaw误差 {:+.2}°",
+            r.att.rmse_deg(), r.att.max_deg(), worst
+        );
+        for (t, yr, e) in samples.iter().take(6) {
+            println!("      t={t:>5.1}s  ref_yaw={yr:>8.1}°  err={e:>+8.2}°");
+        }
+    }
+    println!("\n  → 判读：若三档都坏 ⇒ 与磁源无关（估计器/机动结构问题）；若仅 realistic 坏 ⇒ 磁数据问题");
+}
+
+/// **A12 自检第三步：逐项二分 `realistic()` 的磁属性** —— 找出真正的罪魁 ✓。
+///
+/// 已知：磁源理想时偏航跟踪 0.007° ✓，`realistic()` 时 79.7° ✗；
+/// 且"已标定档"仅 2.54° ✓ ⇒ **硬铁被补偿后无害** ⇒ 罪魁在其余项：
+/// 磁偏角 / 安装偏角 / 软铁 / 磁噪声 ✓。
+#[test]
+fn a12_selfcheck_mag_property_bisect() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let base = SensorConfig::realistic();
+    let m = Maneuver::MagDisturbSweep { rate_dps: 20.0, bias_gauss: 0.0 };
+    println!("\n[A12 二分] 从 realistic() 起，逐项置理想（其余保持 realistic）");
+    println!("{:>22} {:>12} {:>12}", "置理想项", "RMSE°", "max°");
+    // 基线
+    let r0 = run_secs(&m, dt, base.clone(), 2.0, 40.0);
+    println!("{:>22} {:>12.3} {:>12.3}", "（基线 realistic）", r0.att.rmse_deg(), r0.att.max_deg());
+    let items: [(&str, fn(&mut SensorConfig)); 4] = [
+        ("mag_decl=0", |c| c.mag_decl_deg = 0.0),
+        ("mag_mount=0", |c| c.mag_mount_deg = [0.0; 3]),
+        ("mag_soft=[1,1,1]", |c| c.mag_soft_iron = [1.0; 3]),
+        ("mag_noise=0", |c| c.mag_noise = 0.0),
+    ];
+    for (name, f) in items {
+        let mut c = base.clone();
+        f(&mut c);
+        let r = run_secs(&m, dt, c, 2.0, 40.0);
+        println!("{:>22} {:>12.3} {:>12.3}", name, r.att.rmse_deg(), r.att.max_deg());
+    }
+    // 全置理想（应回到 ~0）
+    let mut c = base.clone();
+    c.mag_decl_deg = 0.0;
+    c.mag_mount_deg = [0.0; 3];
+    c.mag_soft_iron = [1.0; 3];
+    c.mag_noise = 0.0;
+    c.mag_hard_iron = [0.0; 3];
+    let r = run_secs(&m, dt, c, 2.0, 40.0);
+    println!("{:>22} {:>12.3} {:>12.3}", "（全部置理想）", r.att.rmse_deg(), r.att.max_deg());
+    println!("  → 判读：哪一项置理想后 RMSE 大幅下降 ⇒ 它就是罪魁 ✓");
+}
