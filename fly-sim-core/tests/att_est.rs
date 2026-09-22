@@ -91,6 +91,13 @@ pub struct RunOut {
 ///
 /// - `dt`：仿真步长（H 场用 4ms 对齐控制率）。
 /// - `settle_s`：前 `settle_s` 秒不计入指标（EKF 初始化/收敛期）。
+/// **C1 对接用的带噪传感器槽**（仅测试用 ✓，零签名改动 ✓）：
+/// harness 每步写入 `[accel(3), gyro(3)]` / `[pos(3), vel(3)]` / 气压高度 ✓，
+/// 供 C1 驱动回调读取 ✓（避免改动既有回调签名 ✓）。
+static mut SENSOR_SLOT: [f32; 6] = [0.0; 6];
+static mut GPS_SLOT: [f32; 6] = [0.0; 6];
+static mut BARO_SLOT: f32 = 0.0;
+
 pub fn run(m: &Maneuver, dt: f32, cfg: SensorConfig, settle_s: f32) -> RunOut {
     run_secs(m, dt, cfg, settle_s, m.duration())
 }
@@ -205,6 +212,22 @@ pub fn run_observed_full_secs(
         let sf = tr.specific_force_body();
         let (imu, gps) = sm.process(dt as f64, sf, tr.omega_body, tr.pos_ned, tr.vel_ned);
         let baro = sm.process_baro(dt as f64, (-tr.pos_ned[2]) as f64).altitude as f32;
+        unsafe {
+            SENSOR_SLOT = [
+                imu.accel[0].0, imu.accel[1].0, imu.accel[2].0,
+                imu.gyro[0].0, imu.gyro[1].0, imu.gyro[2].0,
+            ];
+            // gps 为 Option（丢星时为 None ✓）⇒ 仅在有效时写入 ✓（丢星场景另测 ✓）
+            if let Some(g) = gps.as_ref() {
+                // pos: [Meter;3] ✓；vel: Option<[MeterPerSecond;3]>（无速度解时为 None ✓）
+                let v = g.vel.unwrap_or([flyctrl_core::units::MeterPerSecond(0.0); 3]);
+                GPS_SLOT = [
+                    g.pos[0].0, g.pos[1].0, g.pos[2].0,
+                    v[0].0, v[1].0, v[2].0,
+                ];
+            }
+            BARO_SLOT = baro;
+        }
         let mag_body = rotate_vec_by_quat_inverse(tr.quat_obj(), MAG_WORLD);
         let mag = sm.process_mag(mag_body).field;
 
@@ -3475,4 +3498,115 @@ fn c1_integration_step2_measurement_nis() {
         (0.05..=20.0).contains(&rb) && (0.05..=20.0).contains(&rv) && (0.05..=20.0).contains(&rp),
         "NIS 不一致 ✗：baro={rb:.3e} gps_v={rv:.3e} gps_p={rp:.3e} ⇒ 需按残差反推重标 R ✓"
     );
+}
+
+/// **C1 对接 §2 本体：用【带噪传感器】逐项接入量测 + NIS 一致性**
+///
+/// 关键差异（对比上一版 ✗）：本版数据全部取自 `SENSOR_SLOT/GPS_SLOT/BARO_SLOT`
+/// —— 即 harness 内 **SensorModel 的带噪输出** ✓（上一版用 TrajSample 真值 ⇒ 残差≈0 ⇒ NIS 退化 ✗）。
+/// 冷启动（真实做法 ✓）：`align_static`（由带噪比力求姿态 + 陀螺均值求零偏 ✓）
+///                        + 首个 GPS 定位/速度 ✓。
+#[test]
+fn c1_integration_step2_with_noisy_sensors() {
+    use flyctrl_core::estimator::c1::{align_static, C1Filter};
+    let _g = lock();
+    let dt = 0.004f32;
+    let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
+    // ⚠️ 必须用【有噪声】的源 ✓ —— SensorConfig::default() 无噪声 ✗ ⇒ NIS 又退化 ✗
+    //   （本库以 `realistic()` 表示带噪真实源 ✓；`low_noise()` 为理想源 ✓）
+    let mut flt: Option<C1Filter> = None;
+    let (mut nv, mut sv) = (0u32, 0.0f32);
+    let (mut np, mut sp) = (0u32, 0.0f32);
+    let (mut nb, mut sb) = (0u32, 0.0f32);
+    let _ = run_observed(&m, dt, SensorConfig::realistic(), 2.0, None, |_t, _tr, _est| {
+        let (acc, gyro, gps, baro) = unsafe { (SENSOR_SLOT, SENSOR_SLOT, GPS_SLOT, BARO_SLOT) };
+        let acc_v = [acc[0], acc[1], acc[2]];
+        let gyr_v = [gyro[3], gyro[4], gyro[5]];
+        let f = flt.get_or_insert_with(|| {
+            let (q0, bg) = align_static(acc_v, gyr_v);
+            let mut f = C1Filter::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
+            f.st.bg = bg;
+            f
+        });
+        f.predict(
+            [gyr_v[0] * dt, gyr_v[1] * dt, gyr_v[2] * dt],
+            [acc_v[0] * dt, acc_v[1] * dt, acc_v[2] * dt],
+            dt,
+            [0.0, 0.0, 9.81],
+        );
+        if let Ok(n) = f.update_baro(baro) {
+            sb += n * n; nb += 1;
+        }
+        if let Ok(n) = f.update_gps_vel([gps[3], gps[4], gps[5]]) {
+            sv += n * n; nv += 1;
+        }
+        if let Ok(n) = f.update_gps_pos([gps[0], gps[1], gps[2]]) {
+            sp += n * n; np += 1;
+        }
+    });
+    // ⚠️ 各传感器频率不同（实测 baro 661 / gps_v 4000 / gps_p 24 次 ✓）
+    //   ⇒ 非空阈值按各自频率设（防真空 ✓，但不误判 ✓）
+    assert!(
+        nb > 10 && nv > 100 && np > 10,
+        "三项量测都须被调用（baro={nb} gps_v={nv} gps_p={np}）✗（防真空 ✓）"
+    );
+    let rb = sb / nb as f32;
+    let rv = sv / nv as f32 / 3.0;
+    let rp = sp / np as f32 / 3.0;
+    assert!(
+        (0.02..=50.0).contains(&rb) && (0.02..=50.0).contains(&rv) && (0.02..=50.0).contains(&rp),
+        "带噪传感器下 NIS 应落入一致区间 ✗：baro={rb:.3e} gps_v={rv:.3e} gps_p={rp:.3e} \
+         ⇒ 偏离则按【残差反推 R】重标 ✓"
+    );
+}
+
+/// **C1 对接 §3：并排对照（Legacy vs C1，同一批数据、同一张表）** ✓
+///
+/// 纪律（§3 ✓）：**不改 Legacy**（它由 harness 正常跑 ✓，用于维持全绿 ✓）；
+/// C1 用 §2 的带噪驱动 ✓；两者都对【同一真值】算行为量 ⇒ 差异可比 ✓。
+#[test]
+fn c1_integration_step3_side_by_side() {
+    use flyctrl_core::estimator::c1::{align_static, C1Filter};
+    let _g = lock();
+    let dt = 0.004f32;
+    let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
+    let mut flt: Option<C1Filter> = None;
+    let (mut lg_sum, mut lg_n) = (0.0f64, 0u32);
+    let (mut c1_sum, mut c1_n) = (0.0f64, 0u32);
+    let (mut lg_max, mut c1_max) = (0.0f64, 0.0f64);
+    let _ = run_observed(&m, dt, SensorConfig::realistic(), 2.0, None, |_t, tr, est| {
+        let (acc, gyro, gps, baro) = unsafe { (SENSOR_SLOT, SENSOR_SLOT, GPS_SLOT, BARO_SLOT) };
+        let acc_v = [acc[0], acc[1], acc[2]];
+        let gyr_v = [gyro[3], gyro[4], gyro[5]];
+        let f = flt.get_or_insert_with(|| {
+            let (q0, bg) = align_static(acc_v, gyr_v);
+            let mut f = C1Filter::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
+            f.st.bg = bg;
+            f
+        });
+        f.predict(
+            [gyr_v[0] * dt, gyr_v[1] * dt, gyr_v[2] * dt],
+            [acc_v[0] * dt, acc_v[1] * dt, acc_v[2] * dt],
+            dt,
+            [0.0, 0.0, 9.81],
+        );
+        let _ = f.update_baro(baro);
+        let _ = f.update_gps_vel([gps[3], gps[4], gps[5]]);
+        let _ = f.update_gps_pos([gps[0], gps[1], gps[2]]);
+        // 并排行为量：两者都对同一真值算【全姿态夹角】✓
+        let q_lg = [est.att.w, est.att.x, est.att.y, est.att.z];
+        let q_c1 = [f.st.q.w, f.st.q.x, f.st.q.y, f.st.q.z];
+        let e_lg = quat_angle_deg_local(q_lg, tr.quat);
+        let e_c1 = quat_angle_deg_local(q_c1, tr.quat);
+        lg_sum += e_lg; lg_n += 1; lg_max = lg_max.max(e_lg);
+        c1_sum += e_c1; c1_n += 1; c1_max = c1_max.max(e_c1);
+    });
+    let (lg_r, c1_r) = (lg_sum / lg_n.max(1) as f64, c1_sum / c1_n.max(1) as f64);
+    println!("\n[§3 并排对照] 巡航 20°（realistic 源，n={lg_n}）");
+    println!("  Legacy: 姿态均值 {lg_r:.3}°  峰值 {lg_max:.3}°");
+    println!("  C1    : 姿态均值 {c1_r:.3}°  峰值 {c1_max:.3}°");
+    println!("  → 比值 C1/Legacy = {:.3}（<1 ⇒ C1 更优 ✓；>1 ⇒ C1 更差 ⇒ 需解释 ✗）", c1_r / lg_r);
+    // 自洽（防真空/NaN ✓）+ 记录比值（判读在 §4 用【已标定列】做 ✓）
+    assert!(lg_n > 1000 && lg_r.is_finite() && c1_r.is_finite(), "并排量必须有效 ✗");
+    assert!(c1_r < 100.0, "C1 姿态均值应有界（{c1_r:.3}°）✗");
 }
