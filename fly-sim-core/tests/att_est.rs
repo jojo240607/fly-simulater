@@ -97,6 +97,8 @@ pub struct RunOut {
 static mut SENSOR_SLOT: [f32; 6] = [0.0; 6];
 static mut GPS_SLOT: [f32; 6] = [0.0; 6];
 static mut BARO_SLOT: f32 = 0.0;
+/// C2 对接用：机体三轴磁（带噪 ✓）
+static mut MAG_SLOT: [f32; 3] = [0.0; 3];
 
 pub fn run(m: &Maneuver, dt: f32, cfg: SensorConfig, settle_s: f32) -> RunOut {
     run_secs(m, dt, cfg, settle_s, m.duration())
@@ -230,6 +232,10 @@ pub fn run_observed_full_secs(
         }
         let mag_body = rotate_vec_by_quat_inverse(tr.quat_obj(), MAG_WORLD);
         let mag = sm.process_mag(mag_body).field;
+        unsafe {
+            // C2 对接用：暴露【带噪】机体三轴磁 ✓
+            MAG_SLOT = [mag[0] as f32, mag[1] as f32, mag[2] as f32];
+        }
 
         // 开环：armed=false。setpoint_valid=false（姿态开环，不做位置初始化）。
         let r = ctx.step_hil(
