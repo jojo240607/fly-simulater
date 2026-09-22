@@ -4150,3 +4150,50 @@ fn eskf_final_tuning_full_table() {
     assert_eq!(worse, 0, "★仍有 {worse} 个场景劣于 Legacy ✗ ⇒ 不得翻默认 ✗");
     println!("  ✓ 全表验收通过（旋钮与模式已还原 ✓）");
 }
+
+/// ★★★**M 场等价复现**（2026-09-21，按用户指示 ✓）：
+/// 用【同一个 ESKF】+【与 M 场完全一致的输入】跑 M 场失败的场景，
+/// 以把问题【一分为二】：H 场也翻 ⇒ ESKF 算法问题 ✓；不翻 ⇒ 固件路径差异 ✓。
+///
+/// 与 M 场的逐项一致性（对照 `mcu_simulater/tests/x_env_noise_perturb.rs::gyro_bias_tolerated`
+/// 与 `mcu_simulater/tests/common/mod.rs` ✓）：
+///   · 步率：`STEP_DT_MS = 13.0` ⇒ **dt = 0.013 s（74.9 Hz）** ✓（M 场实际步率 ✓）
+///   · 零偏：`gyro_bias = [0.05, 0, 0]` rad/s ✓
+///   · 机动：静态悬停 65 s ✓（= 5000 步 ✓）
+///   · 磁：干净（硬铁/软铁/decl 清零 ✓，照 H 场"不混入航向课题"✓）
+///   · 判据：**稳态倾角**（后 1/4 ✓）与 max 倾角 ✓
+#[test]
+fn eskf_mfield_equivalent_gyro_bias() {
+    let _g = lock();
+    let dt = 0.013f32; // ★与 M 场 STEP_DT_MS=13 完全一致 ✓（不是 H 场惯用的 0.004 ✗）
+    let mut cfg = low_noise();
+    cfg.gyro_bias = [0.05, 0.0, 0.0]; // ★与 M 场一致 ✓
+    cfg.mag_decl_deg = 0.0;
+    cfg.mag_mount_deg = [0.0, 0.0, 0.0];
+    cfg.mag_hard_iron = [0.0, 0.0, 0.0];
+    cfg.mag_soft_iron = [1.0, 1.0, 1.0];
+    cfg.mag_noise = 0.0;
+    let m = Maneuver::AttitudeSine {
+        axis: 0,
+        amp_deg: 0.0,
+        freq_hz: 0.1,
+        duration_s: 65.0,
+    };
+    println!("\n[★M 场等价复现] ESKF · dt=13ms ✓ · 零偏 0.05 rad/s ✓ · 悬停 65s ✓ · 磁干净 ✓");
+    for label in ["ESKF", "Legacy"] {
+        select_est_mode(if label == "ESKF" { EstMode::Ekf } else { EstMode::Legacy });
+        let r = run(&m, dt, cfg.clone(), 5.0);
+        let ax = r.att.axis_rmse_deg();
+        println!(
+            "  {label:>7}: 全轴 RMSE {:.3}° · max {:.3}° · 分轴 r/p/y = {:.2}/{:.2}/{:.2}° · {}",
+            r.att.rmse_deg(),
+            r.att.max_deg(),
+            ax[0],
+            ax[1],
+            ax[2],
+            r.att.summary("")
+        );
+    }
+    select_est_mode(EstMode::Legacy);
+    println!("  ✓ 复现完成（模式已还原 ✓）");
+}
