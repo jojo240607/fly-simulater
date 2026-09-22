@@ -3124,6 +3124,48 @@ fn c1_f_velocity_block_numeric_check() {
     let best_t = dev(&jt, &cand_neg).min(dev(&jt, &cand_pos));
     let best_b = dev(&jb, &rb_neg).min(dev(&jb, &rb_pos));
     println!("  → 最佳匹配偏差：∂δv/∂δθ {best_t:.2e}；∂δv/∂δb_a {best_b:.2e}");
+    // ★消掉 R 的混淆项（2026-09-21）：把数值列的【导航系】向量转回【机体系】再除以 dt
+    //   ⇒ 若结构是 `−R·[f×]`，则此量应等于纯叉乘矩阵 `−[f×]` ✓（便于逐元素核对 ✓）
+    {
+        use flyctrl_core::vehicle::rotate_vec_by_quat_inverse;
+        let mut body_jt = [[0.0f32; 3]; 3];
+        for j in 0..3 {
+            let col_nav = [jt[0][j], jt[1][j], jt[2][j]];
+            let col_body = rotate_vec_by_quat_inverse(qhat, col_nav);
+            for i in 0..3 {
+                body_jt[i][j] = col_body[i] / dt;
+            }
+        }
+        // 参照 `−[f×]`： (−[f×])[i][j] = −(f × e_j)[i]
+        let mut negcross = [[0.0f32; 3]; 3];
+        let mut poscross = [[0.0f32; 3]; 3];
+        for j in 0..3 {
+            let c = cross(a_net, basis[j]);
+            for i in 0..3 {
+                negcross[i][j] = -c[i];
+                poscross[i][j] = c[i];
+            }
+        }
+        // 也试 f 取【含重力支撑的原始比力】(即不减 b_a) 与【减 g 前后】等变体 ✓
+        let f_variants: [(&str, [f32; 3]); 2] =
+            [("f=a_m-b_a", a_net), ("f=a_m", am)];
+        println!("  ★机体系化（Rᵀ·J/dt）行0 = [{:.4} {:.4} {:.4}]",
+            body_jt[0][0], body_jt[0][1], body_jt[0][2]);
+        println!("     参照 −[f×] 行0 = [{:.4} {:.4} {:.4}]  偏差 {:.2e}",
+            negcross[0][0], negcross[0][1], negcross[0][2], dev(&body_jt, &negcross));
+        println!("     参照 +[f×] 行0 = [{:.4} {:.4} {:.4}]  偏差 {:.2e}",
+            poscross[0][0], poscross[0][1], poscross[0][2], dev(&body_jt, &poscross));
+        for (nm, f) in f_variants {
+            let mut nc = [[0.0f32; 3]; 3];
+            let mut pc = [[0.0f32; 3]; 3];
+            for j in 0..3 {
+                let c = cross(f, basis[j]);
+                for i in 0..3 { nc[i][j] = -c[i]; pc[i][j] = c[i]; }
+            }
+            println!("     变体 {nm}: −[f×] 偏差 {:.2e} | +[f×] 偏差 {:.2e}",
+                dev(&body_jt, &nc), dev(&body_jt, &pc));
+        }
+    }
     assert!(best_t < 1e-3 && best_b < 1e-3, "δv 块的两种耦合必须至少各有一个候选匹配 ✓");
     println!("  ✓ δv 块已在数值上定形（符号由实测决定 ✓，与 §5 文本待比对）");
 }
