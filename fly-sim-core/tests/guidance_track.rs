@@ -65,9 +65,17 @@ use fly_sim_core::wind::{WindConfig, WindField};
 const DT: f32 = 0.004;
 
 struct TrackStat {
-    /// 跟踪误差（真值 vs 期望）：max / RMS
+    /// 跟踪误差（真值 vs 期望）：**全程** max / RMS（含启动瞬态，照实保留）
     pub err_max: f64,
     pub err_rms: f64,
+    /// 跟踪误差：**稳态段**（跟轨迹后 `SETTLE_S` 秒起）max / RMS
+    ///
+    /// ⚠️ **为何必须分开**（2026-09-21 方法学修正）：本文件初版只报全程值，
+    /// 而"从悬停起加速到轨迹速度"的瞬态会主导 max（直线 2m/s 实测全程 7.5m）。
+    /// H 场其它测试都显式划 settle 段（`sil` 的前/末窗口、`x_hover_noise` 的
+    /// `SETTLE_STEPS`）—— 本处对齐该做法。**全程值同时保留**，不隐藏瞬态。
+    pub err_max_ss: f64,
+    pub err_rms_ss: f64,
     /// 估计误差（估计 vs 真值）：位置 max / 姿态 max（度）
     pub est_pos_max: f64,
     pub est_att_max_deg: f64,
@@ -120,6 +128,10 @@ fn run_track_ki<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32
     }
     let (mut emax, mut esum, mut n) = (0.0f64, 0.0f64, 0u64);
     let (mut epmax, mut eamax) = (0.0f64, 0.0f64);
+    // 稳态段：轨迹开始后 `SETTLE_S` 秒起（对齐 H 场其它测试的 settle 做法）
+    const SETTLE_S: f64 = 3.0;
+    let ss_from = (SETTLE_S / DT as f64) as u64;
+    let (mut ssmax, mut sssum, mut ssn) = (0.0f64, 0.0f64, 0u64);
     let mut diverged = false;
     while !g.done() && n < 200_000 {
         let sp = g.step();
@@ -132,6 +144,11 @@ fn run_track_ki<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32
         .sqrt() as f64;
         emax = emax.max(d);
         esum += d * d;
+        if n >= ss_from {
+            ssmax = ssmax.max(d);
+            sssum += d * d;
+            ssn += 1;
+        }
         // 估计误差：估计 vs 真值
         let ep = ((est.pos[0].0 - truth.pos[0].0).powi(2)
             + (est.pos[1].0 - truth.pos[1].0).powi(2)
@@ -150,6 +167,8 @@ fn run_track_ki<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32
     TrackStat {
         err_max: emax,
         err_rms: if n > 0 { (esum / n as f64).sqrt() } else { 0.0 },
+        err_max_ss: ssmax,
+        err_rms_ss: if ssn > 0 { (sssum / ssn as f64).sqrt() } else { 0.0 },
         est_pos_max: epmax,
         est_att_max_deg: eamax,
         diverged,
@@ -278,8 +297,8 @@ fn decompose_tracking_divergence() {
     ];
     for (name, st) in &cases {
         println!(
-            "  {name:26} 跟踪 err_max={:8.3}m rms={:7.3}m | 估计 pos={:.3}m | 发散={}",
-            st.err_max, st.err_rms, st.est_pos_max, st.diverged
+            "  {name:26} 全程 err_max={:8.3}m rms={:7.3}m | 稳态 err_max={:7.3}m rms={:6.3}m | 发散={}",
+            st.err_max, st.err_rms, st.err_max_ss, st.err_rms_ss, st.diverged
         );
     }
     println!("（判读：哪一项让 err_max 掉到 <1m 量级，就是跟踪发散的成因）");
@@ -379,8 +398,8 @@ fn separate_yaw_rate_from_lateral_accel() {
         let st = run_track(SpinYaw { inner: l, rate }, None);
         // 期望位置只是"起点 + 2m/s·t" ⇒ 侧向加速度恒为 0，唯一变量是偏航速率
         println!(
-            "  偏航速率 {:>4.1} rad/s | 跟踪 err_max={:8.3}m rms={:7.3}m | 估计 pos={:.3}m | 发散={}",
-            rate, st.err_max, st.err_rms, st.est_pos_max, st.diverged
+            "  偏航速率 {:>4.1} | 全程 {:8.3}m | 稳态 {:7.3}m | 估计 pos={:.3}m | 发散={}",
+            rate, st.err_max, st.err_max_ss, st.est_pos_max, st.diverged
         );
     }
     println!("（判读：误差随偏航速率单调增长 ⇒ 成因是偏航速率；若无侧向加速度下都好 ⇒ 是耦合）");
@@ -407,8 +426,8 @@ fn ki_xy_vs_tracking_lag() {
         let c2 = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
         let st_yaw = run_track_ki(c2, None, ki);
         println!(
-            "  ki_xy={:.2} | 直线 err_max={:7.3}m | 圆(固定偏航)={:7.3}m | 圆(切向偏航)={:7.3}m",
-            ki, st_line.err_max, st_circ.err_max, st_yaw.err_max
+            "  ki_xy={:.2} | 直线 全程{:7.3}/稳态{:7.3}m | 圆(固定) 稳态{:7.3}m | 圆(切向) 稳态{:7.3}m",
+            ki, st_line.err_max, st_line.err_max_ss, st_circ.err_max_ss, st_yaw.err_max_ss
         );
     }
     println!("（判读：若开启积分后三者都大幅下降 ⇒ 误差主要是 P-only 稳态滞后）");
