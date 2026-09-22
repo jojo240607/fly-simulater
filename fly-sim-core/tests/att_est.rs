@@ -1167,11 +1167,10 @@ fn a8_turbulence_bounded_and_reproducible() {
 ///
 /// 两个噪声配置都测：`low_noise`（源理想）与 `realistic`（源带噪声+延迟）。
 /// **产品跑的是 realistic**，所以后者的“开”列才是产品体验。
-#[test]
-fn g_aw_gps_default_evaluation() {
-    let _g = lock();
-    let dt = 0.004f32;
-    let cases: [(&str, Maneuver, f32); 10] = [
+/// **A1–A10 场景清单**（未标定/已标定两档由 `run_ab_table` 内部各跑一遍 ✓）。
+/// 抽成函数以便【双跑】测例复用 ✓（避免两份清单漂移 ✗）。
+fn ab_cases() -> [(&'static str, Maneuver, f32); 10] {
+    [
         ("A1 悬停微扰", Maneuver::HoverMicro { amp_deg: 3.0 }, 60.0),
         (
             "A2 自稳巡航",
@@ -1231,7 +1230,15 @@ fn g_aw_gps_default_evaluation() {
             Maneuver::GyroSatBoundary { rate_dps: 1500.0 },
             20.0,
         ),
-    ];
+    ]
+}
+
+
+#[test]
+fn g_aw_gps_default_evaluation() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let cases = ab_cases();;
 
     for (cfg_name, cfg) in [
         ("low_noise", low_noise()),
@@ -3804,4 +3811,27 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
         c1_r < lg_r * 1.5,
         "C1 在已标定档下不应显著劣于 Legacy（C1={c1_r:.3}° vs Legacy={lg_r:.3}°）✗"
     );
+}
+
+/// ★**全量双跑**（迁移计划步 5 ① ✓）：同一批 A1–A10 场景分别在 Legacy 与 ESKF 下跑，
+/// 每档（未标定 / 已标定）各一遍 ✓ —— 这是"翻产品默认为 ESKF"的前置证据 ✓。
+///
+/// 纪律 ✓：不仅比数字，还**断言两条估计器都确实在运行** ✓（`kind()` 自证 ✗ 非静默回退 ✗）。
+#[test]
+fn dual_run_ab_table_legacy_vs_eskf() {
+    let _g = lock();
+    let cases = ab_cases();
+    // ① Legacy
+    select_est_mode(EstMode::Legacy);
+    let probe = AnyEstimator::legacy();
+    assert_eq!(probe.kind(), "legacy", "①要求 Legacy，实际 {} ✗", probe.kind());
+    run_ab_table(EstMode::Legacy, &cases);
+    // ② ★ESKF（自证：真为 ESKF，而非静默回退 ✗）
+    let probe2 = AnyEstimator::default_product();
+    assert_eq!(probe2.kind(), "eskf", "②要求 ESKF，实际 {} ✗", probe2.kind());
+    run_ab_table(EstMode::Ekf, &cases);
+    // ③ 还原默认 ✓
+    select_est_mode(EstMode::Legacy);
+    assert_eq!(get_est_mode(), 0, "模式未还原 ✗");
+    println!("\n  ✓ 全量双跑完成：Legacy 与 ESKF 各跑 A1–A10 × 两档 ✓；模式已还原 ✓");
 }
