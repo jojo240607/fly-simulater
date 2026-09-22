@@ -2525,3 +2525,49 @@ fn a7_second_problem_2d_sweep() {
     }
     println!("  → 判读：只随自旋 ⇒ 投影错；只随加速度 ⇒ 补偿源延迟；需两者 ⇒ 耦合 ✓");
 }
+
+/// **A7 第二问题验证：平移【持续时间】扫描**（同幅值 0.5g，已标定档 ✓）。
+///
+/// 假设（来自二维扫描 ✓）：roll/pitch 误差源于"重力锚定被【持续】平移加速度污染"，
+/// 且误差应随**持续时间**增长（污染持续累积 ✗）。
+/// 判读：若随 hold_s 单调增长 ⇒ 坐实 ✓；若与 hold_s 无关 ⇒ 该假设也错 ✗。
+#[test]
+fn a7_verify_sustained_vs_transient_by_duration() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let euler_rp = |q: [f32; 4]| -> (f64, f64) {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (
+            (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y)).to_degrees(),
+            (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin().to_degrees(),
+        )
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    println!("\n[A7 验证] BrakeReversal 0.5g 保持时长扫描（已标定档）");
+    println!("{:>10} {:>12} {:>12} {:>12}", "hold_s", "roll均值", "pitch均值", "全姿态RMSE");
+    for hold_s in [1.0f32, 3.0, 6.0, 12.0, 20.0] {
+        let m = Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s };
+        let (cfg, c) = tier_setup(MagCalibTier::Calibrated);
+        set_mag_calib(c);
+        let (mut rs, mut ps, mut n) = (0.0f64, 0.0f64, 0u64);
+        let r = run_observed(&m, dt, cfg, 2.0, None, |_t, tr, est| {
+            let (er, ep) = euler_rp([est.att.w, est.att.x, est.att.y, est.att.z]);
+            let (trr, tp) = euler_rp(tr.quat);
+            rs += wrap(er - trr).abs();
+            ps += wrap(ep - tp).abs();
+            n += 1;
+        });
+        set_mag_calib([0.0; 3]);
+        let k = n.max(1) as f64;
+        println!(
+            "{hold_s:>10.0} {:>12.2} {:>12.2} {:>12.3}",
+            rs / k, ps / k, r.att.rmse_deg()
+        );
+    }
+    println!("  → 判读：随 hold_s 单调增长 ⇒ '持续平移污染'坐实 ✓；无关 ⇒ 该假设也错 ✗");
+}
