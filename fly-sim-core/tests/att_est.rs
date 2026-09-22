@@ -3983,3 +3983,73 @@ fn a4_a7_axis_split_both_modes() {
     select_est_mode(EstMode::Legacy);
     println!("  ✓ 排查完成（模式已还原 ✓）");
 }
+
+/// ★**磁链时间历程诊断**（A4/A7 偏航真因 ✓）：直接驱动 `Eskf` 并**接上完整磁链**
+/// （§4 测例没有接磁 ✗ ⇒ 这正是它通过的原因 ✓）。打印 `mag_i`/`mag_b` 随时间的演变，
+/// 判定"持续旋转是否把两者拖走"✗。
+#[test]
+fn mag_state_history_in_rotation_cases() {
+    use flyctrl_core::estimator::eskf::{align_static, Eskf};
+    let _g = lock();
+    let dt = 0.004f32;
+    for (label, m, dur) in [
+        ("A4 协调转弯", Maneuver::CoordinatedTurn { bank_deg: 50.0, rate_dps: 90.0 }, 120.0),
+        ("A7 慢转+0.5g", Maneuver::SpinTranslate { yaw_dps: 10.0, accel_g: 0.5 }, 180.0),
+    ] {
+        let (cfg, _c) = tier_setup(MagCalibTier::UncalibExtreme);
+        let mut flt: Option<Eskf> = None;
+        let mut first_mag = true;
+        let mut yaw_err_sum = 0.0f64;
+        let mut n = 0u32;
+        println!("\n[磁链历程] {label}  先验 MAG_I_PRIOR = {MAG_I_PRIOR:?}");
+        println!("{:>8} {:>26} {:>26} {:>10}", "t(s)", "mag_I", "mag_B", "yaw_err°");
+        let _ = run_observed(&m, dt, cfg, 2.0, None, |t, tr, _est| {
+            let (acc, gyro, gps, baro, mag) =
+                unsafe { (SENSOR_SLOT, SENSOR_SLOT, GPS_SLOT, BARO_SLOT, MAG_SLOT) };
+            let acc_v = [acc[0], acc[1], acc[2]];
+            let gyr_v = [gyro[3], gyro[4], gyro[5]];
+            let mag_v = [mag[0], mag[1], mag[2]];
+            let f = flt.get_or_insert_with(|| {
+                let (q0, bg) = align_static(acc_v, gyr_v);
+                let mut f = Eskf::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
+                f.st.bg = bg;
+                f
+            });
+            f.predict(
+                [gyr_v[0] * dt, gyr_v[1] * dt, gyr_v[2] * dt],
+                [acc_v[0] * dt, acc_v[1] * dt, acc_v[2] * dt],
+                dt,
+                [0.0, 0.0, 9.81],
+            );
+            let _ = f.update_baro(baro);
+            let _ = f.update_gps_vel([gps[3], gps[4], gps[5]]);
+            let _ = f.update_gps_pos([gps[0], gps[1], gps[2]]);
+            let _ = f.update_gravity([acc[0], acc[1], acc[2]], [0.0, 0.0, 9.81]);
+            // ★完整磁链（§4 缺失的那一环 ✓）
+            if first_mag {
+                f.reset_mag_states(mag_v, MAG_I_PRIOR);
+                first_mag = false;
+            }
+            let _ = f.update_mag(mag_v);
+            let (_, _, y_c) = euler_zyx([f.st.q.w, f.st.q.x, f.st.q.y, f.st.q.z]);
+            let (_, _, y_t) = euler_zyx(tr.quat);
+            yaw_err_sum += wrap180(y_c - y_t).abs();
+            n += 1;
+            let tt = t as f64;
+            if (tt * 100.0) as i64 % 2000 == 0 {
+                println!(
+                    "{tt:>8.1} [{:>7.3},{:>7.3},{:>7.3}] [{:>7.3},{:>7.3},{:>7.3}] {:>10.2}",
+                    f.mag_i[0], f.mag_i[1], f.mag_i[2],
+                    f.mag_b[0], f.mag_b[1], f.mag_b[2],
+                    wrap180(y_c - y_t).abs()
+                );
+            }
+        });
+        println!(
+            "  ⇒ {label}: 平均 |yaw_err| = {:.2}°（先验 ‖mag_I‖ = {:.3}）",
+            yaw_err_sum / n.max(1) as f64,
+            (MAG_I_PRIOR[0] * MAG_I_PRIOR[0] + MAG_I_PRIOR[1] * MAG_I_PRIOR[1] + MAG_I_PRIOR[2] * MAG_I_PRIOR[2]).sqrt()
+        );
+    }
+    println!("  ✓ 磁链历程诊断完成 ✓");
+}
