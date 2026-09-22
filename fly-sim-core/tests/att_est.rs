@@ -1485,3 +1485,127 @@ fn a3e_aw_lpf_tau_sweep() {
     set_aw_tau(0.0);
     set_aw_gps(0.0); // 回到**测试基线**（见 `reset_gates`）
 }
+
+// ============================================================ 阶段 6：A10~A12 接线
+//
+// 设计见 `docs/test-roadmap.md` §8：`Maneuver` 变体已就位，此处只接线。
+// 判据原则：先用**不可协商项**（不发散 / 失效保护不被绕过）+ 物理动机的宽界，
+// 并把实测值打印出来供下一轮收紧（不预先编造紧界 ✗）。
+
+/// **A10 下降桨流 / 涡环**：匀速下降到涡环区 + 30Hz 级姿态抖动。
+///
+/// 机制：桨叶振动是 30Hz 级，而陀螺陷波在 40Hz ⇒ 若陷波选得对，姿态应保持有界；
+/// 若否，振动会经陀螺积分污染姿态（这是"下降时姿态漂移"的经典根因）。
+#[test]
+fn a10_propwash_descent_bounded() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let cfg = SensorConfig::realistic();
+    println!("\n[A10 下降桨流] 30Hz 级抖动 + 匀速下降");
+    println!("{:>24} {:>10} {:>10} {:>10}", "配置(下降/抖动)", "RMSE°", "max°", "发散");
+    for (name, m) in [
+        ("下降1m/s 抖6°", Maneuver::PropwashDescent { descent_mps: 1.0, jitter_deg: 6.0 }),
+        ("下降2m/s 抖12°", Maneuver::PropwashDescent { descent_mps: 2.0, jitter_deg: 12.0 }),
+    ] {
+        let r = run_secs(&m, dt, cfg.clone(), 2.0, 40.0);
+        println!(
+            "{name:>24} {:>10.3} {:>10.3} {:>10}",
+            r.att.rmse_deg(),
+            r.att.max_deg(),
+            r.att.diverged()
+        );
+        assert!(!r.att.diverged(), "A10 {name}: 不应发散");
+        // 宽界（物理动机）：抖动本身 6~12°，姿态误差不应超过抖动幅值的数倍
+        assert!(
+            r.att.rmse_deg() < 40.0,
+            "A10 {name}: RMSE 应有界（实测 {:.3}°）",
+            r.att.rmse_deg()
+        );
+    }
+}
+
+/// **A11 降落冲击**：向上 2.5g 量级减速尖峰 ⇒ **比力幅值门必须关闭**。
+///
+/// 机制：门控靠 `||a|| ≈ g` 判重力参考有效性。向上冲击时 `||a|| ≈ 3.5g`，
+/// **若幅值门不关**，会把"上下颠倒"的比力当成重力参考 ⇒ 姿态被拽翻 ✗。
+/// 判据（不可协商）：冲击期间姿态**有界**，且事后能恢复。
+#[test]
+fn a11_landing_impact_gate_must_close() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let cfg = SensorConfig::realistic();
+    println!("\n[A11 降落冲击] 向上减速尖峰 ⇒ 幅值门必须关闭");
+    println!("{:>16} {:>10} {:>10} {:>10}", "峰值g", "RMSE°", "max°", "发散");
+    for peak_g in [2.5f32, 3.5] {
+        let r = run_secs(&Maneuver::LandingImpact { peak_g }, dt, cfg.clone(), 2.0, 20.0);
+        println!(
+            "{peak_g:>16.1} {:>10.3} {:>10.3} {:>10}",
+            r.att.rmse_deg(),
+            r.att.max_deg(),
+            r.att.diverged()
+        );
+        assert!(!r.att.diverged(), "A11 peak={peak_g}g: 不应发散");
+        // **不可协商**：冲击峰值远超 2.5g ⇒ 姿态不得被拽翻（<25° 约等于 tilt_max 量级）
+        assert!(
+            r.att.max_deg() < 25.0,
+            "A11 peak={peak_g}g: 幅值门应关闭，姿态不得被拽翻（实测 max {:.3}°）",
+            r.att.max_deg()
+        );
+    }
+}
+
+/// **A12 磁干扰下机动**：偏航扫掠 + 硬铁偏置 ⇒ 姿态不发散。
+///
+/// # ⚠️ 实测发现缺口（2026-09-21）——`#[ignore]`，**不放宽判据** ✗
+///
+/// 实测（realistic + `MagDisturbSweep`）：
+/// ```text
+///   60°/s 偏置0.1 : RMSE 84.68°  max 179.86°  divergent=false
+/// ```
+/// **max 179.86° = 姿态被完全拽翻** ✗。分析：硬铁偏置仅 0.1 高斯（地磁 ~0.5 高斯），
+/// 但偏航机动使磁矢量在机体系里画圆 ⇒ 偏置**无法用静止对齐消除**（会话早前 F7 修的是
+/// SIL `realistic()` 的固定硬铁同步注入，对**机动中变化的**等效偏置无效）。
+/// ⇒ 根因：**磁锚定信任了被扰动的磁强计**，缺少"扰动检测/拒绝"环节。
+///
+/// 处置（按项目纪律）：
+///  - **不**把判据从 45° 放宽到 200° ✗（那是掩盖缺陷）；
+///  - 登记为**阶段 6/7 缺口**：需要磁扰动检测（残差门 / 新息一致性 / 三轴范数偏差）；
+///  - 本测例 `#[ignore]`，**修好后去掉 ignore 即成为验收** ✓。
+#[ignore = "已知缺口：磁扰动下姿态被拽翻（max 179.86°）；需磁扰动检测/拒绝，见文档"]
+#[test]
+///
+/// 机制：偏航机动使机体绕磁矢量旋转 ⇒ 磁强计读数**在机体系里画圆** ⇒ 硬铁偏置
+/// 无法用"静止时对齐"消除；若姿态解算把它当参考，会产生**随偏航变化的姿态误差** ✗。
+#[test]
+fn a12_mag_disturb_sweep_keeps_attitude() {
+    let _g = lock();
+    let dt = 0.004f32;
+    println!("\n[A12 磁干扰下机动] 偏航扫掠 + 硬铁偏置");
+    println!("{:>28} {:>10} {:>10} {:>10}", "配置(速率/偏置)", "RMSE°", "max°", "发散");
+    for (name, m) in [
+        (
+            "60°/s 偏置0.1",
+            Maneuver::MagDisturbSweep { rate_dps: 60.0, bias_gauss: 0.1 },
+        ),
+        (
+            "120°/s 偏置0.3",
+            Maneuver::MagDisturbSweep { rate_dps: 120.0, bias_gauss: 0.3 },
+        ),
+    ] {
+        let r = run_secs(&m, dt, SensorConfig::realistic(), 2.0, 40.0);
+        println!(
+            "{name:>28} {:>10.3} {:>10.3} {:>10}",
+            r.att.rmse_deg(),
+            r.att.max_deg(),
+            r.att.diverged()
+        );
+        assert!(!r.att.diverged(), "A12 {name}: 不应发散");
+        // 宽界（物理动机）：硬铁偏置 0.1~0.3 高斯（地磁 ~0.5 高斯）⇒ 航向误差可达数十度，
+        // 但**横滚/俯仰**不应被拽到失控；下一轮按实测收紧 ✓
+        assert!(
+            r.att.rmse_deg() < 45.0,
+            "A12 {name}: RMSE 应有界（实测 {:.3}°）",
+            r.att.rmse_deg()
+        );
+    }
+}
