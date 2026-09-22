@@ -1655,13 +1655,23 @@ fn a12_mag_disturb_sweep_keeps_attitude() {
     println!("\n[A12 磁干扰下机动] 偏航扫掠 + 硬铁偏置");
     println!("{:>28} {:>10} {:>10} {:>10}", "配置(速率/偏置)", "RMSE°", "max°", "发散");
     for (name, m) in [
+        // ⚠️ **速率必须落在实测能力内**（2026-09-21 查明）：原用设计里的 60°/s
+        // = 1.05 rad/s，而实测偏航速率跟踪能力仅 0.2~0.5 rad/s ⇒ 机根本跟不上，
+        // 误差累积到 ±150° —— **实测 bias=0（零扰动）也是 92°/179.75°** ✗
+        // ⇒ 原测例的前提错了（把"能力不足"误当"磁扰动缺陷"），与阶段 5 的
+        // "轨迹不可行"同类。改用 **20°/s = 0.35 rad/s**（能力区间内 ✓），
+        // 此时磁扰动才是主导变量 ✓。
         (
-            "60°/s 偏置0.1",
-            Maneuver::MagDisturbSweep { rate_dps: 60.0, bias_gauss: 0.1 },
+            "20°/s 偏置0.1",
+            Maneuver::MagDisturbSweep { rate_dps: 20.0, bias_gauss: 0.1 },
         ),
         (
-            "120°/s 偏置0.3",
-            Maneuver::MagDisturbSweep { rate_dps: 120.0, bias_gauss: 0.3 },
+            "20°/s 偏置0.3",
+            Maneuver::MagDisturbSweep { rate_dps: 20.0, bias_gauss: 0.3 },
+        ),
+        (
+            "40°/s 偏置0.3",
+            Maneuver::MagDisturbSweep { rate_dps: 40.0, bias_gauss: 0.3 },
         ),
     ] {
         let r = run_secs(&m, dt, SensorConfig::realistic(), 2.0, 40.0);
@@ -1736,4 +1746,52 @@ fn mag_calibration_tiers_matter() {
         out[0].1 - out[2].1,
         out[2].1
     );
+}
+
+/// **A12 机制查明**（roadmap §8.1 的第一步）：bias 0.1（22% 地磁）为何给出 **179.86°**
+/// 而非"常量偏移十几度"？⇒ 先扫偏置找拐点，再看翻转是**阶跃**还是**渐进**。
+///
+/// 不预设结论 ✓：只有查清机制才设计门控（本项目已有"未确诊就治错病"的教训 ✗）。
+#[test]
+fn a12_mechanism_probe() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let yaw_of = |q: [f32; 4]| -> f64 {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z)).to_degrees()
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    println!("\n[A12 机制] 偏置扫描（姿态 RMSE 随 bias 的走势 ⇒ 找拐点）");
+    println!("{:>10} {:>12} {:>12} {:>14}", "bias", "RMSE°", "max°", "末yaw误差°");
+    for bias in [0.0f32, 0.02, 0.05, 0.1, 0.2] {
+        let m = Maneuver::MagDisturbSweep { rate_dps: 60.0, bias_gauss: bias };
+        let mut last = 0.0f64;
+        let r = run_observed(&m, dt, SensorConfig::realistic(), 2.0, None, |_t, tr, est| {
+            last = yaw_of([est.att.w, est.att.x, est.att.y, est.att.z]) - yaw_of(tr.quat);
+        });
+        println!(
+            "{bias:>10.2} {:>12.3} {:>12.3} {:>14.2}",
+            r.att.rmse_deg(),
+            r.att.max_deg(),
+            wrap(last)
+        );
+    }
+    // 时序：bias=0.1 下 yaw 误差是【阶跃】还是【渐进】？
+    println!("\n[A12 机制] bias=0.1 时序（每 2s 采样；看翻转形态）");
+    let m = Maneuver::MagDisturbSweep { rate_dps: 60.0, bias_gauss: 0.1 };
+    let mut series: Vec<(f32, f64)> = Vec::new();
+    let _ = run_observed(&m, dt, SensorConfig::realistic(), 2.0, None, |t, tr, est| {
+        if (t * 2.0).fract() < dt * 2.0 {
+            series.push((t, wrap(yaw_of([est.att.w, est.att.x, est.att.y, est.att.z]) - yaw_of(tr.quat))));
+        }
+    });
+    for (t, e) in series.iter().take(20) {
+        println!("    t={t:>5.1}s  yaw_err = {e:>8.2}°");
+    }
+    println!("  → 形态判读：若在若干秒内单调放大 ⇒ 【渐进拖拽】；若一跳到位 ⇒ 【阶跃/失锁】");
 }
