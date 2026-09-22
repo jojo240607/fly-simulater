@@ -76,6 +76,8 @@ struct TrackStat {
     /// `SETTLE_STEPS`）—— 本处对齐该做法。**全程值同时保留**，不隐藏瞬态。
     pub err_max_ss: f64,
     pub err_rms_ss: f64,
+    /// 稳态误差的**各轴分量峰值** `[北, 东, 下]` —— 用于区分"高度偏差"与"沿轨滞后"
+    pub err_axis_ss: [f64; 3],
     /// 估计误差（估计 vs 真值）：位置 max / 姿态 max（度）
     pub est_pos_max: f64,
     pub est_att_max_deg: f64,
@@ -203,6 +205,7 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
     const SETTLE_S: f64 = 3.0;
     let ss_from = (SETTLE_S / DT as f64) as u64;
     let (mut ssmax, mut sssum, mut ssn) = (0.0f64, 0.0f64, 0u64);
+    let mut axis_max = [0.0f64; 3];
     let mut diverged = false;
     while !g.done() && n < 200_000 {
         let sp = g.step();
@@ -219,6 +222,9 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
             ssmax = ssmax.max(d);
             sssum += d * d;
             ssn += 1;
+            for k in 0..3 {
+                axis_max[k] = axis_max[k].max((est.pos[k].0 as f64 - sp.pos[k].0 as f64).abs());
+            }
         }
         // 估计误差：估计 vs 真值
         let ep = ((est.pos[0].0 - truth.pos[0].0).powi(2)
@@ -240,6 +246,7 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
         err_rms: if n > 0 { (esum / n as f64).sqrt() } else { 0.0 },
         err_max_ss: ssmax,
         err_rms_ss: if ssn > 0 { (sssum / ssn as f64).sqrt() } else { 0.0 },
+        err_axis_ss: axis_max,
         est_pos_max: epmax,
         est_att_max_deg: eamax,
         diverged,
@@ -723,4 +730,28 @@ fn baseline_att_error_without_guidance() {
     // 基线随环境而定，故只作**同指标对照**，不作绝对阈值断言；
     // 判据（>2×）由调用方按同一指标判定（此处打印，供填回 `circle_tracking_and_amplification`）。
     assert!(st_hover.est_att_max_deg.is_finite() && st_circ.est_att_max_deg.is_finite());
+}
+
+
+/// **误差按轴拆解**：区分"高度偏差（下）"与"沿轨滞后（北/东）"。
+///
+/// 动机：标量范数把两者混在一起 ✗，导致"直线 7.7m、圆 1.3m"这类差异无从判断。
+/// 拆开后：若主要是【下】⇒ 定高/配平问题；若主要是【北/东】⇒ 沿轨滞后/相位问题。
+#[test]
+fn error_axis_decomposition() {
+    use flyctrl_core::units::Meter;
+    println!("\n误差按轴拆解（稳态峰值 [北, 东, 下] m）");
+    let cases: [(&str, TrackStat); 4] = [
+        ("圆 固定偏航", run_track(FixedYaw(Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0)), None)),
+        ("直线 偏航0", run_track(Line { start: [Meter(0.0), Meter(0.0), Meter(-5.0)], vel_n: 2.0, dur: 12.0 }, None)),
+        ("圆 切向偏航", run_track(Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0), None)),
+        ("八字 固定偏航", run_track(FixedYaw(Figure8::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 0.6, 1.0)), None)),
+    ];
+    for (name, st) in &cases {
+        println!(
+            "  {name:14} 稳态范数 {:7.3}m | 北 {:7.3} 东 {:7.3} 下 {:7.3}",
+            st.err_max_ss, st.err_axis_ss[0], st.err_axis_ss[1], st.err_axis_ss[2]
+        );
+    }
+    println!("（判读：直线若主要是【北】⇒ 沿轨滞后；若主要是【下】⇒ 定高问题）");
 }
