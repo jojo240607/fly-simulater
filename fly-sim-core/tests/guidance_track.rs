@@ -541,3 +541,68 @@ use flyctrl_core::units::Meter;
     println!("（判读：误差随 vmax_xy 显著下降 ⇒ 成因为它；若不动 ⇒ 另有成因）");
     unsafe { flyctrl_core::controller::pid::G_VMAX_XY = -1.0 };
 }
+
+// ---------------------------------------------------------------- 约定自检（步骤 2 的前提）
+
+/// **四元数约定自检**：把三处约定钉死，供推力矢量构造（步骤 2）使用。
+///
+/// 本会话教训：推力矢量版首次实现给出 355° 姿态误差（约定错 ✗），而当时**无从判断**
+/// 是架构问题还是约定问题。本测例把约定变成**可断言的事实**，避免再次盲改。
+#[test]
+fn quaternion_convention_selfcheck() {
+    use flyctrl_core::units::Radian;
+    use flyctrl_core::vehicle::{rotate_vec_by_quat, rotate_vec_by_quat_inverse, Quaternion};
+    let approx = |a: [f32; 3], b: [f32; 3]| {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 1e-5)
+    };
+
+    // ① `rotate_vec_by_quat(q, v)` 的语义：绕 +Z 转 90° 应把 +X(北) 映到 +Y(东)
+    let qz90 = Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(core::f32::consts::FRAC_PI_2));
+    let v = rotate_vec_by_quat(qz90, [1.0, 0.0, 0.0]);
+    assert!(
+        approx(v, [0.0, 1.0, 0.0]),
+        "约定①：绕 +Z 90° 应把 +X→+Y（右手系），实测 {v:?}"
+    );
+    // 且 inverse 是其逆
+    let back = rotate_vec_by_quat_inverse(qz90, [0.0, 1.0, 0.0]);
+    assert!(approx(back, [1.0, 0.0, 0.0]), "约定①：inverse 应为逆旋转，实测 {back:?}");
+
+    // ② `att` 的语义：代码里 `rotate_vec_by_quat_inverse(att, 世界) = 机体`（重力用法）
+    //    与 `rotate_vec_by_quat(att, 机体) = 世界`（磁用法）⇒ **att 是 机体→世界**。
+    //    （注意：vperiph 的文档写"世界系→机体"，与代码行为**矛盾** —— 以代码为准。）
+    let att = qz90; // 拿 90° 偏航当样本
+    let body_v = [1.0, 0.0, 0.0];
+    let world_v = rotate_vec_by_quat(att, body_v);
+    assert!(
+        approx(world_v, [0.0, 1.0, 0.0]),
+        "约定②：rotate(att, 机体) 应得世界系（att 为机体→世界），实测 {world_v:?}"
+    );
+
+    // ③ **推力矢量构造的必备断言**：构造出的 q 必须把机体 +Z 映射到指定世界方向
+    //    （推力沿机体 -Z ⇒ 若机体 +Z 世界系 = -f_w/|f_w|，则推力方向 = f_w ✓）
+    let zb = [0.3f32, -0.2, 0.93]; // 任取一个"朝下偏一点"的方向（近似单位）
+    let n = (zb[0] * zb[0] + zb[1] * zb[1] + zb[2] * zb[2]).sqrt();
+    let zb = [zb[0] / n, zb[1] / n, zb[2] / n];
+    let ax = -zb[1];
+    let ay = zb[0];
+    let s = (ax * ax + ay * ay).sqrt();
+    let c = zb[2].clamp(-1.0, 1.0);
+    let q_align = if s < 1e-9 {
+        Quaternion::IDENTITY
+    } else {
+        Quaternion::from_axis_angle([ax / s, ay / s, 0.0], Radian(s.atan2(c)))
+    };
+    let got = rotate_vec_by_quat(q_align, [0.0, 0.0, 1.0]);
+    assert!(
+        approx(got, zb),
+        "约定③：q_align 应把 (0,0,1) 旋到 zb。期望 {zb:?}，实测 {got:?} —— \
+         若此处失败，则推力矢量构造的轴/角约定有误（本次 355° 姿态误差的根源）"
+    );
+
+    // ④ 叠加偏航后仍应保持"机体 +Z → zb"（偏航绕 zb 轴施加不改变 +Z）
+    let q_yaw = Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(0.5));
+    let q_full = q_yaw * q_align;
+    let got2 = rotate_vec_by_quat(q_full, [0.0, 0.0, 1.0]);
+    println!("  自检④：q_yaw*q_align 把 (0,0,1) 映射到 {got2:?}（zb={zb:?}）");
+    println!("  ⇒ 若 got2≈zb，则『世界系左乘偏航』的乘法序正确；否则序反了");
+}
