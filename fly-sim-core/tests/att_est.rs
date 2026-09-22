@@ -245,6 +245,61 @@ pub fn run_observed_full_secs(
     }
 }
 
+/// 写入**运行时硬铁标定值**（对照"已标定 vs 未标定"两档；见 `G_MAG_CALIB`）。
+fn set_mag_calib(v: [f32; 3]) {
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_MAG_CALIB), v);
+    }
+}
+
+/// `realistic()` 的硬铁偏置（极端档：**120% 地磁**；地磁 `[0.2,0,0.4]` => |B|=0.447）
+const HI_EXTREME: [f32; 3] = [0.3, -0.2, 0.4];
+/// 典型档硬铁（约 **22% 地磁**）——代表"装配良好但忘了标定"的常见情况 ✓
+const HI_TYPICAL: [f32; 3] = [0.05, -0.06, 0.08];
+
+/// **标定状态三档（A 案）** —— 把"标定"从隐含前提变成**显式维度** ✓。
+///
+/// 动机（2026-09-21，参照成熟飞控）：硬铁是**机体属性**（永磁 + 电流），换机架/走线
+/// 必变，且同一机架内随**油门**变化；ArduPilot/PX4 都用【离线标定 + 运行时一致性门】
+/// 两道防线。而我们的 `realistic()` 是**未标定 + 极端**（120% 地磁）⇒ 若所有测例都跑它，
+/// "算法对不对"会被这个常量污染，且**已标定（产品常态）这一档根本不存在** ✗。
+///
+/// 三档定义：
+///  - `UncalibExtreme`：`realistic()` 原样（极端未标定 = 布局不良/漏标定）✓
+///  - `UncalibTypical`：典型未标定（~22%）✓
+///  - `Calibrated`    ：把硬铁**注入 EKF** 扣除（= 标定过的产品机 ✓）
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MagCalibTier {
+    UncalibExtreme,
+    UncalibTypical,
+    Calibrated,
+}
+
+/// 取某档的 `(传感器配置, 注入 EKF 的标定值)` ✓
+fn tier_setup(tier: MagCalibTier) -> (SensorConfig, [f32; 3]) {
+    let mut c = SensorConfig::realistic();
+    match tier {
+        MagCalibTier::UncalibExtreme => (c, [0.0; 3]),
+        MagCalibTier::UncalibTypical => {
+            c.mag_hard_iron = HI_TYPICAL.map(|v| v as f64);
+            (c, [0.0; 3])
+        }
+        MagCalibTier::Calibrated => {
+            c.mag_hard_iron = HI_EXTREME.map(|v| v as f64);
+            (c, HI_EXTREME)
+        }
+    }
+}
+
+/// 按档跑一次（自动 set/reset 标定静态 ✓）
+fn run_tier(m: &Maneuver, dt: f32, tier: MagCalibTier, settle_s: f32, total_s: f32) -> RunOut {
+    let (cfg, calib) = tier_setup(tier);
+    set_mag_calib(calib);
+    let r = run_secs(m, dt, cfg, settle_s, total_s);
+    set_mag_calib([0.0; 3]); // 切勿泄漏给后续测试
+    r
+}
+
 /// 低噪声配置：先把"算法本身对不对"与"噪声鲁棒性"分开。噪声鲁棒性属阶段 6。
 ///
 /// 磁力计也一并清零硬/软铁/安装/偏角：它们是**阶段 6（鲁棒性）**的变量。
@@ -1625,4 +1680,60 @@ fn a12_mag_disturb_sweep_keeps_attitude() {
             r.att.rmse_deg()
         );
     }
+}
+
+/// **标定三档对照**（A 案落地）：用同一机动跑三档，量化"标定"这一维度的影响 ✓。
+///
+/// 参照依据（2026-09-21）：成熟飞控（ArduPilot `COMPASS_OFS_*` / PX4 `CAL_MAG0_OFF`）
+/// 都把硬铁当**逐机架机体属性**，要求"离线标定 + 运行时一致性门"两道防线 ⇒
+/// "已标定"是产品常态，"未标定"是故障态 ⇒ 两者**必须都能测** ✓。
+#[test]
+fn mag_calibration_tiers_matter() {
+    let _g = lock();
+    let dt = 0.004f32;
+    // 偏航扫掠（bias=0）⇒ 只让**配置里的硬铁**这一个变量起作用 ✓
+    let m = Maneuver::MagDisturbSweep { rate_dps: 60.0, bias_gauss: 0.0 };
+    println!("\n[标定三档] 同一机动（偏航扫掠 60°/s，无额外 bias）");
+    println!(
+        "{:>18} {:>12} {:>12} {:>10}",
+        "档位", "硬铁/地磁", "RMSE°", "max°"
+    );
+    let mag_b = (0.2f32 * 0.2 + 0.4 * 0.4).sqrt();
+    let mut out = Vec::new();
+    for (name, tier, hi) in [
+        ("未标定·极端", MagCalibTier::UncalibExtreme, HI_EXTREME),
+        ("未标定·典型", MagCalibTier::UncalibTypical, HI_TYPICAL),
+        ("已标定", MagCalibTier::Calibrated, HI_EXTREME),
+    ] {
+        let r = run_tier(&m, dt, tier, 2.0, 40.0);
+        let ratio = (hi[0] * hi[0] + hi[1] * hi[1] + hi[2] * hi[2]).sqrt() / mag_b;
+        println!(
+            "{name:>18} {:>11.0}% {:>12.3} {:>10.3}",
+            ratio * 100.0,
+            r.att.rmse_deg(),
+            r.att.max_deg()
+        );
+        assert!(!r.att.diverged(), "{name}: 不应发散");
+        out.push((name, r.att.rmse_deg(), r.att.max_deg()));
+    }
+    // **结构性判据**（可追溯，非编造数字）：单调性 + 已标定档必须显著优于未标定档 ✓
+    assert!(
+        out[2].1 < out[1].1 && out[1].1 < out[0].1,
+        "标定档 RMSE 应单调：已标定({:.2}) < 典型未标定({:.2}) < 极端未标定({:.2})",
+        out[2].1,
+        out[1].1,
+        out[0].1
+    );
+    // 已标定档应恢复到与 low_noise 同量级（硬铁被扣除 ⇒ 航向不再偏）
+    assert!(
+        out[2].1 < 10.0,
+        "已标定档 RMSE 应 <10°（硬铁已扣除），实际 {:.3}°",
+        out[2].1
+    );
+    println!(
+        "  → 结论：标定这一维度影响 {:.1}° (RMSE) ⇒ 必须显式建模 ✓；\
+         已标定档 {:.2}° ≈ 低噪声基线 ✓",
+        out[0].1 - out[2].1,
+        out[2].1
+    );
 }
