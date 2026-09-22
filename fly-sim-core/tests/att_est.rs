@@ -2327,3 +2327,73 @@ fn a4_diagnose_yaw_timeseries() {
          · 误差围绕 ±180 跳变 ⇒ 转向/符号约定（A*B 陷阱）"
     );
 }
+
+/// **A4 诊断验证 + C 阶段 A/B 基线之一：离线标定版**。
+///
+/// 诊断（第一步/第二步 ✓）指出：A4 的 yaw 失败源于**磁参考不可信（未补偿硬铁）**，
+/// 而 yaw 通道以它为基准。本测例用**离线标定注入**（`G_MAG_CALIB` ✓）验证该诊断：
+///   **预测**：磁参考可信 ⇒ yaw 应能跟随（RMSE 与 yaw 误差应大幅下降 ✓）
+/// 同时产出"标定 + 现有架构"这一档的**行为量**，作为 C 阶段 A/B 的对照基线之一 ✓。
+#[test]
+fn a4_verify_diagnosis_via_calibration() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let yaw_of = |q: [f32; 4]| -> f64 {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z)).to_degrees()
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    let m = Maneuver::CoordinatedTurn { bank_deg: 30.0, rate_dps: 40.0 };
+    println!("\n[A4 标定验证] 协调转弯 40°/s × 三档标定（预测：标定 ⇒ yaw 跟随 ✓）");
+    println!("{:>16} {:>12} {:>12} {:>12}", "档位", "全姿态RMSE°", "max°", "yaw均值°");
+    for (name, tier, calib) in [
+        ("未标定·极端", MagCalibTier::UncalibExtreme, [0.0f32; 3]),
+        ("已标定", MagCalibTier::Calibrated, HI_EXTREME),
+    ] {
+        let (cfg, c) = tier_setup(tier);
+        set_mag_calib(c);
+        let mut ysum = 0.0f64;
+        let mut n = 0u64;
+        let r = run_observed(&m, dt, cfg, 2.0, None, |_t, tr, est| {
+            let ye = yaw_of([est.att.w, est.att.x, est.att.y, est.att.z]);
+            let yt = yaw_of(tr.quat);
+            ysum += wrap(ye - yt).abs();
+            n += 1;
+        });
+        set_mag_calib([0.0; 3]);
+        println!(
+            "{name:>16} {:>12.3} {:>12.3} {:>12.2}",
+            r.att.rmse_deg(),
+            r.att.max_deg(),
+            ysum / n.max(1) as f64
+        );
+        let _ = calib;
+    }
+    // 诊断验证：标定档必须显著优于未标定档（否则诊断错 ✗）
+    let mut res = Vec::new();
+    for (name, tier) in [
+        ("未标定·极端", MagCalibTier::UncalibExtreme),
+        ("已标定", MagCalibTier::Calibrated),
+    ] {
+        let (cfg, c) = tier_setup(tier);
+        set_mag_calib(c);
+        let r = run_secs(&m, dt, cfg, 2.0, 40.0);
+        set_mag_calib([0.0; 3]);
+        res.push((name, r.att.rmse_deg()));
+    }
+    println!(
+        "  → 验证：未标定 {:.3}° vs 已标定 {:.3}°",
+        res[0].1, res[1].1
+    );
+    assert!(
+        res[1].1 < res[0].1 * 0.5,
+        "诊断验证失败：标定后应显著改善（未标定 {:.3}° → 已标定 {:.3}°）⇒ 说明根因不是磁参考",
+        res[0].1,
+        res[1].1
+    );
+}
