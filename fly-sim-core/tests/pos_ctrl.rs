@@ -398,6 +398,29 @@ fn outer_position_step() {
         // 阶跃指标用**北向** StepTrace（那才是真阶跃）
         let ns = r.north.settle_s();
         assert!(ns > 0.0, "4.2 [{tag}] 北向阶跃未在窗口内进入 ±5% 带");
+        // ---- §9.2 诊断（2026-09-21）：阶跃统计随 ki_v_xy 的变化 ----
+        // 目的：**先定位机制再改结构** ✗（本项目已有"未确诊就改"白写一轮的先例）。
+        // 判读：若 tail_peak 随增益单调恶化 ⇒ 积分相位滞后驱动；若各档相近 ⇒ 另有机制。
+        // 注意：本测试文件【无】knob 复位机制 ⇒ write_volatile 直接生效 ✓（用完必须还原）。
+        if use_est {
+            println!("  [§9.2 诊断] 4B 北向阶跃随 ki_v_xy（tail_peak 为判据关注量）:");
+            for ki in [0.0f32, 0.25, 0.5, 1.0] {
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KI_V_XY),
+                        ki,
+                    );
+                }
+                let rr = run_outer(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, true);
+                println!("    ki_v_xy={ki:>4.2}: {}", rr.north.summary("north"));
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KI_V_XY),
+                        -1.0,
+                    );
+                }
+            }
+        }
         assert!(
             r.north.ss_err().abs() < 0.3,
             "4.2 [{tag}] 北向稳态误差 {:.3}m 应 <0.3",
