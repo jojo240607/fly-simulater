@@ -535,8 +535,8 @@ use flyctrl_core::units::Meter;
         let st = run_track(SpinYaw { inner: l, rate }, None);
         // 期望位置只是"起点 + 2m/s·t" ⇒ 侧向加速度恒为 0，唯一变量是偏航速率
         println!(
-            "  偏航速率 {:>4.1} | 全程 {:8.3}m | 稳态 {:7.3}m | 估计 pos={:.3}m | 发散={}",
-            rate, st.err_max, st.err_max_ss, st.est_pos_max, st.diverged
+            "  psidot {:>4.1} | steady {:7.3}m | sat {:5.1}% | yaw_err {:6.1}deg | thrust {:.3}",
+            rate, st.err_max_ss, st.sat_ratio * 100.0, st.yaw_err_max_deg, st.max_thrust_sum
         );
     }
     println!("（判读：误差随偏航速率单调增长 ⇒ 成因是偏航速率；若无侧向加速度下都好 ⇒ 是耦合）");
@@ -867,4 +867,52 @@ fn yaw_rate_feedforward_selfcheck() {
         approx_ang(&(q0 * dq), &q_exp),
         approx_ang(&(dq * q0), &q_exp)
     );
+}
+
+/// 包装器：把偏航设为**独立于侧向加速度**的匀速旋转（`yaw = rate·t`）。
+///
+/// **为何需要**（2026-09-21 能力曲线实测）：`Circle` 的 ω **同时**决定侧向加速度与
+/// **偏航速率** ✗ ⇒ 用 ω=1 的圆测"切向偏航"时，偏航速率也是 1 rad/s，而实测该控制器
+/// 的偏航跟踪能力仅约 **0.2~0.5 rad/s**（0.5 时偏航误差 31.9°、饱和 80.7%；
+/// 1.0 时误差 175.4° ✗）⇒ **轨迹不可行**，此时任何前馈都救不了（物理上做不到）。
+/// 这正是成熟飞控的第一原则：**轨迹必须动态可行**。
+struct YawRate<S: TrajectorySource> {
+    inner: S,
+    rate: f32,
+}
+impl<S: TrajectorySource> TrajectorySource for YawRate<S> {
+    fn duration(&self) -> Second {
+        self.inner.duration()
+    }
+    fn at(&self, t: Second) -> flyctrl_core::guidance::TrajectorySample {
+        let mut s = self.inner.at(t);
+        s.yaw = flyctrl_core::units::Radian(self.rate * t.0);
+        s
+    }
+}
+
+/// **轨迹可行性**：把偏航速率与侧向加速度解耦后，跟踪应恢复到与固定偏航同量级。
+///
+/// 侧向加速度保持 ω=1 rad/s 的等效（v=2 m/s、a=2 m/s²），**偏航速率单独设**，
+/// 扫 0 / 0.2 / 0.3 rad/s（均在实测能力区间内 ✓）。
+#[test]
+fn yaw_rate_feasible_tracking() {
+    use flyctrl_core::units::Meter;
+    println!("\n轨迹可行性：侧向加速度固定（圆 ω=1, r=2m），只变偏航速率");
+    println!("（对照：固定偏航 1.289m；切向偏航=1rad/s 时 17.850m/饱和99.5%）");
+    for &rate in &[0.0f32, 0.2, 0.3] {
+        let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
+        let st = run_track(YawRate { inner: c, rate }, None);
+        println!(
+            "  偏航速率 {:>4.1} | 稳态 {:7.3}m | 北 {:6.3} 东 {:6.3} 下 {:6.3} | 饱和 {:5.1}% | 偏航误差 {:6.1}deg",
+            rate,
+            st.err_max_ss,
+            st.err_axis_ss[0],
+            st.err_axis_ss[1],
+            st.err_axis_ss[2],
+            st.sat_ratio * 100.0,
+            st.yaw_err_max_deg
+        );
+    }
+    println!("（判读：若 0~0.3 rad/s 下稳态≈1.3m、饱和≈0% ⇒ 原 17.85m 纯属轨迹不可行）");
 }
