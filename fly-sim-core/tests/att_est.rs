@@ -2627,3 +2627,45 @@ fn a7_steady_tilt_vs_analytic_expectation() {
     }
     println!("  → 判读：比值恒定 ⇒ 线性部分扣除 ✓；比值随 a 变化 ⇒ 非线性缺口 ✓");
 }
+
+/// **机动切换瞬态**：误差包络随时间的上升与恢复（已标定档 ✓）。
+///
+/// 背景（上一轮修正后的结论 ✓）：A7/A3 的残差是【瞬态主导】✗（稳态仅 0.13° ✓）。
+/// 本测例打印包络 ⇒ 看：① 峰值何时出现 ② 多久恢复到小值 ③ 恢复形态（指数/线性 ✓）
+/// ⇒ 为"缩短瞬态恢复"的修法提供依据 ✓。
+#[test]
+fn transient_envelope_of_maneuver_switch() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let rp = |q: [f32; 4]| -> (f64, f64) {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (
+            (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y)).to_degrees(),
+            (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin().to_degrees(),
+        )
+    };
+    println!("\n[瞬态包络] BrakeReversal 0.5g（已标定档）—— pitch/roll 误差随时间");
+    println!("{:>6} {:>10} {:>10}", "t", "roll°", "pitch°");
+    let m = Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s: 15.0 };
+    let (cfg, c) = tier_setup(MagCalibTier::Calibrated);
+    set_mag_calib(c);
+    let mut bins: Vec<(f32, f64, f64, u32)> = Vec::new();
+    let _ = run_observed(&m, dt, cfg, 2.0, None, |t, tr, est| {
+        let (er, ep) = rp([est.att.w, est.att.x, est.att.y, est.att.z]);
+        let (trr, tp) = rp(tr.quat);
+        let (dr, dp) = ((er - trr).abs(), (ep - tp).abs());
+        let idx = (t / 1.0) as usize;
+        while bins.len() <= idx {
+            bins.push((bins.len() as f32, 0.0, 0.0, 0));
+        }
+        let b = &mut bins[idx];
+        b.1 += dr; b.2 += dp; b.3 += 1;
+    });
+    set_mag_calib([0.0; 3]);
+    for (t, rs, ps, n) in bins.iter().take(20) {
+        if *n == 0 { continue; }
+        let k = *n as f64;
+        println!("{t:>6.0} {:>10.2} {:>10.2}", rs / k, ps / k);
+    }
+    println!("  → 判读：看峰值出现的时刻与恢复所需的秒数 ⇒ 判定瞬态时长 ✓");
+}
