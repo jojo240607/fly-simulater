@@ -404,6 +404,37 @@ fn outer_position_step() {
         // 注意：本测试文件【无】knob 复位机制 ⇒ write_volatile 直接生效 ✓（用完必须还原）。
         if use_est {
             println!("  [§9.2 诊断] 4B 北向阶跃随 ki_v_xy（tail_peak 为判据关注量）:");
+            // 2×2 隔离（2026-09-21 第二层）：平移补偿(G_AW_GPS) × 速度积分(ki_v_xy)
+            // 线索：4A 真值反馈尾部 0.101 ✓ vs 4B 估计反馈 0.376 ✗ ⇒ 差异在估计/补偿链 ✓
+            println!("  [§9.2 二层] 4B：平移补偿 × 速度积分（尾部峰值为关注量）:");
+            for aw in [0.0f32, 1.0] {
+                for ki in [0.0f32, 1.0] {
+                    unsafe {
+                        core::ptr::write_volatile(
+                            core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_GPS),
+                            aw,
+                        );
+                        core::ptr::write_volatile(
+                            core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KI_V_XY),
+                            ki,
+                        );
+                    }
+                    let rr = run_outer(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, true);
+                    println!("    G_AW_GPS={aw:.0} ki_v={ki:.2}: {}", rr.north.summary("north"));
+                    unsafe {
+                        core::ptr::write_volatile(
+                            core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KI_V_XY),
+                            -1.0,
+                        );
+                    }
+                }
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_GPS),
+                    1.0, // 还原为本测例 4B 的设定（enable_translation_comp）
+                );
+            }
             for ki in [0.0f32, 0.25, 0.5, 1.0] {
                 unsafe {
                     core::ptr::write_volatile(
