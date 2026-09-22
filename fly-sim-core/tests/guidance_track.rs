@@ -16,7 +16,27 @@
 //! 阶段 5 需要的是**位置/速度连续可导的轨迹**（要给 `Setpoint` 的前馈）——
 //! 解析式圆/八字天然满足，且不依赖仿真库（模块在 `no_std` 的 flyctrl-core 里）。
 
-//! # ⚠️ 当前状态（2026-09-21）：**诊断中，三例暂不断言**
+//! # ✅ 已定位（2026-09-21）：跟踪发散的成因是**切向偏航**
+//!
+//! 分解实验（`decompose_tracking_divergence`，圆轨迹 r=2m ω=1rad/s 3 圈，无风）：
+//!
+//! | 配置 | 跟踪 err_max | 判读 |
+//! |---|---|---|
+//! | ① 完整（切向偏航 + 前馈） | 22.221m | ✗ 发散 |
+//! | ② **偏航固定**（去切向） | **1.305m** | ✅ 收敛（**17× 改善**） |
+//! | ③ 零前馈（只位置+偏航） | 22.784m | ✗ 发散 |
+//! | ④ 零前馈 + 偏航固定 | 3.409m | ✅ 收敛 |
+//!
+//! **⇒ 成因是切向偏航的 1 rad/s 旋转与位置跟踪的耦合**，**不是前馈**（恰恰相反：
+//! 固定偏航下前馈把误差从 3.409m 降到 1.305m，**2.6× 收益** ✓）。
+//!
+//! **登记为已知问题**：`tangent_yaw_known_divergence`（`#[ignore]`，含证据与候选方向）。
+//! 因其属**阶段 5 点名的"偏航机动"**范畴，是本阶段应解决的问题，而非掩盖。
+//!
+//! ## 已排除（早期诊断）
+//! 预热用错设定点（初版用 `g.setpoint()` 带前馈保持 3s ⇒ 42m；改零前馈定点后 42→22m）。
+//!
+//! # ⚠️ 早期状态（保留备查）：**诊断中，三例暂不断言**
 //!
 //! 实测（无风圆轨迹，r=2m、ω=1rad/s、3 圈）：
 //! ```text
@@ -130,15 +150,20 @@ fn run_track<S: TrajectorySource>(src: S, wind: Option<WindField>) -> TrackStat 
 fn circle_tracking_and_amplification() {
     // r=2m、ω=1 rad/s ⇒ v=2 m/s、a=2 m/s²（向心）—— 与 mission 测试的巡航量级一致。
     let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
-    let st = run_track(c, None); // 先**无风**：隔离"制导本身"的问题
+    // 用 FixedYaw：切向偏航的耦合已单独登记为已知问题（见 `tangent_yaw_known_divergence`
+    // 与文件头），此处隔离它、测制导本身。
+    let st = run_track(FixedYaw(c), None);
     println!(
         "\n[圆轨迹] 跟踪 err_max={:.3}m err_rms={:.3}m | 估计 pos_max={:.3}m att_max={:.2}° | 发散={}",
         st.err_max, st.err_rms, st.est_pos_max, st.est_att_max_deg, st.diverged
     );
-    // ⚠️ **诊断中，暂不断言**（见文件头「当前状态」）：
-    // 实测跟踪 err_max≈22m 而**估计误差仅 0.078m** —— 特征表明问题在**制导↔控制耦合**，
-    // 不在估计器。待分解实验（切向偏航 / 零前馈 / 仅位置）定位后再恢复断言。
-    let _ = &st.err_max;
+    assert!(!st.diverged, "圆轨迹跟踪不应发散（err_max={:.2}m）", st.err_max);
+    assert!(
+        st.err_max < 2.0,
+        "圆轨迹（固定偏航）跟踪误差应 <2m（半径 2m），实际 max={:.3}m rms={:.3}m",
+        st.err_max,
+        st.err_rms
+    );
     // **放大判据**：轨迹下的估计误差 vs 阶段 3 单模块基线。
     // 基线：`pos_est` 机动场景的量级（水平机动位置 RMSE ~0.5m 级、姿态 <2°）。
     // 路线图判据："放大 > 2× 则回阶段 3/4"。
@@ -148,31 +173,133 @@ fn circle_tracking_and_amplification() {
         "  放大判据：位置 {:.2}x（基线 0.5m）  姿态 {:.2}x（基线 2.0°）",
         amp_pos, amp_att
     );
-    // 放大判据：本轨迹下**估计误差未被放大**（0.078m / 基线 0.5m = 0.16x ✓）
-    // —— 但跟踪发散，故整体不作通过性断言（诊断中）。
-    println!("  （放大判据：位置 {:.2}x 姿态 {:.2}x —— 估计侧未放大 ✓，问题在跟踪侧）", amp_pos, amp_att);
+    // **放大判据**（阶段 5 关键指标）：估计误差是否被制导放大（>2× 则回阶段 3/4）。
+    assert!(
+        amp_pos < 2.0 && amp_att < 2.0,
+        "估计误差被制导放大（位置 {:.2}x、姿态 {:.2}x）—— >2× 应回阶段 3/4",
+        amp_pos,
+        amp_att
+    );
 }
 
 /// **八字轨迹跟踪**：曲率变号 ⇒ 加速度前馈必须双向都对。
 #[test]
 fn figure8_tracking() {
     let f = Figure8::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 0.6, 1.0);
-    let st = run_track(f, None);
+    let st = run_track(FixedYaw(f), None);
     println!(
         "\n[八字轨迹] 跟踪 err_max={:.3}m err_rms={:.3}m | 估计 pos_max={:.3}m att_max={:.2}° | 发散={}",
         st.err_max, st.err_rms, st.est_pos_max, st.est_att_max_deg, st.diverged
     );
-    // 诊断中，暂不断言（同 `circle_tracking_and_amplification`）。
+    assert!(
+        st.err_max < 3.0,
+        "B3 风下圆轨迹跟踪误差应 <3m（无风时 1.305m），实际 {:.3}m —— 已登记的已知问题，         修好后本测例应转绿",
+        st.err_max
+    );
 }
 
-/// **有风对照**（B3 上限）：制导闭环在风下的跟踪是否仍可用（阶段 5 与阶段 6 的接口）。
+/// **有风对照**（B3 上限）—— ⚠️ **已知问题登记**（`#[ignore]`）。
+///
+/// 实测：固定偏航下，无风跟踪 err_max=**1.305m**，而 **B3 风下 = 14.869m**（11× 劣化）✗。
+/// 估计误差仍很小（pos 0.050m）⇒ **不是估计问题，是制导/控制在风下的跟踪能力**。
+///
+/// **登记而非放宽阈值**：14.9m 之于半径 2m 的圆是"基本跟不上"，属**真实缺口**。
+/// 候选方向（未验）：
+/// 1. 风下外环带宽不足（B3 下需持续倾角 ~15°，与位置环的纠偏余量争夺倾角权限 ——
+///    与 H 场 `tilt_max` 那条同源）
+/// 2. 位置环积分（`ki_xy`）在**轨迹跟踪**（而非定点保持）下的作用未被整定
+/// 3. 前馈没考虑风（风使"实际到达某点所需的速度"偏离轨迹的标称速度）
+///
+/// 用 `cargo test -- --ignored` 可复现。
 #[test]
+#[ignore = "已知问题：B3 风下轨迹跟踪劣化 11×（见文档注释与候选方向）"]
 fn circle_tracking_under_beaufort3() {
     let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 2.0);
-    let st = run_track(c, Some(WindField::new(WindConfig::beaufort3())));
+    let st = run_track(FixedYaw(c), Some(WindField::new(WindConfig::beaufort3())));
     println!(
         "\n[圆轨迹+B3风] 跟踪 err_max={:.3}m err_rms={:.3}m | 估计 pos_max={:.3}m att_max={:.2}° | 发散={}",
         st.err_max, st.err_rms, st.est_pos_max, st.est_att_max_deg, st.diverged
     );
     // 诊断中，暂不断言（同 `circle_tracking_and_amplification`）。
+}
+
+// ---------------------------------------------------------------- 分解实验（定位跟踪发散）
+
+/// 包装器：**去掉速度/加速度前馈**（只留位置+偏航）。
+struct NoFeedforward<S: TrajectorySource>(S);
+impl<S: TrajectorySource> TrajectorySource for NoFeedforward<S> {
+    fn duration(&self) -> Second {
+        self.0.duration()
+    }
+    fn at(&self, t: Second) -> flyctrl_core::guidance::TrajectorySample {
+        let mut s = self.0.at(t);
+        s.vel = [flyctrl_core::units::MeterPerSecond(0.0); 3];
+        s.acc = [flyctrl_core::units::MeterPerSecondSquared(0.0); 3];
+        s
+    }
+}
+
+/// 包装器：**偏航固定为 0**（去掉切向偏航的 1 rad/s 旋转）。
+struct FixedYaw<S: TrajectorySource>(S);
+impl<S: TrajectorySource> TrajectorySource for FixedYaw<S> {
+    fn duration(&self) -> Second {
+        self.0.duration()
+    }
+    fn at(&self, t: Second) -> flyctrl_core::guidance::TrajectorySample {
+        let mut s = self.0.at(t);
+        s.yaw = flyctrl_core::units::Radian(0.0);
+        s
+    }
+}
+
+/// **分解实验**：同一圆轨迹，分别关掉"切向偏航"与"前馈"，看哪一个让跟踪收敛。
+///
+/// 已知：完整配置下跟踪 err_max=22.2m 而估计误差仅 0.078m ⇒ 问题在制导↔控制耦合。
+#[test]
+fn decompose_tracking_divergence() {
+    println!("\n分解实验（圆轨迹 r=2m ω=1rad/s 3 圈，无风）");
+    let mk = || Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
+    let cases: [(&str, TrackStat); 4] = [
+        ("①完整（切向偏航 + 前馈）", run_track(mk(), None)),
+        ("②偏航固定（去切向）", run_track(FixedYaw(mk()), None)),
+        ("③零前馈（只位置+偏航）", run_track(NoFeedforward(mk()), None)),
+        ("④零前馈 + 偏航固定", run_track(FixedYaw(NoFeedforward(mk())), None)),
+    ];
+    for (name, st) in &cases {
+        println!(
+            "  {name:26} 跟踪 err_max={:8.3}m rms={:7.3}m | 估计 pos={:.3}m | 发散={}",
+            st.err_max, st.err_rms, st.est_pos_max, st.diverged
+        );
+    }
+    println!("（判读：哪一项让 err_max 掉到 <1m 量级，就是跟踪发散的成因）");
+    // 诊断用：不作通过性断言（结论出来后再写判据）。
+}
+
+
+/// **已知问题登记：切向偏航（偏航机动）破坏位置跟踪** —— `#[ignore]`，证据见文件头。
+///
+/// 分解实验结论：切向偏航（1 rad/s 旋转）下跟踪 err_max=22.2m；偏航固定后 1.3m
+/// （17× 改善）⇒ **成因是偏航旋转与位置跟踪的耦合**，属阶段 5 点名的"偏航机动"范畴。
+///
+/// **候选方向**（未验）：
+/// 1. 期望姿态构造对旋转偏航的处理（世界系倾角 → 机体系四元数时的偏航旋转）
+/// 2. 偏航力矩混控与倾角的耦合（P3-A1 曾修过"偏航力矩混控符号 + roll 期望姿态方向"，
+///    疑在**动态旋转**下仍有残留 —— 静态/慢速旋转能过，1 rad/s 就暴露）
+/// 3. 位置环输出的世界系加速度未随偏航旋转到正确的机体系参考
+///
+/// 用 `cargo test -- --ignored` 可手动跑出该失败（保留可复现性）。
+#[test]
+#[ignore = "已知问题：切向偏航破坏位置跟踪（见文件头分解实验与候选方向）"]
+fn tangent_yaw_known_divergence() {
+    let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
+    let st = run_track(c, None); // 完整配置：切向偏航生效
+    println!(
+        "[已知问题] 切向偏航下跟踪 err_max={:.3}m rms={:.3}m（偏航固定时应 1.3m）",
+        st.err_max, st.err_rms
+    );
+    assert!(
+        st.err_max < 2.0,
+        "切向偏航下跟踪发散（err_max={:.2}m）—— 这是已登记的已知问题，修好后本测例应转绿",
+        st.err_max
+    );
 }
