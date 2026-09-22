@@ -39,7 +39,10 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     unsafe {
         core::ptr::write_volatile(
             core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_GPS),
-            0.0, // = 生产默认（见 ekf.rs 该静态初值：“默认关”的安全理由）
+            // ⚠️ 这里【不是】生产默认（生产自 2026-09-21 起为 1.0 ✓）——
+            // 本文件测的是【补偿关】的闭环基线，故显式置 0.0 并在此声明 ✓。
+            // 生产默认请以 ekf.rs 的静态初值为准（B 阶段交付：1.0）。
+            0.0,
         );
         core::ptr::write_volatile(
             core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_TAU),
