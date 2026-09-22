@@ -106,6 +106,21 @@ fn run_track_ki<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32
 }
 
 /// 全参数版：可同时指定 `ki_xy` 与 `vmax_xy`（后者用于验证"纠偏权限"猜想）。
+/// **串行化互斥**：本文件的测试会写 `G_*` 进程级静态，而 cargo **默认并行跑测试**
+/// ⇒ 一个测试改旋钮时另一个正在用它 ✗（这会表现为"同一配置跨测试结果不同"，
+/// 且**光靠复位救不了** —— 复位也挡不住并发写）。
+///
+/// 仓库既有范式（`pos_ctrl.rs`）已记载过同一问题：
+/// > "G_* 是进程级静态；某些测试收尾把它们留在非默认值…并行跑挂 1 次、串行跑挂 3 次，
+/// >  随调度变化" ⇒ 解法是 `lock()` 互斥。
+/// 本文件对齐该做法。
+static KNOB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 取锁（所有会用 `G_*` 的测试必须先调用；返回的 guard 须持有到测试结束）。
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    KNOB_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// **复位全部运行时旋钮到生产默认**（哨兵 -1 = 用编译期值）。
 ///
 /// ⚠️ 本会话实测教训：`G_*` 是**进程级静态** ⇒ 跨测试泄漏 ✗。本文件初版没复位，
@@ -219,7 +234,8 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
 /// **圆轨迹跟踪 + 放大判据**。
 #[test]
 fn circle_tracking_and_amplification() {
-    // r=2m、ω=1 rad/s ⇒ v=2 m/s、a=2 m/s²（向心）—— 与 mission 测试的巡航量级一致。
+    let _g = lock();
+// r=2m、ω=1 rad/s ⇒ v=2 m/s、a=2 m/s²（向心）—— 与 mission 测试的巡航量级一致。
     let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
     // 用 FixedYaw：切向偏航的耦合已单独登记为已知问题（见 `tangent_yaw_known_divergence`
     // 与文件头），此处隔离它、测制导本身。
@@ -256,7 +272,8 @@ fn circle_tracking_and_amplification() {
 /// **八字轨迹跟踪**：曲率变号 ⇒ 加速度前馈必须双向都对。
 #[test]
 fn figure8_tracking() {
-    let f = Figure8::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 0.6, 1.0);
+    let _g = lock();
+let f = Figure8::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 0.6, 1.0);
     let st = run_track(FixedYaw(f), None);
     println!(
         "\n[八字轨迹] 跟踪 err_max={:.3}m err_rms={:.3}m | 估计 pos_max={:.3}m att_max={:.2}° | 发散={}",
@@ -285,7 +302,8 @@ fn figure8_tracking() {
 #[test]
 #[ignore = "已知问题：B3 风下轨迹跟踪劣化 11×（见文档注释与候选方向）"]
 fn circle_tracking_under_beaufort3() {
-    let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 2.0);
+    let _g = lock();
+let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 2.0);
     let st = run_track(FixedYaw(c), Some(WindField::new(WindConfig::beaufort3())));
     println!(
         "\n[圆轨迹+B3风] 跟踪 err_max={:.3}m err_rms={:.3}m | 估计 pos_max={:.3}m att_max={:.2}° | 发散={}",
@@ -328,7 +346,8 @@ impl<S: TrajectorySource> TrajectorySource for FixedYaw<S> {
 /// 已知：完整配置下跟踪 err_max=22.2m 而估计误差仅 0.078m ⇒ 问题在制导↔控制耦合。
 #[test]
 fn decompose_tracking_divergence() {
-    println!("\n分解实验（圆轨迹 r=2m ω=1rad/s 3 圈，无风）");
+    let _g = lock();
+println!("\n分解实验（圆轨迹 r=2m ω=1rad/s 3 圈，无风）");
     let mk = || Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
     let cases: [(&str, TrackStat); 4] = [
         ("①完整（切向偏航 + 前馈）", run_track(mk(), None)),
@@ -362,7 +381,8 @@ fn decompose_tracking_divergence() {
 #[test]
 #[ignore = "已知问题：切向偏航破坏位置跟踪（见文件头分解实验与候选方向）"]
 fn tangent_yaw_known_divergence() {
-    let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
+    let _g = lock();
+let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
     let st = run_track(c, None); // 完整配置：切向偏航生效
     println!(
         "[已知问题] 切向偏航下跟踪 err_max={:.3}m rms={:.3}m（偏航固定时应 1.3m）",
@@ -428,7 +448,8 @@ impl<S: TrajectorySource> TrajectorySource for SpinYaw<S> {
 /// **侧向加速度与偏航旋转的耦合**。
 #[test]
 fn separate_yaw_rate_from_lateral_accel() {
-    use flyctrl_core::units::Meter;
+    let _g = lock();
+use flyctrl_core::units::Meter;
     println!("\n分离实验：直线（无侧向加速度）+ 不同偏航速率");
     for &rate in &[0.0f32, 0.2, 0.5, 1.0, 2.0] {
         let l = Line {
@@ -458,7 +479,8 @@ fn run_track_vmax<S: TrajectorySource>(src: S, wind: Option<WindField>, vmax: f3
 
 #[test]
 fn ki_xy_vs_tracking_lag() {
-    use flyctrl_core::units::Meter;
+    let _g = lock();
+use flyctrl_core::units::Meter;
     println!("\n水平积分（ki_xy）对跟踪滞后的影响");
     for &ki in &[0.0f32, 0.02, 0.10, 0.20] {
         // 直线 2m/s（恒定速度轨迹 ⇒ 最直接暴露稳态滞后）
@@ -497,7 +519,8 @@ fn ki_xy_vs_tracking_lag() {
 /// ⇒ **判据：若抬高 `vmax_xy` 后持续误差显著下降，则成因确为纠偏权限不足**（非控制律缺陷）。
 #[test]
 fn vmax_authority_vs_tracking_lag() {
-    use flyctrl_core::units::Meter;
+    let _g = lock();
+use flyctrl_core::units::Meter;
     println!("\n纠偏权限（vmax_xy）对持续跟踪误差的影响（直线 2m/s + 圆 + 切向偏航）");
     for &vmax in &[3.5f32, 5.0, 8.0, 12.0] {
         // 直线：最直接暴露"饱和平衡点"
