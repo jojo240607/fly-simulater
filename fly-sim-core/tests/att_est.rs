@@ -2713,3 +2713,56 @@ fn aw_tau_sweep_for_transient() {
     }
     println!("  → 判读：τ 越小峰值/解析越应下降 ⇒ 假设成立 ✓（否则瞬态另有来源 ✗）");
 }
+
+/// **瞬态来源验证：扫锚定增益 `G_ATT_ALPHA`**（比解析估算更强的直接判据 ✓）。
+///
+/// 假设（上一轮指向 ✓）：10s 瞬态源于【重力锚定自身的时间常数】。
+/// 判据：若假设成立 ⇒ 关掉锚定（α=0）应让瞬态【消失】（峰值→小 ✓）；
+///       若峰值仍在 ⇒ 假设错 ✗，瞬态另有来源 ✓。
+/// 解析预估（零成本 ✓）：k = α·0.5·∏w ⇒ τ ≈ dt/k = 0.004/(0.02·0.5) = 0.4s ✗
+/// ⇒ 单看锚定本身【不足 9.28s】✗ ⇒ 若各门（w_align 等）把它压小，τ 才会变长 ✓。
+#[test]
+fn transient_source_via_att_alpha_sweep() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let pitch_of = |q: [f32; 4]| -> f64 {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin().to_degrees()
+    };
+    let expect = (0.5f64).atan().to_degrees();
+    println!("\n[瞬态来源验证] 扫 G_ATT_ALPHA（BrakeReversal 0.5g，已标定档）");
+    println!("  解析预估：τ = dt/(α·0.5) ⇒ α=0.02 时为 0.4s（远小于实测 9.28s ✗）");
+    println!("{:>10} {:>12} {:>12} {:>12}", "alpha", "峰值pitch°", "峰值/解析", "恢复(s)");
+    let m = Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s: 15.0 };
+    for alpha in [0.0f32, 0.02, 0.05, 0.1, 0.2] {
+        let (cfg, c) = tier_setup(MagCalibTier::Calibrated);
+        set_mag_calib(c);
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                alpha,
+            );
+        }
+        let mut peak = 0.0f64;
+        let mut rec = f64::NAN;
+        let mut n = 0u64;
+        let _ = run_observed(&m, dt, cfg, 2.0, None, |t, tr, est| {
+            let e = (pitch_of([est.att.w, est.att.x, est.att.y, est.att.z]) - pitch_of(tr.quat)).abs();
+            peak = peak.max(e);
+            n += 1;
+            if rec.is_nan() && t > 1.0 && e < 2.0 {
+                rec = t as f64;
+            }
+        });
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                -1.0,
+            );
+        }
+        set_mag_calib([0.0; 3]);
+        assert!(n > 100 && peak.is_finite(), "非空/有限（防真空与 NaN ✓）");
+        println!("{alpha:>10.2} {peak:>12.2} {:>12.2} {rec:>12.2}", peak / expect);
+    }
+    println!("  → 判读：α=0 时峰值→小 ⇒ 锚定是来源 ✓；仍在 ⇒ 另有来源 ✗");
+}
