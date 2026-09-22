@@ -106,9 +106,44 @@ fn run_track_ki<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32
 }
 
 /// 全参数版：可同时指定 `ki_xy` 与 `vmax_xy`（后者用于验证"纠偏权限"猜想）。
+/// **复位全部运行时旋钮到生产默认**（哨兵 -1 = 用编译期值）。
+///
+/// ⚠️ 本会话实测教训：`G_*` 是**进程级静态** ⇒ 跨测试泄漏 ✗。本文件初版没复位，
+/// 导致同一配置在不同运行顺序下给出不同结果（实测直线 7.496m vs 2.910m —— 我一度
+/// 无法解释 ✗）。仓库其它测试文件早已因此加锁复位（`pos_ctrl::lock()`、
+/// `att_est` 的 `G_AW_GPS` 泄漏修复），此处对齐。
+unsafe fn reset_knobs() {
+    use flyctrl_core::controller::pid as P;
+    use flyctrl_core::estimator::ekf as E;
+    P::G_KI_XY = -1.0;
+    P::G_VMAX_XY = -1.0;
+    P::G_TILT_MAX = -1.0;
+    E::G_ATT_ALPHA = -1.0;
+    E::G_MAG_ALPHA = -1.0;
+    E::G_GYRO_BIAS_K = 0.0;
+    E::G_MAG3D_ALPHA = 0.0;
+}
+
 fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32, vmax: f32) -> TrackStat {
+    unsafe { reset_knobs() } // 先复位，再设本次要用的
     unsafe { flyctrl_core::controller::pid::G_KI_XY = ki_xy };
     unsafe { flyctrl_core::controller::pid::G_VMAX_XY = vmax };
+    // **生效自检**（本轮新增纪律）：扫描前先确认"设定值确实改变了可观测量"，
+    // 否则扫描结果会像本轮初版那样"逐位相同"却其实是旋钮没接上 ✗。
+    if vmax > 0.0 {
+        let probe_a = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(flyctrl_core::controller::pid::G_VMAX_XY)) };
+        assert!(
+            (probe_a - vmax).abs() < 1e-6,
+            "旋钮生效自检失败：G_VMAX_XY 写入 {vmax} 但读回 {probe_a} —— 旋钮未接上，扫描不可信"
+        );
+    }
+    if ki_xy > 0.0 {
+        let probe_b = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(flyctrl_core::controller::pid::G_KI_XY)) };
+        assert!(
+            (probe_b - ki_xy).abs() < 1e-6,
+            "旋钮生效自检失败：G_KI_XY 写入 {ki_xy} 但读回 {probe_b}"
+        );
+    }
     let cfg = flyctrl_core::config::VehicleConfig::default_quad();
     let mut ctrl = FlyController::new(
         PhySdkWorld::create_empty(),
