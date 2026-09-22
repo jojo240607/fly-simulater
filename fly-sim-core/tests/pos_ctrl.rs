@@ -479,6 +479,47 @@ fn outer_position_step() {
             // ⇒ 嫌疑：危害来自【不受加速度门约束】的其他锚定 ✓
             // ---- §9.9 门控仪器自检：门到底闭没闭？合成增益实际多少？----
             // 读 ekf 的 G_ATT_DBG = [a_h_max, w_acc_min, k_sum, k_n]
+            // ---- §9.10 A 阶段验收：外部参考【新息门】----
+            // 验收（已写死）：阶跃期间合成增益 k_mean 必须【显著下降】（旧门只降 3% ✗）
+            // 前提：世界加速度参考须可用 => G_AW_GPS=1（4B 已开 ✓）
+            println!("  [§9.10] 新息门 G_ATT_INNOV_GATE（读 k_mean；旧门只降 3% ✗）:");
+            for ig in [-1.0f32, 0.5, 1.0, 2.0, 4.0] {
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                        0.02,
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_INNOV_GATE),
+                        ig,
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_DBG),
+                        [0.0, f32::INFINITY, 0.0, 0.0],
+                    );
+                }
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 1.0, 1.0, 1.0);
+                let dbg = unsafe {
+                    core::ptr::read_volatile(core::ptr::addr_of!(
+                        flyctrl_core::estimator::ekf::G_ATT_DBG
+                    ))
+                };
+                let k_mean = if dbg[3] > 0.0 { dbg[2] / dbg[3] } else { 0.0 };
+                println!(
+                    "    innov_gate={ig:>5.1}: w_acc_min={:.3} k_mean={:.5} | tail_osc={:.4} settle={:.3}s ss_err={:.4}",
+                    dbg[1], k_mean, rr.north.tail_osc(), rr.north.settle_s(), rr.north.ss_err()
+                );
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                    -1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_INNOV_GATE),
+                    -1.0,
+                );
+            }
             println!("  [§9.9] 门控自检（读 G_ATT_DBG；阶跃全程累计）:");
             for gate in [-1.0f32, 0.3, 1.0] {
                 unsafe {
