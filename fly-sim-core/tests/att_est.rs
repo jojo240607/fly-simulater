@@ -3414,7 +3414,7 @@ fn c1_extreme_cases_and_rate_order_check() {
 /// 比力用 `TrajSample::specific_force_body()` ✓（= Rᵀ(accel_world − G_NED) ✓ 项目约定 ✓）。
 #[test]
 fn c1_adapter_static_selfcheck() {
-    use flyctrl_core::estimator::c1::C1Filter;
+    use flyctrl_core::estimator::eskf::C1Filter;
     use flyctrl_core::units::Radian;
     let _g = lock();
     let dt = 0.004f32;
@@ -3476,7 +3476,7 @@ fn c1_adapter_static_selfcheck() {
 #[ignore = "本版用真值量测 ⇒ 残差≈0 ⇒ NIS 无意义（正解：改用仿真侧带噪传感器 ✓）"]
 #[test]
 fn c1_integration_step2_measurement_nis() {
-    use flyctrl_core::estimator::c1::C1Filter;
+    use flyctrl_core::estimator::eskf::C1Filter;
     use flyctrl_core::units::Radian;
     let _g = lock();
     let dt = 0.004f32;
@@ -3532,7 +3532,7 @@ fn c1_integration_step2_measurement_nis() {
 ///                        + 首个 GPS 定位/速度 ✓。
 #[test]
 fn c1_integration_step2_with_noisy_sensors() {
-    use flyctrl_core::estimator::c1::{align_static, C1Filter};
+    use flyctrl_core::estimator::eskf::{align_static, C1Filter};
     let _g = lock();
     let dt = 0.004f32;
     let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
@@ -3590,7 +3590,7 @@ fn c1_integration_step2_with_noisy_sensors() {
 /// C1 用 §2 的带噪驱动 ✓；两者都对【同一真值】算行为量 ⇒ 差异可比 ✓。
 #[test]
 fn c1_integration_step3_side_by_side() {
-    use flyctrl_core::estimator::c1::{align_static, C1Filter};
+    use flyctrl_core::estimator::eskf::{align_static, C1Filter};
     let _g = lock();
     let dt = 0.004f32;
     let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
@@ -3668,7 +3668,7 @@ fn c1_integration_step3_side_by_side() {
 /// 判据（§15.4 ✓，预先约定）：C1 必须【显著优于】该配置下的 Legacy ✓
 #[test]
 fn c1_integration_step4_acceptance_vs_calibrated() {
-    use flyctrl_core::estimator::c1::{align_static, C1Filter};
+    use flyctrl_core::estimator::eskf::{align_static, C1Filter};
     let _g = lock();
     let dt = 0.004f32;
     let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
