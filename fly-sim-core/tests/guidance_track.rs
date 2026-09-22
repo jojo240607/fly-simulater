@@ -102,7 +102,13 @@ fn run_track<S: TrajectorySource>(src: S, wind: Option<WindField>) -> TrackStat 
 /// `mission.rs` 注释里的 `cruise_v/kp_xy ≈ 6.7m` 同源）。
 /// 轨迹跟踪（阶段 5）**必须有积分**，否则量到的是"P-only 滞后"而不是"跟踪能力"。
 fn run_track_ki<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32) -> TrackStat {
+    run_track_all(src, wind, ki_xy, -1.0)
+}
+
+/// 全参数版：可同时指定 `ki_xy` 与 `vmax_xy`（后者用于验证"纠偏权限"猜想）。
+fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32, vmax: f32) -> TrackStat {
     unsafe { flyctrl_core::controller::pid::G_KI_XY = ki_xy };
+    unsafe { flyctrl_core::controller::pid::G_VMAX_XY = vmax };
     let cfg = flyctrl_core::config::VehicleConfig::default_quad();
     let mut ctrl = FlyController::new(
         PhySdkWorld::create_empty(),
@@ -411,6 +417,10 @@ fn separate_yaw_rate_from_lateral_accel() {
 /// 依据：直线 2m/s 实测 err≈7.5m，与 `v/kp_xy = 2/0.3 = 6.7m` 同量级 ——
 /// 而 SIL 的 `ki_xy` 默认为 **0**（P-only）。若开启积分后误差大幅下降，
 /// 则此前量到的"跟踪误差"主要是**稳态滞后**，而非制导/控制缺陷。
+fn run_track_vmax<S: TrajectorySource>(src: S, wind: Option<WindField>, vmax: f32) -> TrackStat {
+    run_track_all(src, wind, 0.0, vmax)
+}
+
 #[test]
 fn ki_xy_vs_tracking_lag() {
     use flyctrl_core::units::Meter;
@@ -432,4 +442,44 @@ fn ki_xy_vs_tracking_lag() {
     }
     println!("（判读：若开启积分后三者都大幅下降 ⇒ 误差主要是 P-only 稳态滞后）");
     unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
+}
+
+
+/// **参考成熟飞控得到的猜想**：持续跟踪误差 = `vmax_xy` 限幅造成的**纠偏权限不足**。
+///
+/// 依据（PX4 文档原文）："the P-law tracks its reference attitude … removing the **pure-P
+/// law's steady-state tracking lag**" —— 成熟飞控明确承认 P 律有稳态滞后，并靠**参考模型
+/// + 前馈**（`MC_REF_*`）解决，而非靠积分。
+///
+/// 本仓的可算机理：
+/// ```
+/// des_v = kp_xy · e + v_ff          但 des_v 被 vmax_xy(=3.5) 限幅
+/// ⇒ 饱和平衡点  e = (vmax_xy − v_ff)/kp_xy = (3.5 − 2.0)/0.3 = 5.0 m
+/// ```
+/// 与实测（直线 2m/s，全程≈稳态≈7.5m）同量级 ✓ —— 且**积分救不了**（已在饱和区，
+/// 这正是 `ki_xy` 扫描无效的原因 ✗）。
+///
+/// ⇒ **判据：若抬高 `vmax_xy` 后持续误差显著下降，则成因确为纠偏权限不足**（非控制律缺陷）。
+#[test]
+fn vmax_authority_vs_tracking_lag() {
+    use flyctrl_core::units::Meter;
+    println!("\n纠偏权限（vmax_xy）对持续跟踪误差的影响（直线 2m/s + 圆 + 切向偏航）");
+    for &vmax in &[3.5f32, 5.0, 8.0, 12.0] {
+        // 直线：最直接暴露"饱和平衡点"
+        let l = Line { start: [Meter(0.0), Meter(0.0), Meter(-5.0)], vel_n: 2.0, dur: 12.0 };
+        let st_line = run_track_vmax(l, None, vmax);
+        // 圆（固定偏航）
+        let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
+        let st_circ = run_track_vmax(FixedYaw(c), None, vmax);
+        // 圆 + 切向偏航（已登记的已知问题）
+        let c2 = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
+        let st_yaw = run_track_vmax(c2, None, vmax);
+        println!(
+            "  vmax_xy={:>5.1} | 直线 稳态{:7.3}m | 圆(固定) 稳态{:7.3}m | 圆(切向) 稳态{:7.3}m{}",
+            vmax, st_line.err_max_ss, st_circ.err_max_ss, st_yaw.err_max_ss,
+            if st_line.diverged || st_circ.diverged || st_yaw.diverged { "  [发散]" } else { "" }
+        );
+    }
+    println!("（判读：误差随 vmax_xy 显著下降 ⇒ 成因为它；若不动 ⇒ 另有成因）");
+    unsafe { flyctrl_core::controller::pid::G_VMAX_XY = -1.0 };
 }
