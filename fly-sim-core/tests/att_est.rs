@@ -2162,3 +2162,62 @@ fn safe_set_mag_gate(v: f32) {
         );
     }
 }
+
+/// **A/B 基线表（行为契约）** —— C 阶段迁移的对照基准。
+///
+/// 目的（roadmap §13 硬前提 ②）：
+///  - 把**当前估计器**在关键场景下的**行为量**冻结成一张表 ✓
+///  - C1（误差状态 EKF）落地后，用**同一张表**逐项对比 ⇒ 每条差异都可解释 ✓
+///  - 同时也是防"静默回归"的显微镜 ✓（本会话 14 类静默失误的教训 ✓）
+///
+/// ⚠️ 本测例**只打印与自洽检查**，不设"性能门槛" ✗ ——
+/// 门槛属于各场景的专门测例（它们已有 ✓）；这里要的是**可对比的数字** ✓。
+#[test]
+fn ab_baseline_table_for_c_migration() {
+    let _g = lock();
+    let dt = 0.004f32;
+    println!("\n[A/B 基线表] 当前估计器的行为量（C1 落地后须逐项对比 ✓）");
+    println!(
+        "{:>16} {:>12} {:>12} {:>10} {:>10}",
+        "场景", "姿态RMSE°", "姿态max°", "发散", "时长s"
+    );
+    let cases: [(&str, Maneuver, f32); 8] = [
+        ("A1 悬停微扰", Maneuver::HoverMicro { amp_deg: 3.0 }, 30.0),
+        (
+            "A2 自稳巡航",
+            Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 20.0 },
+            30.0,
+        ),
+        (
+            "A3 急刹0.5g",
+            Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s: 15.0 },
+            40.0,
+        ),
+        ("A4 协调转弯", Maneuver::CoordinatedTurn { bank_deg: 30.0, rate_dps: 40.0 }, 40.0),
+        ("A7 慢转+0.5g", Maneuver::SpinTranslate { yaw_dps: 30.0, accel_g: 0.5 }, 40.0),
+        ("A8 湍流 20°/3Hz", Maneuver::Turbulence { rms_deg: 20.0, band_hz: 3.0, seed: 42 }, 40.0),
+        ("A9 自由落体", Maneuver::FreeFall { jitter_deg: 1.0 }, 20.0),
+        ("A10 下降桨流", Maneuver::PropwashDescent { descent_mps: 2.0, jitter_deg: 12.0 }, 30.0),
+    ];
+    let mut rows = Vec::new();
+    for (name, m, dur) in &cases {
+        let r = run_secs(m, dt, SensorConfig::realistic(), 2.0, *dur);
+        println!(
+            "{name:>16} {:>12.3} {:>12.3} {:>10} {:>10.0}",
+            r.att.rmse_deg(),
+            r.att.max_deg(),
+            r.att.diverged(),
+            dur
+        );
+        rows.push((*name, r.att.rmse_deg(), r.att.max_deg(), r.att.diverged()));
+    }
+    // 自洽检查（非性能门槛 ✓）：数值必须有限、且未发散 ⇒ 保证这张表本身可信 ✓
+    for (name, rmse, maxd, div) in &rows {
+        assert!(rmse.is_finite() && maxd.is_finite(), "{name}: 行为量必须有限 ✓");
+        assert!(!*div, "{name}: 基线表不得含发散场景（否则表本身不可信 ✗）");
+    }
+    println!(
+        "  → 用法：C1 落地后用同一组场景复跑本表 ⇒ 逐项对比（差异须可解释 ✓）\n     \
+         并同时跑 guidance_track/pos_ctrl 的对应表（位置/轨迹行为量 ✓）"
+    );
+}
