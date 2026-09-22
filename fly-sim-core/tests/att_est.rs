@@ -2278,3 +2278,52 @@ fn a4_diagnose_axis_split() {
     }
     println!("  → 判读：若集中在 yaw ⇒ 磁/回绕类；若集中在 roll/pitch ⇒ 重力锚定类（注释所指 ✓）");
 }
+
+/// **A4 诊断第二步：yaw 误差的时序形态**（恒定偏移 / 线性累积 / 回绕跳变）。
+///
+/// 第一步已定位：错误集中在 yaw（均值 ~73°、峰值 180°、与速率无关 ✓）。
+/// 本步打印同一时间轴上的三样量 ⇒ 用形态定性，再定修法 ✓：
+///   ① 航向差（wrap-safe ✓） ② 估计 yaw 速率 ③ 真值 yaw 速率
+#[test]
+fn a4_diagnose_yaw_timeseries() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let yaw_of = |q: [f32; 4]| -> f64 {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z)).to_degrees()
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    let m = Maneuver::CoordinatedTurn { bank_deg: 30.0, rate_dps: 40.0 };
+    println!("\n[A4 yaw 时序] 协调转弯 40°/s（每 4s 采样）");
+    println!("{:>6} {:>12} {:>14} {:>14} {:>12}", "t", "yaw差°", "估计yaw速率", "真值yaw速率", "累计yaw差");
+    let mut prev: Option<(f64, f64, f32)> = None; // (est_yaw, true_yaw, t)
+    let mut samples = Vec::new();
+    let _ = run_observed(&m, dt, SensorConfig::realistic(), 2.0, None, |t, tr, est| {
+        let (ye, yt) = (
+            yaw_of([est.att.w, est.att.x, est.att.y, est.att.z]),
+            yaw_of(tr.quat),
+        );
+        if let Some((pe, pt, pt_t)) = prev {
+            let dtt = (t - pt_t) as f64;
+            if dtt > 0.5 {
+                samples.push((t, wrap(ye - yt), (ye - pe) / dtt, (yt - pt) / dtt));
+                prev = Some((ye, yt, t));
+            }
+        } else {
+            prev = Some((ye, yt, t));
+        }
+    });
+    for (t, err, er, trr) in samples.iter().take(12) {
+        println!("{t:>6.1} {err:>12.2} {er:>14.2} {trr:>14.2} {:>12.2}", err);
+    }
+    println!(
+        "  → 判读：\n     · 速率一致而误差恒定 ⇒ 参考类（磁参考方向 / mag_B 缺失）\n     \
+         · 速率不同 ⇒ 陀螺 Z 标度或零偏（误差线性累积）\n     \
+         · 误差围绕 ±180 跳变 ⇒ 转向/符号约定（A*B 陷阱）"
+    );
+}
