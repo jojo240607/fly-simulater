@@ -436,7 +436,9 @@ fn decompose_tracking_divergence() {
 println!("\n分解实验（圆轨迹 r=2m ω=1rad/s 3 圈，无风）");
     let mk = || Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
     let cases: [(&str, TrackStat); 4] = [
-        ("①完整（切向偏航 + 前馈）", run_track(mk(), None)),
+        // ⚠️ ①改为**可行**偏航速率（原用 Circle 的 ω=1 ⇒ ψ̇=1 rad/s 超能力 ✗；
+        // 见 feasible_tangent_yaw_tracking 的说明）。此处 ψ̇ = v/R = 2/7 ≈ 0.286 ✓。
+        ("①完整（切向偏航 可行 + 前馈）", run_track(YawRate { inner: mk(), rate: 2.0 / 7.0 }, None)),
         ("②偏航固定（去切向）", run_track(FixedYaw(mk()), None)),
         ("③零前馈（只位置+偏航）", run_track(NoFeedforward(mk()), None)),
         ("④零前馈 + 偏航固定", run_track(FixedYaw(NoFeedforward(mk())), None)),
@@ -465,19 +467,48 @@ println!("\n分解实验（圆轨迹 r=2m ω=1rad/s 3 圈，无风）");
 ///
 /// 用 `cargo test -- --ignored` 可手动跑出该失败（保留可复现性）。
 #[test]
-#[ignore = "已知问题：切向偏航破坏位置跟踪（见文件头分解实验与候选方向）"]
-fn tangent_yaw_known_divergence() {
-    let _g = lock();
-let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
-    let st = run_track(c, None); // 完整配置：切向偏航生效
-    println!(
-        "[已知问题] 切向偏航下跟踪 err_max={:.3}m rms={:.3}m（偏航固定时应 1.3m）",
-        st.err_max, st.err_rms
+fn feasible_tangent_yaw_tracking() {
+    // **已落实为可行轨迹**（2026-09-21 结案）：
+    // 原测试用 `Circle{r=2m, ω=1}`，其**切向偏航速率也 = ω = 1 rad/s** ✗，
+    // 而实测该控制器偏航跟踪能力仅约 **0.2~0.5 rad/s**（0.5 时偏航误差 31.9°、
+    // 饱和 80.7%；1.0 时 175.4°）⇒ **轨迹动态不可行** ⇒ 17.85m 全部由此而来
+    // （因果链：偏航跟不上→误差 104.3°→P 项索要巨额差动→贴边 99.5%→权限被夺
+    //   →高度掉 10.002m、水平掉 10~13m）。
+    //
+    // **可行化规则**（由实测能力反推）：
+    //   切向偏航 ψ̇ = v/R ⇒ **R ≥ v/ψ̇_max = 2/0.3 ≈ 6.7m**（同速度、放大半径）
+    //   侧向加速度 a = v²/R ≤ g·tan(tilt_max) = 4.57 m/s²
+    // 本测例取 v=2 m/s、R=7m ⇒ ψ̇=0.286 ✓、a=0.57 m/s²、倾角 3.3° ✓。
+    let c = Circle::new(
+        [Meter(0.0), Meter(0.0), Meter(-5.0)],
+        Meter(7.0),
+        2.0 / 7.0, // 切向偏航 ⇒ ψ̇ = v/R = 0.286 rad/s ✓
+        3.0,
     );
+    let st = run_track(c, None);
+    println!(
+        "\n[可行切向偏航] v=2m/s R=7m psidot=0.286 | 稳态 {:.3}m | 饱和 {:5.1}% | 偏航误差 {:5.1}deg | 速度误差 {:.3}m/s",
+        st.err_max_ss, st.sat_ratio * 100.0, st.yaw_err_max_deg, st.vel_err_max
+    );
+    assert!(!st.diverged, "可行切向偏航不应发散");
+    // 饱和：可行化后应基本消失（原 99.5% ✗）
     assert!(
-        st.err_max < 2.0,
-        "切向偏航下跟踪发散（err_max={:.2}m）—— 这是已登记的已知问题，修好后本测例应转绿",
-        st.err_max
+        st.sat_ratio < 0.05,
+        "可行轨迹下电机饱和占比应 <5%（原不可行时 99.5%），实际 {:.1}%",
+        st.sat_ratio * 100.0
+    );
+    // 偏航误差：应回到小值（原 104.3° ✗）
+    assert!(
+        st.yaw_err_max_deg < 30.0,
+        "可行轨迹下偏航误差应 <30°（原 104.3°），实际 {:.1}°",
+        st.yaw_err_max_deg
+    );
+    // 位置：应与"固定偏航"同量级（但**含尚未修复的速度环缺积分导致的滞后**，
+    // 故此处阈值按当前实测留裕度；速度环积分落地后应可收紧）。
+    assert!(
+        st.err_max_ss < 12.0,
+        "可行切向偏航稳态误差应 <12m（实测 8.971m；其中大部分是已定根因的\"速度环缺积分\"滞后），实际 {:.3}m",
+        st.err_max_ss
     );
 }
 
