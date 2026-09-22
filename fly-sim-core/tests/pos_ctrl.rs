@@ -45,6 +45,19 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
             core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_TAU),
             0.0, // = 用内置默认 tau
         );
+        // **对齐既有 SIL 闭环约定：att_alpha = 0**（2026-09-21，见 roadmap §9.6/§9.7）
+        //
+        // 背景：`default_quad()` 用 `att_alpha=0.02` 以抑制陀螺长期漂移 ✓，但重力锚定
+        // 会被【大水平加速度污染的比力参考】带歪 ✗ —— 位置阶跃实测尾部振荡
+        // 0.3608m（att_alpha=0 时为 0.1245m ✓，与"全真值反馈"档数字完全一致 ✓）。
+        // 而项目**既有约定**已写明：「att_alpha → 0 for SIL closed loop
+        // （mag_hover / sil 由红转绿）」✓ ⇒ 闭环测例应遵循该约定 ✓。
+        // 本会话 §9.6/§9.7 独立复现了该结论并补上机制（加速度污染比力参考 ✓）。
+        // ⚠️ 代价：失去抗漂移 ⇒ **仅适用于短时闭环测例** ✓；产品/固件仍保留 0.02 ✓。
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+            0.0,
+        );
     }
     g
 }
