@@ -3681,6 +3681,9 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
     let (mut lg_sum, mut c1_sum, mut n) = (0.0f64, 0.0f64, 0u32);
     let (mut c1_yaw_sum, mut c1_rp_sum) = (0.0f64, 0.0f64);
     let (mut c1_rp_dc_sum, mut c1_rp_osc_sum) = (0.0f64, 0.0f64);
+    // ★ba 诊断（新假设：未估计的加计零偏 ⇒ 系统性倾斜偏移 ✓）：回调内取值 ✓
+    let (mut ba_last, mut p_ba_sum) = ([0.0f32; 3], 0.0f32);
+    let ab_true = [cfg.accel_bias[0] as f32, cfg.accel_bias[1] as f32, cfg.accel_bias[2] as f32];
     let (mut lg_max, mut c1_max) = (0.0f64, 0.0f64);
     let _ = run_observed(&m, dt, cfg, 2.0, None, |_t, tr, est| {
         let (acc, gyro, gps, baro) = unsafe { (SENSOR_SLOT, SENSOR_SLOT, GPS_SLOT, BARO_SLOT) };
@@ -3704,6 +3707,8 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
         let e_lg = quat_angle_deg_local([est.att.w, est.att.x, est.att.y, est.att.z], tr.quat);
         let e_c1 = quat_angle_deg_local([f.st.q.w, f.st.q.x, f.st.q.y, f.st.q.z], tr.quat);
         lg_sum += e_lg; c1_sum += e_c1; n += 1;
+        ba_last = [f.st.ba[0], f.st.ba[1], f.st.ba[2]];
+        p_ba_sum = (0..3).map(|i| f.p[15 + 3 + i][15 + 3 + i]).sum::<f32>();
         // ★分轴分解（诊断 ✓）：yaw 与 roll/pitch 分别累计
         {
             let (r_c, p_c, y_c) = euler_zyx([f.st.q.w, f.st.q.x, f.st.q.y, f.st.q.z]);
@@ -3727,6 +3732,9 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
     println!("  → 比值 C1/Legacy = {:.3}", c1_r / lg_r.max(1e-9));
     println!("  C1 分轴：yaw 均值 {:.3}°  roll/pitch 均值 {:.3}°",
         c1_yaw_sum / n.max(1) as f64, c1_rp_sum / n.max(1) as f64);
+    println!("  ★C1 的 ba = [{:.4} {:.4} {:.4}]  ΣP_ba={:.3e}",
+        ba_last[0], ba_last[1], ba_last[2], p_ba_sum);
+    println!("  ★仿真 accel_bias = [{:.4} {:.4} {:.4}]", ab_true[0], ab_true[1], ab_true[2]);
     println!("  ★roll/pitch 直流（系统偏移）= {:.3}°  ｜  振荡型残差 = {:.3}°",
         c1_rp_dc_sum / n.max(1) as f64, c1_rp_osc_sum / n.max(1) as f64);
     assert!(n > 1000 && lg_r.is_finite() && c1_r.is_finite(), "行为量须有效 ✗");
