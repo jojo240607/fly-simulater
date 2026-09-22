@@ -495,7 +495,7 @@ fn outer_position_step() {
                     );
                     core::ptr::write_volatile(
                         core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_DBG),
-                        [0.0, f32::INFINITY, 0.0, 0.0],
+                        [0.0, f32::INFINITY, 0.0, 0.0, 0.0, 0.0],
                     );
                 }
                 let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 1.0, 1.0, 1.0);
@@ -506,8 +506,8 @@ fn outer_position_step() {
                 };
                 let k_mean = if dbg[3] > 0.0 { dbg[2] / dbg[3] } else { 0.0 };
                 println!(
-                    "    innov_gate={ig:>5.1}: w_acc_min={:.3} k_mean={:.5} | tail_osc={:.4} settle={:.3}s ss_err={:.4}",
-                    dbg[1], k_mean, rr.north.tail_osc(), rr.north.settle_s(), rr.north.ss_err()
+                    "    innov_gate={ig:>5.1}: w_acc_min={:.3} k_mean={:.5} 闭合帧={:.0}/{:.0}({:.1}%) | tail_osc={:.4} settle={:.3}s ss_err={:.4}",
+                    dbg[1], k_mean, dbg[4], dbg[3], 100.0 * dbg[4] / dbg[3].max(1.0), rr.north.tail_osc(), rr.north.settle_s(), rr.north.ss_err()
                 );
             }
             unsafe {
@@ -534,7 +534,7 @@ fn outer_position_step() {
                     // 复位埋点
                     core::ptr::write_volatile(
                         core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_DBG),
-                        [0.0, f32::INFINITY, 0.0, 0.0],
+                        [0.0, f32::INFINITY, 0.0, 0.0, 0.0, 0.0],
                     );
                 }
                 let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 1.0, 1.0, 1.0);
