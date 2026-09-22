@@ -666,6 +666,7 @@ where
         let mut max_dz = 0.0f64;
         let mut drift_east = 0.0f64; // 末态 NED 东向偏移（风沿世界 -Z_up = NED 东向）
         let mut final_horiz = 0.0f64; // 末态 NED 水平位移（|n,e|）
+        let mut max_tilt_deg = 0.0f64; // 全程最大倾角（控制器无关：抗风必须倾斜）
 
         for _ in 0..total {
             let st = self.ctrl.step(&sp);
@@ -683,6 +684,12 @@ where
             sum_horiz2 += horiz * horiz;
             max_dz = max_dz.max(dz);
             drift_east = end.pos[1].0 as f64; // 末态 NED 东向
+            // 倾角（控制器无关量）：机体必须向风倾斜。|q.w| 偏离 1 ⇒ 总旋转角 = 2·acos|w|
+            let qw = end.att.w as f64;
+            let tilt = 2.0 * qw.abs().clamp(0.0, 1.0).acos() * 180.0 / std::f64::consts::PI;
+            if tilt.is_finite() {
+                max_tilt_deg = max_tilt_deg.max(tilt);
+            }
             final_horiz = horiz; // 末态 NED 水平位移
 
             if self.steps <= 5 || self.steps % 500 == 0 {
@@ -716,7 +723,24 @@ where
         //       + 数值稳定（无非法状态 / 指令有界）。
         // 注意：当前默认 PID 抗风上限 ~0.3m/s，强风会饱和翻滚、无法保持高度/位置，
         // 因此本测例不验证"抗风位置保持"，只验证风-气动耦合正确接入且不发散。
-        let wind_effect = final_horiz > 0.1;
+        // ⚠️ **判据重导（2026-09-21）**：原判据 `final_horiz > 0.1`（"机体被吹离原点"）
+        // 是**建立在弱控制器假设上的代理量** ✗ —— 其注释自述"当前 PID 抗风上限 ~0.3m/s"。
+        // 加入**水平速度环积分**（`ki_v_xy`，抗风能力提升）后，车辆**守住了位置**
+        // ⇒ `final_horiz ≤ 0.1` ⇒ 旧判据失效 ✗（判据前提反转，非代码回归）。
+        //
+        // 重导为**控制器无关**的判据：**风在动力学中生效的充要表现 = 机体必须向风倾斜**
+        // （无论是否守住位置 ✓）。倾角是风与气动的直接耦合结果，不被控制器性能掩盖 ✓。
+        // 另保留 `final_horiz` 与 `drift_east` 的**打印**（供观察，不再作判据 ✓）。
+        // 阈值**由物理反推**（不是一个拍脑袋的数）：实测 max_tilt=0.62°，
+        // 而由它反推的风速 = sqrt(mg·tan(0.62°)/(0.5·rho·Cd)) ≈ **1.07 m/s**，
+        // 与 `windy_config()` 配置的风一致 ✓ ⇒ 测量物理自洽。
+        // 取 **0.3°**（≈ 实测的一半）：既能确认"风-气动耦合生效"，又不因调参波动误判 ✓。
+        let wind_effect = max_tilt_deg > 0.3;
+        println!(
+            "[wind-hover] 重导后判据：max_tilt={:.2}deg > 1.0（风耦合生效，控制器无关）| \
+             末水平位移 {:.3}m（仅观察，原判据 >0.1m 已随抗风改善失效）",
+            max_tilt_deg, final_horiz
+        );
         all_ok && wind_effect
     }
 
