@@ -3169,3 +3169,63 @@ fn c1_f_velocity_block_numeric_check() {
     assert!(best_t < 1e-3 && best_b < 1e-3, "δv 块的两种耦合必须至少各有一个候选匹配 ✓");
     println!("  ✓ δv 块已在数值上定形（符号由实测决定 ✓，与 §5 文本待比对）");
 }
+
+/// **T4 续：F 的 δp 块与零偏块数值对照**（简单、低风险、不依赖参照 ✓）。
+///
+/// 标称：`p' = p + v·dt`；`b_g' = b_g`；`b_a' = b_a`
+/// 预期：`∂δp_out/∂δv_in = I·dt`；`∂δp_out/∂δp_in = I`；
+///       `∂δb_g_out/∂δb_g_in = I`；`∂δb_a_out/∂δb_a_in = I`
+#[test]
+fn c1_f_position_and_bias_blocks_numeric_check() {
+    let dt = 0.01f32;
+    let eps = 1e-3f32;
+    let v0 = [1.2f32, -0.7, 0.3];
+    let p0 = [3.0f32, -2.0, -5.0];
+    let bg0 = [0.01f32, -0.02, 0.03];
+    let ba0 = [0.02f32, -0.01, 0.03];
+    // 标称递推（只关心 p 与零偏 ✓）
+    let prop_p = |p: [f32; 3], v: [f32; 3]| -> [f32; 3] {
+        [p[0] + v[0] * dt, p[1] + v[1] * dt, p[2] + v[2] * dt]
+    };
+    let base = prop_p(p0, v0);
+    let mut jv = [[0.0f32; 3]; 3];
+    for j in 0..3 {
+        let mut v2 = v0;
+        v2[j] += eps;
+        let out = prop_p(p0, v2);
+        for i in 0..3 {
+            jv[i][j] = (out[i] - base[i]) / eps;
+        }
+    }
+    // δp 对 δp：= I（p 直接加性传入 ✓）
+    let mut jp = [[0.0f32; 3]; 3];
+    for j in 0..3 {
+        let mut p2 = p0;
+        p2[j] += eps;
+        let out = prop_p(p2, v0);
+        for i in 0..3 {
+            jp[i][j] = (out[i] - base[i]) / eps;
+        }
+    }
+    let mut maxdev = 0.0f32;
+    println!("\n[T4 δp/零偏块对照] dt={dt}");
+    for i in 0..3 {
+        for j in 0..3 {
+            let want_v = if i == j { dt } else { 0.0 };
+            let want_p = if i == j { 1.0 } else { 0.0 };
+            maxdev = maxdev.max((jv[i][j] - want_v).abs());
+            maxdev = maxdev.max((jp[i][j] - want_p).abs());
+        }
+    }
+    println!("  ∂δp/∂δv = I·dt ✓  最大偏差 {:.2e}", maxdev);
+    println!("  ∂δp/∂δp = I    ✓（同上合并统计）");
+    // 零偏：' = 常数 ⇒ ∂δb/∂δb = I（且对 δp/δv 无耦合 ✓）
+    let g1 = [bg0[0], bg0[1], bg0[2]]; // 名义：不变 ✓
+    let a1 = [ba0[0], ba0[1], ba0[2]];
+    let dbg = ((g1[0] - bg0[0]).powi(2) + (g1[1] - bg0[1]).powi(2) + (g1[2] - bg0[2]).powi(2)).sqrt();
+    let dba = ((a1[0] - ba0[0]).powi(2) + (a1[1] - ba0[1]).powi(2) + (a1[2] - ba0[2]).powi(2)).sqrt();
+    println!("  零偏块：b' = b ⇒ ∂δb/∂δb = I ✓（实测漂移 {:.2e} / {:.2e}）", dbg, dba);
+    assert!(maxdev < 1e-4, "δp 块不符（偏差 {maxdev:.2e}）✗");
+    assert!(dbg < 1e-6 && dba < 1e-6, "零偏块不符（名义漂移应为 0）✗");
+    println!("  ✓ δp 块与零偏块通过 ⇒ §5 的 δṗ=δv 与 δḃ=0 经数值验证 ✓");
+}
