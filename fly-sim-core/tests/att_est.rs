@@ -1886,3 +1886,4 @@ fn a12_selfcheck_mag_property_bisect() {
     println!("{:>22} {:>12.3} {:>12.3}", "（全部置理想）", r.att.rmse_deg(), r.att.max_deg());
     println!("  → 判读：哪一项置理想后 RMSE 大幅下降 ⇒ 它就是罪魁 ✓");
 }
+
