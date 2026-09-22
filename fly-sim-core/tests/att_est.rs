@@ -3475,7 +3475,7 @@ fn c1_extreme_cases_and_rate_order_check() {
 /// 比力用 `TrajSample::specific_force_body()` ✓（= Rᵀ(accel_world − G_NED) ✓ 项目约定 ✓）。
 #[test]
 fn c1_adapter_static_selfcheck() {
-    use flyctrl_core::estimator::eskf::C1Filter;
+    use flyctrl_core::estimator::eskf::Eskf;
     use flyctrl_core::units::Radian;
     let _g = lock();
     let dt = 0.004f32;
@@ -3483,7 +3483,7 @@ fn c1_adapter_static_selfcheck() {
     let m = Maneuver::HoverMicro { amp_deg: 0.0 };
     let q_id = flyctrl_core::vehicle::Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(0.0));
     // ⚠️ 初值须与【机动自身的起点】一致（上一版写死 −5 ⇒ 与机动真值 0 不符 ⇒ 假误差 ✗）
-    let mut f = C1Filter::new(q_id, [0.0; 3], [0.0, 0.0, 0.0], 5.0);
+    let mut f = Eskf::new(q_id, [0.0; 3], [0.0, 0.0, 0.0], 5.0);
     let mut n = 0u64;
     let mut p_start = [0.0f32; 3];
     let _ = run_observed(&m, dt, SensorConfig::default(), 2.0, None, |_t, tr, _est| {
@@ -3537,14 +3537,14 @@ fn c1_adapter_static_selfcheck() {
 #[ignore = "本版用真值量测 ⇒ 残差≈0 ⇒ NIS 无意义（正解：改用仿真侧带噪传感器 ✓）"]
 #[test]
 fn c1_integration_step2_measurement_nis() {
-    use flyctrl_core::estimator::eskf::C1Filter;
+    use flyctrl_core::estimator::eskf::Eskf;
     use flyctrl_core::units::Radian;
     let _g = lock();
     let dt = 0.004f32;
     // 真实运动：巡航（倾斜 20°、坡道 3s、保持 10s ✓）
     let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
     let q_id = flyctrl_core::vehicle::Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(0.0));
-    let mut f = C1Filter::new(q_id, [0.0; 3], [0.0; 3], 1e6); // 门开大 ⇒ 全量测参与统计 ✓
+    let mut f = Eskf::new(q_id, [0.0; 3], [0.0; 3], 1e6); // 门开大 ⇒ 全量测参与统计 ✓
     let (mut nv, mut sv) = (0u32, 0.0f32);
     let (mut np, mut sp) = (0u32, 0.0f32);
     let (mut nb, mut sb) = (0u32, 0.0f32);
@@ -3552,7 +3552,7 @@ fn c1_integration_step2_measurement_nis() {
     let _ = run_observed(&m, dt, SensorConfig::default(), 2.0, None, |_t, tr, _est| {
         // 首帧对齐初值（避免人为初差 ✗；实际对接用 align_static ✓）
         if !started {
-            f = C1Filter::new(q_id, tr.vel_ned, tr.pos_ned, 1e6);
+            f = Eskf::new(q_id, tr.vel_ned, tr.pos_ned, 1e6);
             started = true;
             return;
         }
@@ -3593,13 +3593,13 @@ fn c1_integration_step2_measurement_nis() {
 ///                        + 首个 GPS 定位/速度 ✓。
 #[test]
 fn c1_integration_step2_with_noisy_sensors() {
-    use flyctrl_core::estimator::eskf::{align_static, C1Filter};
+    use flyctrl_core::estimator::eskf::{align_static, Eskf};
     let _g = lock();
     let dt = 0.004f32;
     let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
     // ⚠️ 必须用【有噪声】的源 ✓ —— SensorConfig::default() 无噪声 ✗ ⇒ NIS 又退化 ✗
     //   （本库以 `realistic()` 表示带噪真实源 ✓；`low_noise()` 为理想源 ✓）
-    let mut flt: Option<C1Filter> = None;
+    let mut flt: Option<Eskf> = None;
     let (mut nv, mut sv) = (0u32, 0.0f32);
     let (mut np, mut sp) = (0u32, 0.0f32);
     let (mut nb, mut sb) = (0u32, 0.0f32);
@@ -3609,7 +3609,7 @@ fn c1_integration_step2_with_noisy_sensors() {
         let gyr_v = [gyro[3], gyro[4], gyro[5]];
         let f = flt.get_or_insert_with(|| {
             let (q0, bg) = align_static(acc_v, gyr_v);
-            let mut f = C1Filter::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
+            let mut f = Eskf::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
             f.st.bg = bg;
             f
         });
@@ -3651,11 +3651,11 @@ fn c1_integration_step2_with_noisy_sensors() {
 /// C1 用 §2 的带噪驱动 ✓；两者都对【同一真值】算行为量 ⇒ 差异可比 ✓。
 #[test]
 fn c1_integration_step3_side_by_side() {
-    use flyctrl_core::estimator::eskf::{align_static, C1Filter};
+    use flyctrl_core::estimator::eskf::{align_static, Eskf};
     let _g = lock();
     let dt = 0.004f32;
     let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
-    let mut flt: Option<C1Filter> = None;
+    let mut flt: Option<Eskf> = None;
     let (mut lg_sum, mut lg_n) = (0.0f64, 0u32);
     let (mut c1_sum, mut c1_n) = (0.0f64, 0u32);
     let (mut lg_max, mut c1_max) = (0.0f64, 0.0f64);
@@ -3665,7 +3665,7 @@ fn c1_integration_step3_side_by_side() {
         let gyr_v = [gyro[3], gyro[4], gyro[5]];
         let f = flt.get_or_insert_with(|| {
             let (q0, bg) = align_static(acc_v, gyr_v);
-            let mut f = C1Filter::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
+            let mut f = Eskf::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
             f.st.bg = bg;
             f
         });
@@ -3729,14 +3729,14 @@ fn c1_integration_step3_side_by_side() {
 /// 判据（§15.4 ✓，预先约定）：C1 必须【显著优于】该配置下的 Legacy ✓
 #[test]
 fn c1_integration_step4_acceptance_vs_calibrated() {
-    use flyctrl_core::estimator::eskf::{align_static, C1Filter};
+    use flyctrl_core::estimator::eskf::{align_static, Eskf};
     let _g = lock();
     let dt = 0.004f32;
     let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
     // ★与已标定列同配置 ✓
     let (cfg, calib) = tier_setup(MagCalibTier::Calibrated);
     set_mag_calib(calib);
-    let mut flt: Option<C1Filter> = None;
+    let mut flt: Option<Eskf> = None;
     let (mut lg_sum, mut c1_sum, mut n) = (0.0f64, 0.0f64, 0u32);
     let (mut c1_yaw_sum, mut c1_rp_sum) = (0.0f64, 0.0f64);
     let (mut c1_rp_dc_sum, mut c1_rp_osc_sum) = (0.0f64, 0.0f64);
@@ -3750,7 +3750,7 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
         let gyr_v = [gyro[3], gyro[4], gyro[5]];
         let f = flt.get_or_insert_with(|| {
             let (q0, bg) = align_static(acc_v, gyr_v);
-            let mut f = C1Filter::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
+            let mut f = Eskf::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
             f.st.bg = bg;
             f
         });
