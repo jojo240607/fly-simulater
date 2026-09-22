@@ -419,6 +419,32 @@ fn outer_position_step() {
                     0.0,
                 );
             }
+            // ---- §9.3 阻尼整定（主因）----
+            // 诊断结论：±5% 带在【理想反馈】下也达不到（全真值尾部 0.169m ✗ > 0.150m ✓）
+            // ⇒ 位置环自身阻尼不足（主因）。此处固定【全真值反馈】扫速度环 P（阻尼来源）✓
+            println!("  [§9.3] 全真值反馈下扫 kv_xy（位置阶跃的阻尼；目标尾部 <0.150m）:");
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_GPS),
+                    1.0,
+                );
+            }
+            for kv in [0.8f32, 1.2, 1.6, 2.0, 2.5, 3.0] {
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                        kv,
+                    );
+                }
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 0.0, 0.0, 0.0);
+                println!("    kv_xy={kv:>4.1}: {}", rr.north.summary("north"));
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                    -1.0,
+                );
+            }
             println!("  [§9.2 三层] 逐通道切换（0=真值，1=估计；G_AW_GPS=1、ki_v=0）:");
             for (nm, aa, va, pa) in [
                 ("全估计(基准)    ", 1.0f32, 1.0f32, 1.0f32),
