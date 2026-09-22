@@ -458,6 +458,48 @@ fn outer_position_step() {
             // 若假设成立：增益↑（跟踪更紧、滞后更小）⇒ 尾部振荡应下降 ✓
             //   · 若显著下降 ⇒ 证实是【滞后/带宽】问题 ⇒ 手段 2 有效 ✓
             //   · 若无改善   ⇒ 非滞后问题 ⇒ 需另找机制 ✗
+            // ---- §9.7 正解检验：用【加速度门】关掉污染时段的锚定（而非简单置 att_alpha=0）----
+            // 背景：att_alpha=0 能解决阶跃 ✓，但会丢掉【陀螺长期漂移抑制】✗（故默认用 0.02）
+            // 正解应是：保留 0.02，但用 G_ATT_ACC_GATE 在【高加速度时段】关掉锚定 ✓
+            println!("  [§9.7] 保留 att_alpha=0.02，扫加速度门 G_ATT_ACC_GATE（目标：尾部趋近 0.1245）:");
+            for gate in [-1.0f32, 0.3, 0.5, 1.0, 2.0, 5.0] {
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                        0.02, // 保留默认锚定强度（抗漂移）
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ACC_GATE),
+                        gate,
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                        0.8,
+                    );
+                }
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 1.0, 1.0, 1.0);
+                println!(
+                    "    gate={gate:>5.1}: tail_osc={:.4} tail_peak={:.4} settle={:.3}s ss_err={:.4}",
+                    rr.north.tail_osc(),
+                    rr.north.tail_peak(),
+                    rr.north.settle_s(),
+                    rr.north.ss_err()
+                );
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                    -1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ACC_GATE),
+                    -1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                    -1.0,
+                );
+            }
             println!("  [§9.6] att_a=1.0 下扫 G_ATT_ALPHA（姿态锚定增益；默认 -1=编译期值）:");
             for ga in [-1.0f32, 0.0, 0.5, 1.0, 2.0, 4.0] {
                 unsafe {
