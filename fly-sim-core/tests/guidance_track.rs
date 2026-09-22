@@ -1292,3 +1292,56 @@ fn stage5_remaining_maneuvers() {
         );
     }
 }
+
+/// **阶段 7 联合整定的第一步：`ki_v_xy` 增益扫描**（主验收量 = 巡航段直流 ✓）。
+///
+/// 背景：默认 `ki_v_xy=0`（速度环 P-only）⇒ 巡航有固有速度偏差，实测 **0.5606 m/s @v=2**
+/// （=28% ✗）。验收目标：**<0.15 m/s**（=漂移率量级 ✓）。本测例扫 `G_KI_V_XY`
+/// 找"达到目标所需的最小增益" ✓ —— 最小增益也意味着对**位置阶跃尾部振荡**的影响最小 ✓
+/// （该副作用已登记：ki_v_xy=1.0 时阶跃尾部 0.230m ✗）。
+#[test]
+fn ki_v_xy_gain_sweep_for_cruise_drift() {
+    // 同一梯形剖面（巡航段速度误差直流 = 稳态漂移 ✓）
+    let mk = |start: [flyctrl_core::units::Meter; 3]| TrapProfile {
+        start,
+        v_cruise: 2.0,
+        acc: 1.0,
+        hold_s: 6.0,
+        v_down: 0.0,
+        yaw: 0.0,
+    };
+    let z = flyctrl_core::units::Meter(-5.0);
+    println!("\n[阶段 7] ki_v_xy 增益扫描（剖面：v=2、a=1、巡航 6s）");
+    println!("{:>10} {:>14} {:>14} {:>14}", "ki_v_xy", "巡航段直流", "加速段直流", "位置RMS");
+    let mut rows = Vec::new();
+    for ki in [0.0f32, 0.2, 0.5, 1.0] {
+        // ⚠️ 必须用 `run_track_v`（它内部 reset_knobs 后再设本次的 ki_v ✓）；
+        // 直接 write_volatile + run_track **无效** ✗（run_track 不设 ki_v，且会被后续
+        // 复位覆盖）—— 我第一版即栽在此处，四行读数完全相同 ⇒ 又一个仪器失误 ✓。
+        let st = run_track_v(mk([flyctrl_core::units::Meter(0.0), z, z]), None, 0.0, -1.0, ki);
+        // 分段：t_acc = 2.0/1.0 = 2s，巡航 6s ⇒ [2,8)
+        let seg = |t0: f32, t1: f32| -> f64 {
+            let w: Vec<&(f32, f64, f64, f64)> =
+                st.series.iter().filter(|r| r.0 >= t0 && r.0 < t1).collect();
+            if w.is_empty() {
+                return f64::NAN;
+            }
+            let k = w.len() as f64;
+            let (mn, me) = (
+                w.iter().map(|r| r.2).sum::<f64>() / k,
+                w.iter().map(|r| r.3).sum::<f64>() / k,
+            );
+            (mn * mn + me * me).sqrt()
+        };
+        let (cruise, accel) = (seg(2.0, 8.0), seg(0.0, 2.0));
+        let prms = (st.series.iter().map(|r| r.1 * r.1).sum::<f64>() / st.series.len() as f64).sqrt();
+        println!("{ki:>10.1} {cruise:>13.4}m/s {accel:>13.4}m/s {prms:>13.3}m");
+        rows.push((ki, cruise));
+    }
+    println!("  → 验收：巡航段直流 <0.15 m/s ⇒ 取**满足的最小增益**（对阶跃副作用最小 ✓）");
+    let best = rows.iter().rev().find(|(_, c)| *c < 0.15);
+    match best {
+        Some((ki, c)) => println!("     满足 <0.15 的候选（本表中最小的）：ki_v_xy={ki} ⇒ {c:.4} m/s ✓"),
+        None => println!("     ⚠️ 本表无一项达标（均 ≥0.15）⇒ 需更大增益或改结构 ✗"),
+    }
+}
