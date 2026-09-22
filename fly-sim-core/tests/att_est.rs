@@ -2766,3 +2766,99 @@ fn transient_source_via_att_alpha_sweep() {
     }
     println!("  → 判读：α=0 时峰值→小 ⇒ 锚定是来源 ✓；仍在 ⇒ 另有来源 ✗");
 }
+
+// ===================== T1：C 阶段 A/B 工装骨架 + 模式开关 =====================
+//
+// roadmap §15.5 T1：先让"两套估计器可切换、同一张行为量表"跑通，
+// **不实现新估计器** ✗。C1 落地后只需把 `Ekf` 分支接上 ✓。
+//
+// ⚠️ 设计要点（本会话教训 ✓）：开关必须**自检生效** ✗ ——
+// "以为在跑新估计器、其实在跑旧的"是最典型的静默失误 ✓
+// ⇒ 因此：① 模式标签随表打印 ✓ ② 未实现的模式**显式拒绝** ✗（而不是悄悄回退 ✓）
+
+/// 估计器模式（C 阶段 A/B 的核心开关 ✓）。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EstMode {
+    /// 现有架构：固定-α 协方差外锚定 ✓（当前唯一可用 ✓）
+    Legacy,
+    /// C1：误差状态 EKF ✓（**尚未实现** ✗ —— 显式拒绝，而非静默回退 ✓）
+    Ekf,
+}
+
+impl EstMode {
+    fn label(self) -> &'static str {
+        match self {
+            EstMode::Legacy => "Legacy(固定-α 锚定)",
+            EstMode::Ekf => "Ekf(误差状态 EKF，未实现)",
+        }
+    }
+}
+
+/// 选择模式；**未实现的模式直接 panic** ✗（防静默回退 ✓）。
+fn select_est_mode(m: EstMode) {
+    match m {
+        EstMode::Legacy => {}
+        EstMode::Ekf => panic!(
+            "EstMode::Ekf 尚未实现 ✗ —— 拒绝静默回退到 Legacy ✓\
+             （否则 A/B 会拿 Legacy 的数字冒充 EKF ✗，正是本会话最典型的静默失误）"
+        ),
+    }
+}
+
+/// **A/B 工装骨架**：按模式跑一组场景 × 两档标定，并**在表头打印模式** ✓。
+/// C1 落地后只需把 `select_est_mode` 接上真实实现 ✓，本函数不用改 ✓。
+fn run_ab_table(mode: EstMode, cases: &[(&str, Maneuver, f32)]) {
+    select_est_mode(mode); // 自检：未实现即拒绝 ✓
+    println!("\n[A/B 工装] 估计器模式 = {} ✓", mode.label());
+    println!(
+        "  {:<16} {:>11} {:>11}   | {:>11} {:>11}",
+        "场景(未标定 / 已标定)", "RMSE°", "max°", "RMSE°", "max°"
+    );
+    for (name, m, dur) in cases {
+        let (cfg0, c0) = tier_setup(MagCalibTier::UncalibExtreme);
+        set_mag_calib(c0);
+        let r0 = run_secs(m, dt_ab(), cfg0, 2.0, *dur);
+        let (cfg1, c1) = tier_setup(MagCalibTier::Calibrated);
+        set_mag_calib(c1);
+        let r1 = run_secs(m, dt_ab(), cfg1, 2.0, *dur);
+        set_mag_calib([0.0; 3]);
+        // 自洽（防真空/NaN ✓）
+        for (tag, v) in [("未标定", r0.att.rmse_deg()), ("已标定", r1.att.rmse_deg())] {
+            assert!(v.is_finite(), "{name}/{tag}: 行为量必须有限 ✓");
+        }
+        println!(
+            "  {name:>16} {:>11.3} {:>11.3}   | {:>11.3} {:>11.3}",
+            r0.att.rmse_deg(), r0.att.max_deg(), r1.att.rmse_deg(), r1.att.max_deg()
+        );
+    }
+    println!("  → 对照基准：C 必须显著优于右侧【已标定】列 ✓，否则停止投入 ✓");
+}
+
+fn dt_ab() -> f32 {
+    0.004
+}
+
+/// T1 验收测例：① Legacy 模式可跑 ✓ ② Ekf 模式**显式拒绝**（不静默回退 ✓）
+#[test]
+fn t1_ab_harness_and_mode_switch() {
+    let _g = lock();
+    let cases: [(&str, Maneuver, f32); 3] = [
+        ("A1 悬停微扰", Maneuver::HoverMicro { amp_deg: 3.0 }, 20.0),
+        (
+            "A3 急刹0.5g",
+            Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s: 15.0 },
+            25.0,
+        ),
+        ("A9 自由落体", Maneuver::FreeFall { jitter_deg: 1.0 }, 15.0),
+    ];
+    run_ab_table(EstMode::Legacy, &cases); // ① 必须能跑 ✓
+    // ② Ekf 必须显式拒绝（用 catch_unwind 验证"拒绝"这一行为本身 ✓）
+    let r = std::panic::catch_unwind(|| {
+        select_est_mode(EstMode::Ekf);
+    });
+    assert!(
+        r.is_err(),
+        "EstMode::Ekf 未实现时必须 panic 拒绝 ✗（不得静默回退到 Legacy ✓）"
+    );
+    println!("  ✓ T1 验收通过：Legacy 可跑 + Ekf 显式拒绝（无静默回退 ✓）");
+}
