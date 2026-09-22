@@ -3901,3 +3901,50 @@ fn eskf_rotation_failures_contrast_arms() {
     select_est_mode(EstMode::Legacy);
     println!("  ✓ 对照臂完成（旋钮与模式已还原 ✓）");
 }
+
+/// 设 `G_ESKF_Q_ATT`（姿态过程噪声倍率 ✓，整定扫描用 ✓）
+fn set_eskf_q_att(v: f32) {
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(flyctrl_core::estimator::eskf::G_ESKF_Q_ATT),
+            v,
+        );
+    }
+}
+
+/// ★**整定扫描**（按用户方向：优化 ESKF ✓）：A4/A6/A7/A13 在 ESKF 下扫姿态过程噪声倍率。
+/// 目的：判定"高角速率下过度信任陀螺"是否成立 ✓（若误差随倍率下降 ⇒ 成立 ✓）。
+#[test]
+fn eskf_q_att_sweep_on_rotation_cases() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let (cfg, c) = tier_setup(MagCalibTier::UncalibExtreme);
+    set_mag_calib(c);
+    select_est_mode(EstMode::Ekf);
+    let all = ab_cases();
+    let want = ["A4", "A6", "A7", "A13"];
+    let cases: std::vec::Vec<_> = all
+        .into_iter()
+        .filter(|(n, _, _)| want.iter().any(|w| n.starts_with(w)))
+        .collect();
+    let mults = [0.1f32, 1.0, 10.0, 100.0, 1000.0];
+    println!("\n[ESKF 姿态过程噪声扫描] q[I_ATT] 倍率 ⇒ RMSE°");
+    print!("{:>14}", "场景");
+    for m in mults {
+        print!(" {:>10}", format!("×{m}"));
+    }
+    println!();
+    for (name, man, dur) in &cases {
+        print!("{name:>14}");
+        for m in mults {
+            set_eskf_q_att(m);
+            let r = run_secs(man, dt, cfg.clone(), 2.0, *dur);
+            print!(" {:>10.2}", r.att.rmse_deg());
+        }
+        println!();
+    }
+    set_eskf_q_att(1.0);
+    set_mag_calib([0.0; 3]);
+    select_est_mode(EstMode::Legacy);
+    println!("  ✓ 扫描完成（旋钮与模式已还原 ✓）");
+}
