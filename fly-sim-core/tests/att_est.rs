@@ -2669,3 +2669,47 @@ fn transient_envelope_of_maneuver_switch() {
     }
     println!("  → 判读：看峰值出现的时刻与恢复所需的秒数 ⇒ 判定瞬态时长 ✓");
 }
+
+/// **瞬态爬升验证：扫 `G_AW_TAU`**（a_world 差分低通时间常数 ✓）。
+///
+/// 假设（上一轮 ✓）：瞬态 10s 源于补偿源自身的爬升 ⇒ **加速源（减小 τ）应缩短瞬态** ✓。
+/// 判据（解析标尺 ✓）：瞬态峰值应【明显低于】`atan(a/g)`（0.5g ⇒ 26.57° ✓）。
+/// ⚠️ 注意先做空窗/自洽防护（本会话教训 ✓）：峰值必须来自非空窗口 ✓。
+#[test]
+fn aw_tau_sweep_for_transient() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let pitch_of = |q: [f32; 4]| -> f64 {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin().to_degrees()
+    };
+    let expect = (0.5f64).atan().to_degrees();
+    println!("\n[G_AW_TAU 扫描] BrakeReversal 0.5g（已标定档）；解析期望 atan(0.5)={expect:.2}°");
+    println!("{:>10} {:>12} {:>12} {:>12}", "tau", "峰值pitch°", "峰值/解析", "恢复(s)");
+    let m = Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s: 15.0 };
+    for tau in [0.0f32, 0.2, 0.1, 0.05, 0.02, 0.01] {
+        let (cfg, c) = tier_setup(MagCalibTier::Calibrated);
+        set_mag_calib(c);
+        set_aw_tau(tau);
+        let mut peak = 0.0f64;
+        let mut rec = f64::NAN;
+        let mut n = 0u64;
+        let _ = run_observed(&m, dt, cfg, 2.0, None, |t, tr, est| {
+            let e = (pitch_of([est.att.w, est.att.x, est.att.y, est.att.z]) - pitch_of(tr.quat)).abs();
+            peak = peak.max(e);
+            n += 1;
+            if rec.is_nan() && t > 1.0 && e < 2.0 {
+                rec = t as f64;
+            }
+        });
+        set_aw_tau(0.0);
+        set_mag_calib([0.0; 3]);
+        assert!(n > 100, "窗口必须非空（防真空 ✓）");
+        assert!(peak.is_finite(), "峰值必须有限（防 NaN ✓）");
+        println!(
+            "{tau:>10.2} {peak:>12.2} {:>12.2} {rec:>12.2}",
+            peak / expect
+        );
+    }
+    println!("  → 判读：τ 越小峰值/解析越应下降 ⇒ 假设成立 ✓（否则瞬态另有来源 ✗）");
+}
