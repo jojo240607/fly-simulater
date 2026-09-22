@@ -3033,3 +3033,97 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
     let n = norm3(v).max(1e-12);
     [v[0] / n, v[1] / n, v[2] / n]
 }
+
+/// **T4 续：F 的 δv 块数值对照**（比力×姿态耦合 ✓，符号同样需实测判定 ✓）。
+///
+/// 标称：`v' = v + (R(q)·(a_m − b_a) + g)·dt` ✓
+/// 数值：`∂δv_out/∂δθ_in` 与 `∂δv_out/∂δb_a_in`（δv 为**加性**误差 ✓）
+/// 候选：`±R·[a×]` 与 `±R`（用基向量算列：`[a×]e_j = a × e_j` ✓）
+/// ⚠️ **部分未完成 ⇒ `#[ignore]`**（2026-09-21）：bias 块已数值证实 ✓（`−R·dt`，偏差 4.46e-5 ✓）；
+/// 但 **姿态耦合项的候选式构造有误** ✗（偏差 ~8，量级差约 2 个数量级 —— 疑缺 `dt` 且结构不对）。
+/// **这不构成"§5 错误"的证据** ✗ —— 只是我的对照候选没写对 ✓。数值数据已由打印保存 ✓：
+/// `∂δv/∂δθ` 行0 = [0.000000, -0.089705, -0.010252]（dt=0.01）⇒ 下一步据此重建候选式 ✓。
+#[ignore = "δv 姿态耦合项的候选式待重建（bias 块已通过 ✓）；数值已打印保存 ✓"]
+#[test]
+fn c1_f_velocity_block_numeric_check() {
+    use flyctrl_core::vehicle::{rotate_vec_by_quat, Quaternion};
+    use flyctrl_core::units::Radian;
+    let dt = 0.01f32;
+    let g = [0.0f32, 0.0, 9.81];
+    let qhat = Quaternion::from_axis_angle([0.3, 0.5, 0.8], Radian(0.7)).normalize();
+    let am = [0.35f32, -0.15, -9.6]; // 机体系比力（含重力支撑 ✓）
+    let ba = [0.02f32, -0.01, 0.03];
+    let v0 = [1.0f32, -0.5, 0.2];
+    let prop_v = |q: Quaternion, ba: [f32; 3]| -> [f32; 3] {
+        let f = [am[0] - ba[0], am[1] - ba[1], am[2] - ba[2]];
+        let aw = rotate_vec_by_quat(q, f);
+        [
+            v0[0] + (aw[0] + g[0]) * dt,
+            v0[1] + (aw[1] + g[1]) * dt,
+            v0[2] + (aw[2] + g[2]) * dt,
+        ]
+    };
+    let eps = 1e-3f32;
+    let basis = [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let cross = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    };
+    let base = prop_v(qhat, ba);
+    // ① ∂δv/∂δθ（数值）
+    let mut jt = [[0.0f32; 3]; 3];
+    for j in 0..3 {
+        let dq = Quaternion::from_axis_angle(basis[j], Radian(eps));
+        let out = prop_v((dq * qhat).normalize(), ba);
+        for i in 0..3 {
+            jt[i][j] = (out[i] - base[i]) / eps;
+        }
+    }
+    // 候选：项 [i][j] = ±(R·(a × e_j))[i]（a 为机体系比力净量 ✓）
+    let a_net = [am[0] - ba[0], am[1] - ba[1], am[2] - ba[2]];
+    let mut cand_neg = [[0.0f32; 3]; 3];
+    let mut cand_pos = [[0.0f32; 3]; 3];
+    for j in 0..3 {
+        let col = rotate_vec_by_quat(qhat, cross(a_net, basis[j]));
+        for i in 0..3 {
+            cand_neg[i][j] = -col[i];
+            cand_pos[i][j] = col[i];
+        }
+    }
+    let dev = |a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]| -> f32 {
+        let mut m = 0.0f32;
+        for i in 0..3 { for j in 0..3 { m = m.max((a[i][j] - b[i][j]).abs()); } }
+        m
+    };
+    println!("\n[T4 δv 块数值对照] dt={dt}");
+    println!("  ∂δv/∂δθ 数值行0 = [{:.6} {:.6} {:.6}]", jt[0][0], jt[0][1], jt[0][2]);
+    println!("  候选 −R[a×] 行0 = [{:.6} {:.6} {:.6}]  偏差 {:.2e}",
+        cand_neg[0][0], cand_neg[0][1], cand_neg[0][2], dev(&jt, &cand_neg));
+    println!("  候选 +R[a×] 行0 = [{:.6} {:.6} {:.6}]  偏差 {:.2e}",
+        cand_pos[0][0], cand_pos[0][1], cand_pos[0][2], dev(&jt, &cand_pos));
+    // ② ∂δv/∂δb_a（数值）vs ±R·dt
+    let mut jb = [[0.0f32; 3]; 3];
+    for j in 0..3 {
+        let mut b2 = ba;
+        b2[j] += eps;
+        let out = prop_v(qhat, b2);
+        for i in 0..3 {
+            jb[i][j] = (out[i] - base[i]) / eps;
+        }
+    }
+    let mut rb_neg = [[0.0f32; 3]; 3];
+    let mut rb_pos = [[0.0f32; 3]; 3];
+    for j in 0..3 {
+        let col = rotate_vec_by_quat(qhat, basis[j]);
+        for i in 0..3 {
+            rb_neg[i][j] = -col[i] * dt;
+            rb_pos[i][j] = col[i] * dt;
+        }
+    }
+    println!("  ∂δv/∂δb_a：−R·dt 偏差 {:.2e} | +R·dt 偏差 {:.2e}",
+        dev(&jb, &rb_neg), dev(&jb, &rb_pos));
+    let best_t = dev(&jt, &cand_neg).min(dev(&jt, &cand_pos));
+    let best_b = dev(&jb, &rb_neg).min(dev(&jb, &rb_pos));
+    println!("  → 最佳匹配偏差：∂δv/∂δθ {best_t:.2e}；∂δv/∂δb_a {best_b:.2e}");
+    assert!(best_t < 1e-3 && best_b < 1e-3, "δv 块的两种耦合必须至少各有一个候选匹配 ✓");
+    println!("  ✓ δv 块已在数值上定形（符号由实测决定 ✓，与 §5 文本待比对）");
+}
