@@ -2550,7 +2550,19 @@ fn a7_verify_sustained_vs_transient_by_duration() {
     };
     println!("\n[A7 验证] BrakeReversal 0.5g 保持时长扫描（已标定档）");
     println!("{:>10} {:>12} {:>12} {:>12}", "hold_s", "roll均值", "pitch均值", "全姿态RMSE");
+    // ⚠️ **空窗防护**（2026-09-21 自查）：`BrakeReversal` 的【总时长 = hold_s】（见 maneuver.rs），
+    // 而结算期 settle_s=2.0 ⇒ hold_s ≤ 2.0 时【指标窗口为空】⇒ rmse 退化为 NaN ✗
+    // （实测 hold=1s 得 NaN ✓）。按纪律：**不得让空窗静默通过** ✗ ⇒ 显式跳过并告知 ✓。
+    const SETTLE: f32 = 2.0;
     for hold_s in [1.0f32, 3.0, 6.0, 12.0, 20.0] {
+        if hold_s <= SETTLE {
+            println!(
+                "{hold_s:>10.0} {:>12} {:>12} {:>12}   ← 跳过：总时长({hold_s}s) ≤ 结算期({SETTLE}s) \
+                 ⇒ 窗口为空（NaN 陷阱 ✓）",
+                "-", "-", "-"
+            );
+            continue;
+        }
         let m = Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s };
         let (cfg, c) = tier_setup(MagCalibTier::Calibrated);
         set_mag_calib(c);
