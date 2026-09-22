@@ -84,6 +84,17 @@ fn quat_rp_deg(q: &flyctrl_core::vehicle::Quaternion) -> (f64, f64) {
 
 /// 跑一条轨迹，返回跟踪与估计统计。
 fn run_track<S: TrajectorySource>(src: S, wind: Option<WindField>) -> TrackStat {
+    run_track_ki(src, wind, 0.0)
+}
+
+/// 同 `run_track`，但可指定 `ki_xy`（水平位置积分）。
+///
+/// ⚠️ **为何需要它**：SIL 侧 `ki_xy` 编译期默认 = **0（关）** ⇒ 位置环是 **P-only**
+/// ⇒ 恒定速度轨迹下有稳态滞后 `v/kp_xy`（实测直线 2m/s ⇒ err≈7.5m，与
+/// `mission.rs` 注释里的 `cruise_v/kp_xy ≈ 6.7m` 同源）。
+/// 轨迹跟踪（阶段 5）**必须有积分**，否则量到的是"P-only 滞后"而不是"跟踪能力"。
+fn run_track_ki<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32) -> TrackStat {
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = ki_xy };
     let cfg = flyctrl_core::config::VehicleConfig::default_quad();
     let mut ctrl = FlyController::new(
         PhySdkWorld::create_empty(),
@@ -302,4 +313,104 @@ fn tangent_yaw_known_divergence() {
         "切向偏航下跟踪发散（err_max={:.2}m）—— 这是已登记的已知问题，修好后本测例应转绿",
         st.err_max
     );
+}
+
+// ---------------------------------------------------------------- 分离"偏航速率"与"侧向加速度"
+
+/// 直线轨迹（恒速直飞，无侧向加速度）——用于**只**测偏航速率的影响。
+struct Line {
+    start: [flyctrl_core::units::Meter; 3],
+    vel_n: f32,
+    dur: f32,
+}
+impl TrajectorySource for Line {
+    fn duration(&self) -> Second {
+        Second(self.dur)
+    }
+    fn at(&self, t: Second) -> flyctrl_core::guidance::TrajectorySample {
+        use flyctrl_core::units::*;
+        let tt = t.0.min(self.dur);
+        flyctrl_core::guidance::TrajectorySample {
+            pos: [
+                Meter(self.start[0].0 + self.vel_n * tt),
+                self.start[1],
+                self.start[2],
+            ],
+            vel: [MeterPerSecond(self.vel_n), MeterPerSecond(0.0), MeterPerSecond(0.0)],
+            acc: [MeterPerSecondSquared(0.0); 3],
+            yaw: Radian(0.0),
+        }
+    }
+}
+
+/// 包装器：把偏航设为**匀速旋转** `yaw = rate·t`（与线速度解耦）。
+struct SpinYaw<S: TrajectorySource> {
+    inner: S,
+    rate: f32,
+}
+impl<S: TrajectorySource> TrajectorySource for SpinYaw<S> {
+    fn duration(&self) -> Second {
+        self.inner.duration()
+    }
+    fn at(&self, t: Second) -> flyctrl_core::guidance::TrajectorySample {
+        let mut s = self.inner.at(t);
+        s.yaw = flyctrl_core::units::Radian(self.rate * t.0);
+        s
+    }
+}
+
+/// **分离实验**：只变"偏航速率"，线速度恒定（无侧向加速度）。
+///
+/// 目的：上一轮已把切向偏航的成因从"前馈"排除；本实验进一步分离
+/// **偏航速率本身**与**侧向加速度**（`Circle` 里 ω 同时决定二者，是耦合的）。
+/// 判读：若直线（无侧向加速度）+ 旋转偏航也发散，则成因是**偏航速率**
+/// （⇒ 指向"偏航旋转下机体系参考/内环带宽"）；若直线下都好，则成因是
+/// **侧向加速度与偏航旋转的耦合**。
+#[test]
+fn separate_yaw_rate_from_lateral_accel() {
+    use flyctrl_core::units::Meter;
+    println!("\n分离实验：直线（无侧向加速度）+ 不同偏航速率");
+    for &rate in &[0.0f32, 0.2, 0.5, 1.0, 2.0] {
+        let l = Line {
+            start: [Meter(0.0), Meter(0.0), Meter(-5.0)],
+            vel_n: 2.0,
+            dur: 12.0,
+        };
+        let st = run_track(SpinYaw { inner: l, rate }, None);
+        // 期望位置只是"起点 + 2m/s·t" ⇒ 侧向加速度恒为 0，唯一变量是偏航速率
+        println!(
+            "  偏航速率 {:>4.1} rad/s | 跟踪 err_max={:8.3}m rms={:7.3}m | 估计 pos={:.3}m | 发散={}",
+            rate, st.err_max, st.err_rms, st.est_pos_max, st.diverged
+        );
+    }
+    println!("（判读：误差随偏航速率单调增长 ⇒ 成因是偏航速率；若无侧向加速度下都好 ⇒ 是耦合）");
+}
+
+
+/// **验证"跟踪误差主要来自 P-only 滞后"**：开/关水平积分对照。
+///
+/// 依据：直线 2m/s 实测 err≈7.5m，与 `v/kp_xy = 2/0.3 = 6.7m` 同量级 ——
+/// 而 SIL 的 `ki_xy` 默认为 **0**（P-only）。若开启积分后误差大幅下降，
+/// 则此前量到的"跟踪误差"主要是**稳态滞后**，而非制导/控制缺陷。
+#[test]
+fn ki_xy_vs_tracking_lag() {
+    use flyctrl_core::units::Meter;
+    println!("\n水平积分（ki_xy）对跟踪滞后的影响");
+    for &ki in &[0.0f32, 0.02, 0.10, 0.20] {
+        // 直线 2m/s（恒定速度轨迹 ⇒ 最直接暴露稳态滞后）
+        let l = Line { start: [Meter(0.0), Meter(0.0), Meter(-5.0)], vel_n: 2.0, dur: 12.0 };
+        let st_line = run_track_ki(l, None, ki);
+        // 圆（有侧向加速度）
+        let c = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
+        let st_circ = run_track_ki(FixedYaw(c), None, ki);
+        // 圆 + 切向偏航（已登记的已知问题）
+        let c2 = Circle::new([Meter(0.0), Meter(0.0), Meter(-5.0)], Meter(2.0), 1.0, 3.0);
+        let st_yaw = run_track_ki(c2, None, ki);
+        println!(
+            "  ki_xy={:.2} | 直线 err_max={:7.3}m | 圆(固定偏航)={:7.3}m | 圆(切向偏航)={:7.3}m",
+            ki, st_line.err_max, st_circ.err_max, st_yaw.err_max
+        );
+    }
+    println!("（判读：若开启积分后三者都大幅下降 ⇒ 误差主要是 P-only 稳态滞后）");
+    unsafe { flyctrl_core::controller::pid::G_KI_XY = -1.0 };
 }
