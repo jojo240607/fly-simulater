@@ -3667,8 +3667,6 @@ fn c1_integration_step3_side_by_side() {
 /// ⇒ 本测例用**同一配置**跑同一机动，同时跟踪 Legacy 与 C1 ✓
 /// 判据（§15.4 ✓，预先约定）：C1 必须【显著优于】该配置下的 Legacy ✓
 #[test]
-#[ignore = "§4 验收未通过（C1=5.92° vs 已标定 Legacy=1.54°）⇒ 按 §15.4 停止投入；\
-            另：接入 C2 磁链后反而变差（7.834° ✗）⇒ 该整合尚需修正 ✓（见下）"]
 fn c1_integration_step4_acceptance_vs_calibrated() {
     use flyctrl_core::estimator::c1::{align_static, C1Filter};
     let _g = lock();
@@ -3704,6 +3702,8 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
         let _ = f.update_baro(baro);
         let _ = f.update_gps_vel([gps[3], gps[4], gps[5]]);
         let _ = f.update_gps_pos([gps[0], gps[1], gps[2]]);
+            // ★重力辅助（上线要点 §13.4 ✓）：由带噪比力【直接观测倾斜】（读 MAG_SLOT 同法 ✓）
+            let _ = f.update_gravity([acc[0], acc[1], acc[2]], [0.0, 0.0, 9.81]);
         let e_lg = quat_angle_deg_local([est.att.w, est.att.x, est.att.y, est.att.z], tr.quat);
         let e_c1 = quat_angle_deg_local([f.st.q.w, f.st.q.x, f.st.q.y, f.st.q.z], tr.quat);
         lg_sum += e_lg; c1_sum += e_c1; n += 1;
