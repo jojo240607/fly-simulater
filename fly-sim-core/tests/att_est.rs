@@ -3991,7 +3991,7 @@ fn a4_a7_axis_split_both_modes() {
             );
         }
     }
-    set_eskf_mag_reanchor(0.0);
+    set_eskf_mag_reanchor(0.01); // ★还原为默认 ✓
     set_mag_calib([0.0; 3]);
     select_est_mode(EstMode::Legacy);
     println!("  ✓ 排查完成（模式与旋钮已还原 ✓）");
@@ -4084,9 +4084,9 @@ fn reanchor_quiet_scenario_regression() {
         .collect();
     println!("\n[安静场景回归] 重锚定 关 → 开（σ=0.05 ✓）⇒ RMSE° / max°");
     for (name, man, dur) in &cases {
-        set_eskf_mag_reanchor(0.0);
+        set_eskf_mag_reanchor(0.0); // ★关（对照 ✓）
         let r0 = run_secs(man, dt, cfg.clone(), 2.0, *dur);
-        set_eskf_mag_reanchor(0.05);
+        set_eskf_mag_reanchor(0.01); // ★默认（参照推导 ✓）
         let r1 = run_secs(man, dt, cfg.clone(), 2.0, *dur);
         let (a0, a1) = (r0.att.rmse_deg(), r1.att.rmse_deg());
         println!(
@@ -4100,8 +4100,53 @@ fn reanchor_quiet_scenario_regression() {
             "{name}: 重锚定使安静场景劣化 ✗（{a0:.3} → {a1:.3}°，容差 {tol:.3}°）⇒ 不可设为默认 ✗"
         );
     }
-    set_eskf_mag_reanchor(0.0);
+    set_eskf_mag_reanchor(0.01); // ★还原为默认 ✓
     set_mag_calib([0.0; 3]);
     select_est_mode(EstMode::Legacy);
     println!("  ✓ 安静场景回归通过（旋钮与模式已还原 ✓）");
+}
+
+/// ★★★**全表验收**（A1–A13，**全名精确筛选** ✓ —— 纠正上轮 `starts_with("A1")` 误匹配 A13 ✗）：
+/// ESKF（地板 ✓ + 重锚定 σ=0.01 ✓）vs Legacy ⇒ 逐场景对照 + 不劣断言。
+///
+/// σ 依据（**推导，不试凑** ✓）：参照 `ekf2_mag_e_noise = 1e-3`（Gauss/√s ✓）
+/// ⇒ 世界磁场在飞行时长 t 内的不确定度 ≈ 1e-3·√t；t≈100s ⇒ **σ ≈ 0.01** ✓
+/// （物理交叉验证：|B|≈0.45 Gauss 的 2% ≈ 0.009 ✓ 一致 ✓）
+#[test]
+fn eskf_final_tuning_full_table() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let (cfg, c) = tier_setup(MagCalibTier::UncalibExtreme);
+    // ① Legacy 基线
+    set_mag_calib(c);
+    select_est_mode(EstMode::Legacy);
+    set_eskf_mag_reanchor(0.01); // ★还原为默认 ✓
+    let cases = ab_cases();
+    let mut lg = std::vec::Vec::new();
+    for (name, man, dur) in cases.iter() {
+        let r = run_secs(man, dt, cfg.clone(), 2.0, *dur);
+        lg.push((name.to_string(), r.att.rmse_deg()));
+        assert!(r.att.rmse_deg().is_finite(), "{name} Legacy 非有限 ✗");
+    }
+    // ② ESKF（最终整定 ✓）
+    select_est_mode(EstMode::Ekf);
+    set_eskf_mag_reanchor(0.01);
+    println!("\n[★全表验收] ESKF（地板 ✓ + 重锚定 σ=0.01 ✓）vs Legacy ⇒ RMSE°");
+    println!("{:>16} {:>12} {:>12} {:>10}", "场景", "Legacy", "★ESKF", "判定");
+    let mut worse = 0;
+    for ((name, man, dur), (_, lgv)) in cases.iter().zip(lg.iter()) {
+        let r = run_secs(man, dt, cfg.clone(), 2.0, *dur);
+        let ev = r.att.rmse_deg();
+        let ok = ev <= lgv * 1.10 || ev <= lgv + 0.5; // 不劣容差 ✓
+        if !ok {
+            worse += 1;
+        }
+        println!("{name:>16} {lgv:>12.3} {ev:>12.3} {:>10}", if ok { "✓" } else { "✗差" });
+    }
+    set_eskf_mag_reanchor(0.01); // ★还原为默认 ✓
+    set_mag_calib([0.0; 3]);
+    select_est_mode(EstMode::Legacy);
+    println!("  ⇒ 劣于 Legacy 的场景数 = {worse} / {}（目标 0 ✓）", cases.len());
+    assert_eq!(worse, 0, "★仍有 {worse} 个场景劣于 Legacy ✗ ⇒ 不得翻默认 ✗");
+    println!("  ✓ 全表验收通过（旋钮与模式已还原 ✓）");
 }
