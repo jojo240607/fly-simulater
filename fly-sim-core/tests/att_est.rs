@@ -21,6 +21,7 @@ use fly_sim_core::maneuver::{Maneuver, TrajSample, Trajectory};
 use fly_sim_core::metrics::{AttMetrics, RateMetrics};
 use fly_sim_core::sensor::{SensorConfig, SensorFault, SensorModel};
 use flyctrl_core::controller::{PidController, Setpoint};
+use flyctrl_core::estimator::select::AnyEstimator;
 use flyctrl_core::estimator::EkfEstimator;
 use flyctrl_core::hil::{HilContext, SimImu};
 use flyctrl_core::units::{Meter, Radian, Second};
@@ -47,6 +48,18 @@ fn set_aw_gps(v: f32) {
             v,
         );
     }
+}
+
+/// ★**估计器模式**（迁移计划步 4 ✓）：0 = Legacy（默认，保证既有结论可复现 ✓），1 = ESKF。
+/// 用 `static mut` + 易失读写（同 `set_aw_gps` 的模式 ✓）。
+pub static mut EST_MODE: u8 = 0;
+pub fn set_est_mode(m: u8) {
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(EST_MODE), m);
+    }
+}
+pub fn get_est_mode() -> u8 {
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(EST_MODE)) }
 }
 
 
@@ -203,9 +216,18 @@ pub fn run_observed_full_secs(
     total_s: f32,
     mut obs: impl FnMut(f32, &TrajSample, &VehicleState),
 ) -> RunOut {
-    let ekf = match att_alpha {
-        Some(a) => EkfEstimator::new(a, 0.5, 0.05, 1e-5, 5e-4, 0.5, 0.3, 0.3),
-        None => EkfEstimator::default_quad(),
+    // ★步 4：按模式构造（`HilContext` 已是泛型 ✓ ⇒ 只换类型 ✓）
+    // ⚠️ `att_alpha` 是 **Legacy 专有**旋钮 ✗ ⇒ ESKF 模式下【不适用】⇒ 显式告警 ✗ 不静默 ✗。
+    let mut ekf: AnyEstimator = if get_est_mode() == 1 {
+        if att_alpha.is_some() {
+            eprintln!("⚠️ ESKF 模式下 att_alpha 不适用 ✗（Legacy 专有旋钮 ✓）—— 已忽略，勿据此下结论 ✗");
+        }
+        AnyEstimator::default_product()
+    } else {
+        match att_alpha {
+            Some(a) => AnyEstimator::legacy_with_alpha(a),
+            None => AnyEstimator::legacy(),
+        }
     };
     let mut ctx = HilContext::new(ekf, PidController::default_quad(), Second(dt));
     let traj = Trajectory::from_maneuver_dur(m, Trajectory::DEFAULT_RATE_HZ, total_s);
@@ -2880,12 +2902,10 @@ impl EstMode {
 
 /// 选择模式；**未实现的模式直接 panic** ✗（防静默回退 ✓）。
 fn select_est_mode(m: EstMode) {
+    // ★步 4：接上真实实现（原先 panic 是"未实现"的显式拒绝 ✓，现已被 AnyEstimator 取代 ✓）
     match m {
-        EstMode::Legacy => {}
-        EstMode::Ekf => panic!(
-            "EstMode::Ekf 尚未实现 ✗ —— 拒绝静默回退到 Legacy ✓\
-             （否则 A/B 会拿 Legacy 的数字冒充 EKF ✗，正是本会话最典型的静默失误）"
-        ),
+        EstMode::Legacy => set_est_mode(0),
+        EstMode::Ekf => set_est_mode(1),
     }
 }
 
@@ -2922,7 +2942,8 @@ fn dt_ab() -> f32 {
     0.004
 }
 
-/// T1 验收测例：① Legacy 模式可跑 ✓ ② Ekf 模式**显式拒绝**（不静默回退 ✓）
+/// T1 验收测例（步 4 更新 ✓）：① Legacy 可跑 ✓ ② ESKF 已接通且**确为 ESKF**（非静默回退 ✓）
+/// ③ 同场景**双跑**（双跑的对照表即"翻默认"的前置证据 ✓）
 #[test]
 fn t1_ab_harness_and_mode_switch() {
     let _g = lock();
@@ -2935,16 +2956,19 @@ fn t1_ab_harness_and_mode_switch() {
         ),
         ("A9 自由落体", Maneuver::FreeFall { jitter_deg: 1.0 }, 15.0),
     ];
-    run_ab_table(EstMode::Legacy, &cases); // ① 必须能跑 ✓
-    // ② Ekf 必须显式拒绝（用 catch_unwind 验证"拒绝"这一行为本身 ✓）
-    let r = std::panic::catch_unwind(|| {
-        select_est_mode(EstMode::Ekf);
-    });
-    assert!(
-        r.is_err(),
-        "EstMode::Ekf 未实现时必须 panic 拒绝 ✗（不得静默回退到 Legacy ✓）"
-    );
-    println!("  ✓ T1 验收通过：Legacy 可跑 + Ekf 显式拒绝（无静默回退 ✓）");
+    run_ab_table(EstMode::Legacy, &cases); // ① Legacy 必须能跑 ✓
+    // ② ★步 4：ESKF 模式已接通（原先是 panic 的"未实现"显式拒绝 ✗ ⇒ 现由 AnyEstimator 取代 ✓）
+    select_est_mode(EstMode::Ekf);
+    assert_eq!(get_est_mode(), 1, "切换到 Ekf 后模式未置位 ✗");
+    // ★"证明真的是 C1"（而不是静默回退到 Legacy ✗）—— 本会话头号纪律 ✓
+    let probe = AnyEstimator::default_product();
+    assert_eq!(probe.kind(), "eskf", "①要求的是 ESKF，实际是 {} ✗", probe.kind());
+    // ③ ★**双跑**：同一批场景在 ESKF 下再跑一遍 ✓（步 4 的核心证据 ✓）
+    println!("  ---- ★双跑：同一场景 ESKF 模式 ✓ ----");
+    run_ab_table(EstMode::Ekf, &cases);
+    select_est_mode(EstMode::Legacy); // 还原默认 ✓（勿泄漏给后续测试 ✗）
+    assert_eq!(get_est_mode(), 0, "模式未还原 ✗");
+    println!("  ✓ T1 验收通过：Legacy 可跑 ✓ + ESKF 已接通 ✓ + 同场景双跑 ✓ + 模式已还原 ✓");
 }
 
 /// **§12.1 解除工装：判定"哪种复合是本项目的【机体(local)】扰动"** ✓✓
