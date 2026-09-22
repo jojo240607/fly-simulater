@@ -2199,17 +2199,32 @@ fn ab_baseline_table_for_c_migration() {
         ("A9 自由落体", Maneuver::FreeFall { jitter_deg: 1.0 }, 20.0),
         ("A10 下降桨流", Maneuver::PropwashDescent { descent_mps: 2.0, jitter_deg: 12.0 }, 30.0),
     ];
+    // ★ 磁参考可信度作为【显式维度】（2026-09-21）：
+    // A4/A12 的根因已定位并验证——"磁参考不可信（未补偿硬铁），而 yaw 通道以它为基准"✗，
+    // 离线标定可带来 30 倍改善 ✓（A4 91.0°->3.0°；A12 84.7°->2.5°）。
+    // ⇒ 基线表**必须同时记录两档** ✓，否则"C 阶段赚了多少"会被这个前提差异淹没 ✗。
     let mut rows = Vec::new();
+    println!(
+        "\n  {:<16} {:>11} {:>11} {:>9}   | {:>11} {:>11} {:>9}",
+        "场景(未标定→已标定)", "RMSE°", "max°", "发散", "RMSE°", "max°", "发散"
+    );
     for (name, m, dur) in &cases {
-        let r = run_secs(m, dt, SensorConfig::realistic(), 2.0, *dur);
+        // 未标定档（realistic 原样 ✓）
+        let (cfg0, c0) = tier_setup(MagCalibTier::UncalibExtreme);
+        set_mag_calib(c0);
+        let r0 = run_secs(m, dt, cfg0, 2.0, *dur);
+        // 已标定档（注入已知硬铁 ✓）
+        let (cfg1, c1) = tier_setup(MagCalibTier::Calibrated);
+        set_mag_calib(c1);
+        let r1 = run_secs(m, dt, cfg1, 2.0, *dur);
+        set_mag_calib([0.0; 3]);
         println!(
-            "{name:>16} {:>12.3} {:>12.3} {:>10} {:>10.0}",
-            r.att.rmse_deg(),
-            r.att.max_deg(),
-            r.att.diverged(),
-            dur
+            "  {name:>16} {:>11.3} {:>11.3} {:>9}   | {:>11.3} {:>11.3} {:>9}",
+            r0.att.rmse_deg(), r0.att.max_deg(), r0.att.diverged(),
+            r1.att.rmse_deg(), r1.att.max_deg(), r1.att.diverged()
         );
-        rows.push((*name, r.att.rmse_deg(), r.att.max_deg(), r.att.diverged()));
+        rows.push((*name, r0.att.rmse_deg(), r0.att.max_deg(), r0.att.diverged()));
+        rows.push((*name, r1.att.rmse_deg(), r1.att.max_deg(), r1.att.diverged()));
     }
     // 自洽检查（非性能门槛 ✓）：数值必须有限、且未发散 ⇒ 保证这张表本身可信 ✓
     for (name, rmse, maxd, div) in &rows {
