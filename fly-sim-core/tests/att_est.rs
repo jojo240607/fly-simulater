@@ -4165,35 +4165,37 @@ fn eskf_final_tuning_full_table() {
 #[test]
 fn eskf_mfield_equivalent_gyro_bias() {
     let _g = lock();
-    let dt = 0.013f32; // ★与 M 场 STEP_DT_MS=13 完全一致 ✓（不是 H 场惯用的 0.004 ✗）
-    let mut cfg = low_noise();
-    cfg.gyro_bias = [0.05, 0.0, 0.0]; // ★与 M 场一致 ✓
-    cfg.mag_decl_deg = 0.0;
-    cfg.mag_mount_deg = [0.0, 0.0, 0.0];
-    cfg.mag_hard_iron = [0.0, 0.0, 0.0];
-    cfg.mag_soft_iron = [1.0, 1.0, 1.0];
-    cfg.mag_noise = 0.0;
+    // ★★2×2 隔离实验（dt × 零偏 ✓）：定位"两个估计器都在 13ms 下翻"的真因 ✓
+    //   (dt=0.004, b=0.01) = H 场原测例条件 ⇒ 预期正常 ✓
+    //   (dt=0.013, b=0.05) = M 场条件        ⇒ 预期翻 ✗
+    //   ⇒ 另两格分辨是【步率】还是【零偏】✗✓
     let m = Maneuver::AttitudeSine {
         axis: 0,
         amp_deg: 0.0,
         freq_hz: 0.1,
         duration_s: 65.0,
     };
-    println!("\n[★M 场等价复现] ESKF · dt=13ms ✓ · 零偏 0.05 rad/s ✓ · 悬停 65s ✓ · 磁干净 ✓");
-    for label in ["ESKF", "Legacy"] {
-        select_est_mode(if label == "ESKF" { EstMode::Ekf } else { EstMode::Legacy });
-        let r = run(&m, dt, cfg.clone(), 5.0);
-        let ax = r.att.axis_rmse_deg();
-        println!(
-            "  {label:>7}: 全轴 RMSE {:.3}° · max {:.3}° · 分轴 r/p/y = {:.2}/{:.2}/{:.2}° · {}",
-            r.att.rmse_deg(),
-            r.att.max_deg(),
-            ax[0],
-            ax[1],
-            ax[2],
-            r.att.summary("")
-        );
+    println!("\n[★★2×2 隔离：dt × 零偏] 悬停 65s ✓ 磁干净 ✓");
+    println!("{:>10} {:>10} {:>12} {:>12} {:>12}", "dt(ms)", "零偏", "ESKF RMSE°", "ESKF max°", "Legacy RMSE°");
+    for dt in [0.004f32, 0.013] {
+        for b in [0.01f32, 0.05] {
+            let mut cfg = low_noise();
+            cfg.gyro_bias = [b as f64, 0.0, 0.0];
+            cfg.mag_decl_deg = 0.0;
+            cfg.mag_mount_deg = [0.0, 0.0, 0.0];
+            cfg.mag_hard_iron = [0.0, 0.0, 0.0];
+            cfg.mag_soft_iron = [1.0, 1.0, 1.0];
+            cfg.mag_noise = 0.0;
+            select_est_mode(EstMode::Ekf);
+            let re = run(&m, dt, cfg.clone(), 5.0);
+            select_est_mode(EstMode::Legacy);
+            let rl = run(&m, dt, cfg.clone(), 5.0);
+            println!(
+                "{:>10.0} {:>10.2} {:>12.2} {:>12.2} {:>12.2}",
+                dt * 1000.0, b, re.att.rmse_deg(), re.att.max_deg(), rl.att.rmse_deg()
+            );
+        }
     }
     select_est_mode(EstMode::Legacy);
-    println!("  ✓ 复现完成（模式已还原 ✓）");
+    println!("  ✓ 隔离实验完成（模式已还原 ✓）");
 }
