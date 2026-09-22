@@ -2583,3 +2583,47 @@ fn a7_verify_sustained_vs_transient_by_duration() {
     }
     println!("  → 判读：随 hold_s 单调增长 ⇒ '持续平移污染'坐实 ✓；无关 ⇒ 该假设也错 ✗");
 }
+
+/// **A7 稳态倾斜偏差 vs 解析期望** —— 量化"补偿扣掉了多少"。
+///
+/// 物理：水平加速度 a 使比力方向偏离竖直 atan(a/g) ⇒ 重力锚定若【完全不补】，
+/// 稳态倾斜误差应 ≈ atan(a/g)；若【完全补】应 ≈ 0。实测值/解析值 = 补偿的缺口 ✓。
+/// 判读：比值随 a 恒定 ⇒ 补偿是"部分扣除"（线性 ✓）；比值随 a 变化 ⇒ 非线性缺口 ✓。
+#[test]
+fn a7_steady_tilt_vs_analytic_expectation() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let pitch_of = |q: [f32; 4]| -> f64 {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin().to_degrees()
+    };
+    println!("\n[A7 解析对照] 稳态 pitch 误差 vs atan(a/g)（已标定档，hold 15s）");
+    println!(
+        "{:>8} {:>14} {:>14} {:>12}",
+        "a(g)", "实测pitch°", "atan(a/g)°", "实测/解析"
+    );
+    for accel_g in [0.1f32, 0.25, 0.5, 0.75] {
+        let m = Maneuver::BrakeReversal { accel_g, tilt_deg: 25.0, hold_s: 15.0 };
+        let (cfg, c) = tier_setup(MagCalibTier::Calibrated);
+        set_mag_calib(c);
+        // 取【后 1/3】窗口的均值（稳态 ✓，避开瞬态）
+        let mut buf: Vec<f64> = Vec::new();
+        let _ = run_observed(&m, dt, cfg, 2.0, None, |t, tr, est| {
+            if t > 10.0 {
+                buf.push((pitch_of([est.att.w, est.att.x, est.att.y, est.att.z]) - pitch_of(tr.quat)).abs());
+            }
+        });
+        set_mag_calib([0.0; 3]);
+        let mean = if buf.is_empty() {
+            f64::NAN
+        } else {
+            buf.iter().sum::<f64>() / buf.len() as f64
+        };
+        let expect = (accel_g as f64).atan().to_degrees();
+        println!(
+            "{accel_g:>8.2} {mean:>14.2} {expect:>14.2} {:>12.2}",
+            if expect > 0.0 { mean / expect } else { f64::NAN }
+        );
+    }
+    println!("  → 判读：比值恒定 ⇒ 线性部分扣除 ✓；比值随 a 变化 ⇒ 非线性缺口 ✓");
+}
