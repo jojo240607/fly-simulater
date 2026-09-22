@@ -3866,12 +3866,19 @@ fn eskf_rotation_failures_contrast_arms() {
     let (cfg, c) = tier_setup(MagCalibTier::UncalibExtreme);
     set_mag_calib(c);
     select_est_mode(EstMode::Ekf);
-    let cases: [(&str, Maneuver, f32); 4] = [
-        ("A4 协调转弯", Maneuver::CoordinatedTurn { bank_deg: 30.0, rate_dps: 40.0 }, 40.0),
-        ("A6 横滚540", Maneuver::Roll360 { rate_dps: 540.0, thrust_ratio: 0.9 }, 40.0),
-        ("A7 慢转+0.5g", Maneuver::SpinTranslate { yaw_dps: 30.0, accel_g: 0.5 }, 40.0),
-        ("A13 陀螺饱和", Maneuver::GyroSatBoundary { rate_dps: 500.0 }, 30.0),
-    ];
+    // ★**必须复用 `ab_cases()`**（同一清单 ⇒ 同参数 ✓）
+    // —— 上一版手写参数导致"同场景名、结果迥异"✗（工装 ≠ 被测对象 ✗），已纠正 ✓
+    let all = ab_cases();
+    let want = ["A4", "A6", "A7", "A13"];
+    let cases: std::vec::Vec<_> = all
+        .into_iter()
+        .filter(|(n, _, _)| want.iter().any(|w| n.starts_with(w)))
+        .collect();
+    assert_eq!(cases.len(), 4, "未筛出 4 个场景 ✗（实际 {}）⇒ 清单名不匹配 ✗", cases.len());
+    // ★自检（防再次"工装 ≠ 被测对象"✗）：打印实际用的参数与时长 ✓
+    for (n, m, d) in &cases {
+        println!("  [工装自检] {n}: {m:?}  时长 {d}s");
+    }
     println!("\n[ESKF 旋转类失败 — 对照臂] (重力辅助, 磁量测) ⇒ RMSE°/max°");
     println!("{:>14} {:>18} {:>18} {:>18} {:>18}", "场景", "(1,1)基线", "(0,1)关重力", "(1,0)关磁", "(0,0)全关");
     for (name, m, dur) in cases {
