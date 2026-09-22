@@ -2010,3 +2010,76 @@ fn a12_name_and_effect_audit() {
          若显示 ~0° ⇒ 该观测有盲点（四元数夹角可能掩盖纯偏航偏移，需改用 yaw 分量核对 ✓）"
     );
 }
+
+/// **B 阶段验收：原始比力 plausibility 门**（`G_AW_RAWGATE`）。
+///
+/// 目标（roadmap §10.4/§10.8 的行为量验收 ✓）：
+///  - **A9 自由落体**：补偿开启时从 28.5° ✗ 恢复（原始 `|f|≈0` ⇒ 门须抑制 ✓）
+///  - **A3 急刹 / A7 慢转+0.5g**：补偿的收益（+81%/+93% ✓）**必须保持** ✓
+/// 原理：用【补偿前】的原始比力判 plausibility ⇒ **非循环** ✓（与补偿动作无关 ✓）
+#[test]
+fn b_stage_raw_gate_acceptance() {
+    let _g = lock();
+    let dt = 0.004f32;
+    println!("\n[B 阶段验收] 原始比力 plausibility 门（realistic 源）");
+    println!("{:>16} {:>18} {:>10} {:>10}", "场景", "配置", "RMSE°", "max°");
+    let cases: [(&str, Maneuver, f32); 3] = [
+        (
+            "A3 急刹0.5g",
+            Maneuver::BrakeReversal { accel_g: 0.5, tilt_deg: 25.0, hold_s: 15.0 },
+            40.0,
+        ),
+        ("A7 慢转+0.5g", Maneuver::SpinTranslate { yaw_dps: 30.0, accel_g: 0.5 }, 40.0),
+        ("A9 自由落体", Maneuver::FreeFall { jitter_deg: 1.0 }, 20.0),
+    ];
+    let mut res = Vec::new();
+    for (name, m, dur) in &cases {
+        for (tag, gps, raw) in [
+            ("补偿关", 0.0f32, -1.0f32),
+            ("补偿开·无原始门", 1.0, -1.0),
+            ("补偿开·有原始门", 1.0, 0.3),
+        ] {
+            set_aw_gps(gps);
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_RAWGATE),
+                    raw,
+                );
+            }
+            let r = run_secs(m, dt, SensorConfig::realistic(), 2.0, *dur);
+            println!(
+                "{name:>16} {tag:>18} {:>10.3} {:>10.3}",
+                r.att.rmse_deg(),
+                r.att.max_deg()
+            );
+            res.push((*name, tag, r.att.rmse_deg()));
+        }
+    }
+    set_aw_gps(0.0);
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_AW_RAWGATE),
+            -1.0,
+        );
+    }
+    // 验收 ①：A9 有原始门时必须显著优于"补偿开·无门"（目标：接近"补偿关"档）
+    let a9_off = res.iter().find(|(n, t, _)| *n == "A9 自由落体" && *t == "补偿关").unwrap().2;
+    let a9_no = res.iter().find(|(n, t, _)| *n == "A9 自由落体" && *t == "补偿开·无原始门").unwrap().2;
+    let a9_g = res.iter().find(|(n, t, _)| *n == "A9 自由落体" && *t == "补偿开·有原始门").unwrap().2;
+    println!("  → A9: 补偿关 {a9_off:.3}° | 无门 {a9_no:.3}° ✗ | 有门 {a9_g:.3}°");
+    assert!(
+        a9_g < a9_no * 0.5,
+        "① A9 有原始门应显著优于无门（{a9_g:.3} vs {a9_no:.3}）"
+    );
+    assert!(
+        a9_g < a9_off * 2.0 + 1.0,
+        "① A9 有门后应接近补偿关档（{a9_g:.3} vs {a9_off:.3}）"
+    );
+    // 验收 ②：A3/A7 的收益必须保持（有门档应明显优于补偿关档）
+    for n in ["A3 急刹0.5g", "A7 慢转+0.5g"] {
+        let off = res.iter().find(|(nn, t, _)| *nn == n && *t == "补偿关").unwrap().2;
+        let g = res.iter().find(|(nn, t, _)| *nn == n && *t == "补偿开·有原始门").unwrap().2;
+        println!("  → {n}: 补偿关 {off:.3}° | 有门 {g:.3}°");
+        assert!(g < off, "② {n} 的补偿收益应保持（有门 {g:.3} 应 < 补偿关 {off:.3}）");
+    }
+}
