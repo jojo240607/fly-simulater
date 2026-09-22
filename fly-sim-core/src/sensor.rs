@@ -180,6 +180,18 @@ pub enum SensorFault {
     AccelDrift([f64; 3]),
     /// 软：陀螺偏置漂移率（rad/s per s）。
     GyroDrift([f64; 3]),
+    /// 软：**磁力计偏置**（机体系，与场同单位；叠加在硬铁/软铁**之后**）。
+    ///
+    /// 动机（2026-09-21）：`Maneuver::MagDisturbSweep { bias_gauss }` 的注释写着
+    /// "磁故障由 `SensorModel` 另加"，`docs/test-roadmap.md` 的 A12 也写着
+    /// `SensorFault::MagDisturb` —— 但本枚举**原本没有该变体** ✗（只有
+    /// Accel/Gyro/Gps/Baro）⇒ **H 场无法注入任何磁扰动** ✗ ⇒ A12 的 `bias_gauss`
+    /// 一直无效（名不副实）✓。本变体补齐该能力 ✓。
+    /// 语义：模拟"装配/电流导致的机体系常值磁偏置" ✓。
+    /// **待办**：本场目前只有**常值**磁故障；"飞行中变化"的扰动（油门相关，实践中
+    /// 更常见）需要一个按 dt 累积的漂移变体 —— `process_mag` 无 dt 参数，
+    /// 需一并改造（登记为后续项 ✓，不留半成品 ✗）。
+    MagDisturb([f64; 3]),
     /// 软：GPS 位置偏置（NED m）。
     GpsBias([f64; 3]),
     /// 硬：加速度计卡死（输出冻结为给定值，机体系；`None` 解除）。
@@ -218,6 +230,7 @@ pub struct SensorModel {
     // P3-B3 故障注入状态：
     // 软故障：注入偏置（叠加到读数上）与漂移率（每帧 bias_extra += drift_rate·dt）。
     accel_bias_extra: [f64; 3],
+    mag_bias_extra: [f64; 3],
     gyro_bias_extra: [f64; 3],
     accel_drift_rate: [f64; 3],
     gyro_drift_rate: [f64; 3],
@@ -252,6 +265,7 @@ impl SensorModel {
             baro_bias: 0.0,
             time: 0.0,
             accel_bias_extra: [0.0; 3],
+            mag_bias_extra: [0.0; 3],
             gyro_bias_extra: [0.0; 3],
             accel_drift_rate: [0.0; 3],
             gyro_drift_rate: [0.0; 3],
@@ -276,6 +290,7 @@ impl SensorModel {
             SensorFault::GyroBias(b) => self.gyro_bias_extra = b,
             SensorFault::AccelDrift(r) => self.accel_drift_rate = r,
             SensorFault::GyroDrift(r) => self.gyro_drift_rate = r,
+            SensorFault::MagDisturb(b) => self.mag_bias_extra = b,
             SensorFault::GpsBias(b) => self.gps_bias_extra = b,
             SensorFault::AccelStuck(s) => self.accel_stuck = s,
             SensorFault::GyroStuck(s) => self.gyro_stuck = s,
@@ -407,6 +422,7 @@ impl SensorModel {
         for i in 0..3 {
             field[i] = m_body[i] as f64 * self.cfg.mag_soft_iron[i]
                 + self.cfg.mag_hard_iron[i]
+                + self.mag_bias_extra[i] // 活跃故障偏置（含漂移累积）✓
                 + self.cfg.mag_noise * self.rng.gaussian();
         }
         MagSample { field }
