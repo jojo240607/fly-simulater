@@ -453,6 +453,42 @@ fn outer_position_step() {
             // 病因已定性：位置环+姿态估计滞后的相位裕度不足 ✓
             // 检验：降增益是否恢复裕度（应出现明确转折点），且能否同时满足
             //       理想地板(0.148m)与全估计尾部(≤0.150m) ✓
+            // ---- §9.6 验证"姿态估计滞后"假设：扫姿态锚定增益 G_ATT_ALPHA ----
+            // 病因定性为相位裕度不足，且损耗来自姿态估计的【滞后】✓
+            // 若假设成立：增益↑（跟踪更紧、滞后更小）⇒ 尾部振荡应下降 ✓
+            //   · 若显著下降 ⇒ 证实是【滞后/带宽】问题 ⇒ 手段 2 有效 ✓
+            //   · 若无改善   ⇒ 非滞后问题 ⇒ 需另找机制 ✗
+            println!("  [§9.6] att_a=1.0 下扫 G_ATT_ALPHA（姿态锚定增益；默认 -1=编译期值）:");
+            for ga in [-1.0f32, 0.0, 0.5, 1.0, 2.0, 4.0] {
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                        ga,
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                        0.8, // 固定为默认，隔离变量
+                    );
+                }
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 1.0, 1.0, 1.0);
+                println!(
+                    "    G_ATT_ALPHA={ga:>5.1}: tail_osc={:.4} tail_peak={:.4} settle={:.3}s ss_err={:.4}",
+                    rr.north.tail_osc(),
+                    rr.north.tail_peak(),
+                    rr.north.settle_s(),
+                    rr.north.ss_err()
+                );
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                    -1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                    -1.0,
+                );
+            }
             println!("  [§9.5] att_a=1.0（全估计）扫 kv_xy —— 找裕度恢复的转折点:");
             for kv in [0.4f32, 0.6, 0.8, 1.0, 1.2, 1.6, 2.0] {
                 unsafe {
