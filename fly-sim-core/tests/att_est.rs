@@ -3902,6 +3902,16 @@ fn eskf_rotation_failures_contrast_arms() {
     println!("  ✓ 对照臂完成（旋钮与模式已还原 ✓）");
 }
 
+/// 设 `G_ESKF_MAG_REANCHOR`（重锚定等效 σ ✓；0 = 关 ✓）
+fn set_eskf_mag_reanchor(v: f32) {
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(flyctrl_core::estimator::eskf::G_ESKF_MAG_REANCHOR),
+            v,
+        );
+    }
+}
+
 /// 设 `G_ESKF_Q_ATT`（姿态过程噪声倍率 ✓，整定扫描用 ✓）
 fn set_eskf_q_att(v: f32) {
     unsafe {
@@ -3966,6 +3976,8 @@ fn a4_a7_axis_split_both_modes() {
     println!("\n[A4/A7 分轴排查] 模式 × 场景 ⇒ roll/pitch/yaw RMSE°（max° 取全轴最大 ✓）");
     for mode in [EstMode::Legacy, EstMode::Ekf] {
         select_est_mode(mode);
+        // ★重锚定对照：Ekf 模式下打开（σ=0.05 ✓），Legacy 无所谓（无此机制 ✓）
+        set_eskf_mag_reanchor(if matches!(mode, EstMode::Ekf) { 0.05 } else { 0.0 });
         for (name, man, dur) in &cases {
             let r = run_secs(man, dt, cfg.clone(), 2.0, *dur);
             let ax = r.att.axis_rmse_deg();
@@ -3979,9 +3991,10 @@ fn a4_a7_axis_split_both_modes() {
             );
         }
     }
+    set_eskf_mag_reanchor(0.0);
     set_mag_calib([0.0; 3]);
     select_est_mode(EstMode::Legacy);
-    println!("  ✓ 排查完成（模式已还原 ✓）");
+    println!("  ✓ 排查完成（模式与旋钮已还原 ✓）");
 }
 
 /// ★**磁链时间历程诊断**（A4/A7 偏航真因 ✓）：直接驱动 `Eskf` 并**接上完整磁链**
