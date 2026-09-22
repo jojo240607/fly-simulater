@@ -3948,3 +3948,38 @@ fn eskf_q_att_sweep_on_rotation_cases() {
     select_est_mode(EstMode::Legacy);
     println!("  ✓ 扫描完成（旋钮与模式已还原 ✓）");
 }
+
+/// ★**A4/A7 分轴排查**（不响应 q[I_ATT] ⇒ 另有根因 ✓）：两模式 × 分轴 RMSE/max。
+/// 目的：判断误差是【偏航主导】还是【倾角主导】⇒ 指向不同机理 ✓。
+#[test]
+fn a4_a7_axis_split_both_modes() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let (cfg, c) = tier_setup(MagCalibTier::UncalibExtreme);
+    set_mag_calib(c);
+    let all = ab_cases();
+    let want = ["A4", "A7"];
+    let cases: std::vec::Vec<_> = all
+        .into_iter()
+        .filter(|(n, _, _)| want.iter().any(|w| n.starts_with(w)))
+        .collect();
+    println!("\n[A4/A7 分轴排查] 模式 × 场景 ⇒ roll/pitch/yaw RMSE°（max° 取全轴最大 ✓）");
+    for mode in [EstMode::Legacy, EstMode::Ekf] {
+        select_est_mode(mode);
+        for (name, man, dur) in &cases {
+            let r = run_secs(man, dt, cfg.clone(), 2.0, *dur);
+            let ax = r.att.axis_rmse_deg();
+            println!(
+                "  {:<22} {name:>14}: roll {:8.2}  pitch {:8.2}  yaw {:8.2}   | 全轴max {:8.2}",
+                mode.label(),
+                ax[0],
+                ax[1],
+                ax[2],
+                r.att.max_deg()
+            );
+        }
+    }
+    set_mag_calib([0.0; 3]);
+    select_est_mode(EstMode::Legacy);
+    println!("  ✓ 排查完成（模式已还原 ✓）");
+}
