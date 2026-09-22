@@ -2862,3 +2862,77 @@ fn t1_ab_harness_and_mode_switch() {
     );
     println!("  ✓ T1 验收通过：Legacy 可跑 + Ekf 显式拒绝（无静默回退 ✓）");
 }
+
+/// **§12.1 解除工装：判定"哪种复合是本项目的【机体(local)】扰动"** ✓✓
+///
+/// 背景（C1 设计文档 §12.1 的硬阻断项 ✗）：姿态误差动力学的符号取决于扰动约定，
+/// 而本项目约定 `A*B` = **先 A 再 B**，故必须先测出对应关系 ✗。
+///
+/// 判据（用旋转矩阵分解 ✓，与约定无关）：
+///   · local（机体扰动） ⇒ `R(q_pert ⊗ q̂) == R(q̂) · R(δ)`  —— 扰动施加在【机体系】之后
+///   · global（导航扰动）⇒ `R(q̂ ⊗ q_pert) == R(δ) · R(q̂)`  —— 扰动施加在【导航系】之前
+/// 用三个基向量验证矩阵等式即可，无需手推 ✓。
+#[test]
+fn resolve_perturbation_convention_for_c1() {
+    use flyctrl_core::vehicle::rotate_vec_by_quat;
+    use flyctrl_core::vehicle::Quaternion;
+    use flyctrl_core::units::Radian;
+    // 名义姿态：取一个【非平凡】值（yaw 90° + 少量倾斜 ✓），避免退化成单位阵 ✓
+    let qhat = Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(1.5708));
+    let dq = Quaternion::from_axis_angle([1.0, 0.0, 0.0], Radian(0.05));
+    let basis = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    // R(x)·v 用 rotate_vec_by_quat(x, v) 表示 ✓
+    let max_dev = |a: &Quaternion, b: &Quaternion| -> f32 {
+        basis
+            .iter()
+            .map(|v| {
+                let va = rotate_vec_by_quat(*a, *v);
+                let vb = rotate_vec_by_quat(*b, *v);
+                ((va[0] - vb[0]).powi(2) + (va[1] - vb[1]).powi(2) + (va[2] - vb[2]).powi(2)).sqrt()
+            })
+            .fold(0.0f32, f32::max)
+    };
+    // 候选组合（用【本项目的】* 语义 ✓）
+    let left = dq * qhat; // 先 dq 再 qhat（项目语义 ✓）
+    let right = qhat * dq; // 先 qhat 再 dq
+    // 参考：R(q̂)·R(δ) 与 R(δ)·R(q̂)（用复合四元数表示时要小心顺序 ⇒ 直接比较向量像 ✓）
+    let r_hat_then_d: Vec<[f32; 3]> = basis
+        .iter()
+        .map(|v| rotate_vec_by_quat(dq, rotate_vec_by_quat(qhat, *v)))
+        .collect();
+    let r_d_then_hat: Vec<[f32; 3]> = basis
+        .iter()
+        .map(|v| rotate_vec_by_quat(qhat, rotate_vec_by_quat(dq, *v)))
+        .collect();
+    let dev = |a: &Quaternion, refs: &Vec<[f32; 3]>| -> f32 {
+        basis
+            .iter()
+            .zip(refs.iter())
+            .map(|(v, r)| {
+                let va = rotate_vec_by_quat(*a, *v);
+                ((va[0] - r[0]).powi(2) + (va[1] - r[1]).powi(2) + (va[2] - r[2]).powi(2)).sqrt()
+            })
+            .fold(0.0f32, f32::max)
+    };
+    let l_vs_hat_d = dev(&left, &r_hat_then_d);
+    let l_vs_d_hat = dev(&left, &r_d_then_hat);
+    let r_vs_hat_d = dev(&right, &r_hat_then_d);
+    let r_vs_d_hat = dev(&right, &r_d_then_hat);
+    println!("\n[§12.1 约定判定] 名义 yaw=90°、δ=绕机体 x 轴 0.05 rad");
+    println!("  dq*qhat  vs R(q̂)R(δ) = {l_vs_hat_d:.2e} | vs R(δ)R(q̂) = {l_vs_d_hat:.2e}");
+    println!("  qhat*dq  vs R(q̂)R(δ) = {r_vs_hat_d:.2e} | vs R(δ)R(q̂) = {r_vs_d_hat:.2e}");
+    let _ = max_dev(&left, &right);
+    // 结论：找出哪个组合等于 R(q̂)·R(δ) ⇒ 那在"扰动定义"意义上即 local ✓
+    let left_is_hat_then_d = l_vs_hat_d < 1e-4;
+    println!(
+        "  ⇒ 本项目语义下：`dq*qhat` {} `R(q̂)·R(δ)`；`qhat*dq` {}",
+        if left_is_hat_then_d { "==" } else { "!=" },
+        if r_vs_hat_d < 1e-4 { "== R(q̂)·R(δ)" } else { "!= R(q̂)·R(δ)" }
+    );
+    println!("  ⇒ 若 `dq*qhat == R(q̂)·R(δ)` ⇒ 左乘 dq 表示【机体(local)】扰动 ✓");
+    println!("     则 δθ̇ = −[ω×]δθ − δb_g（§5 所写 ✓）；反之符号取正 ✗");
+    assert!(
+        l_vs_hat_d < 1e-4 || l_vs_d_hat < 1e-4 || r_vs_hat_d < 1e-4 || r_vs_d_hat < 1e-4,
+        "必须至少有一个候选与参考一致（否则旋转/乘法约定本身有问题 ✗）"
+    );
+}
