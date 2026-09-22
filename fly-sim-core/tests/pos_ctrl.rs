@@ -477,6 +477,47 @@ fn outer_position_step() {
             // ---- §9.8 危害来源分支：重力锚定 vs 【其他锚定路径】(3D磁/磁偏航) ----
             // 线索：加速度门只约束【重力路径】✓，而 §9.7 实测它对结果无效 ✗
             // ⇒ 嫌疑：危害来自【不受加速度门约束】的其他锚定 ✓
+            // ---- §9.9 门控仪器自检：门到底闭没闭？合成增益实际多少？----
+            // 读 ekf 的 G_ATT_DBG = [a_h_max, w_acc_min, k_sum, k_n]
+            println!("  [§9.9] 门控自检（读 G_ATT_DBG；阶跃全程累计）:");
+            for gate in [-1.0f32, 0.3, 1.0] {
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                        0.02,
+                    );
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ACC_GATE),
+                        gate,
+                    );
+                    // 复位埋点
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_DBG),
+                        [0.0, f32::INFINITY, 0.0, 0.0],
+                    );
+                }
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 1.0, 1.0, 1.0);
+                let dbg = unsafe {
+                    core::ptr::read_volatile(core::ptr::addr_of!(
+                        flyctrl_core::estimator::ekf::G_ATT_DBG
+                    ))
+                };
+                let k_mean = if dbg[3] > 0.0 { dbg[2] / dbg[3] } else { 0.0 };
+                println!(
+                    "    gate={gate:>5.1}: a_h_max={:.3} w_acc_min={:.3} k_mean={:.5} (n={:.0}) | tail_osc={:.4}",
+                    dbg[0], dbg[1], k_mean, dbg[3], rr.north.tail_osc()
+                );
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ALPHA),
+                    -1.0,
+                );
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::estimator::ekf::G_ATT_ACC_GATE),
+                    -1.0,
+                );
+            }
             println!("  [§9.8] 保留 att_alpha=0.02(重力锚定)，分别关掉其他锚定路径:");
             for (nm, g3d, gmag) in [
                 ("全开(基准)      ", -1.0f32, -1.0f32),
