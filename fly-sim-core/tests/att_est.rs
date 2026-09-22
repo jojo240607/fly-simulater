@@ -3358,3 +3358,55 @@ fn c1_extreme_cases_and_rate_order_check() {
     }
     println!("  ✓ 三极限情形自检通过（静止/匀速 Δv≈0 ✓；自由落体 Δv=g·dt ✓）");
 }
+
+/// **C1 对接 §1：适配层 + 静止自检**（roadmap/c1-integration-plan.md §1 ✓）
+///
+/// 目的：验证"仿真量 → C1 输入"的语义正确 ✓（本会话教训：适配层的符号/单位错误
+/// 是最典型的静默陷阱 ✗ ⇒ 必须先用【静止】场景证伪 ✓）。
+/// 适配（一行 ✓）：`ImuSample` 是速率、C1 取增量 ⇒ 乘 dt；
+/// 比力用 `TrajSample::specific_force_body()` ✓（= Rᵀ(accel_world − G_NED) ✓ 项目约定 ✓）。
+#[test]
+fn c1_adapter_static_selfcheck() {
+    use flyctrl_core::estimator::c1::C1Filter;
+    use flyctrl_core::units::Radian;
+    let _g = lock();
+    let dt = 0.004f32;
+    // 纯静止（amp=0 ✓）⇒ 比力恒为支撑力、ω=0 ⇒ C1 不得漂移 ✓
+    let m = Maneuver::HoverMicro { amp_deg: 0.0 };
+    let q_id = flyctrl_core::vehicle::Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(0.0));
+    // ⚠️ 初值须与【机动自身的起点】一致（上一版写死 −5 ⇒ 与机动真值 0 不符 ⇒ 假误差 ✗）
+    let mut f = C1Filter::new(q_id, [0.0; 3], [0.0, 0.0, 0.0], 5.0);
+    let mut n = 0u64;
+    let mut p_start = [0.0f32; 3];
+    let _ = run_observed(&m, dt, SensorConfig::default(), 2.0, None, |_t, tr, _est| {
+        let fb = tr.specific_force_body();
+        f.predict(
+            [
+                tr.omega_body[0] * dt,
+                tr.omega_body[1] * dt,
+                tr.omega_body[2] * dt,
+            ],
+            [fb[0] * dt, fb[1] * dt, fb[2] * dt],
+            dt,
+            [0.0, 0.0, 9.81],
+        );
+        // 用真值量测（§1 只查语义 ✓；噪声鲁棒性属后续 ✓）
+        let _ = f.update_gps_vel(tr.vel_ned);
+        let _ = f.update_gps_pos(tr.pos_ned);
+        let _ = f.update_baro(-tr.pos_ned[2]);
+        if n == 0 {
+            p_start = tr.pos_ned;
+        }
+        n += 1;
+    });
+    let vn = (f.st.v.iter().map(|x| x * x).sum::<f32>()) as f64;
+    let pe = ((0..3).map(|i| (f.st.p[i] - p_start[i]).powi(2)).sum::<f32>()) as f64;
+    println!("\n[C1 静止自检] 步数={n} |v|²={vn:.3e} |Δp|²={pe:.3e}");
+    assert!(n > 100, "回调必须被调用（防真空 ✓）");
+    assert!(
+        vn < 1e-2,
+        "静止下 C1 速度不得漂移（|v|²={vn:.3e}）✗ ⇒ 适配层语义错（比力符号/单位/d 约定）"
+    );
+    assert!(pe < 1.0, "静止下 C1 位置不得漂移（|Δp|²={pe:.3e}）✗");
+    println!("  ✓ §1 通过：适配层语义正确（比力用 specific_force_body ✓；静止无漂移 ✓）");
+}
