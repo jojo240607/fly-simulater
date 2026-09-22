@@ -3410,3 +3410,69 @@ fn c1_adapter_static_selfcheck() {
     assert!(pe < 1.0, "静止下 C1 位置不得漂移（|Δp|²={pe:.3e}）✗");
     println!("  ✓ §1 通过：适配层语义正确（比力用 specific_force_body ✓；静止无漂移 ✓）");
 }
+
+/// **C1 对接 §2：量测接入顺序 + 每项 NIS 一致性**（c1-integration-plan.md §2 ✓）
+///
+/// ⚠️ **`#[ignore]`：本版用【真值量测】⇒ NIS 无意义** ✗（2026-09-21 自查 ✓）
+///   实测 NIS 比值 = baro 6.0e-13 / gps_v 4.2e-7 / gps_p 4.8e-8 ✗
+///   ⇒ 因残差≈0（量与预测都取自同一真值 ✓）
+///   ⇒ **NIS 只有在【噪声 + 模型失配】下才有意义** ✓✓（本会话的 NIS 用法本就如此 ✓）
+///   ⇒ 正解：§2 必须用**【仿真侧带噪传感器】**驱动 C1（`HilContext` 的 IMU/GPS/气压 ✓），
+///     而非 TrajSample 的真值 ✗ —— 这需要 harness 暴露传感器采样 ✓（待续 ✓）
+///
+/// **本节结论（有价值的定位 ✓）**：NIS 一致性检查的**适用前提**已明确 ✓
+///   （须真实噪声 ⇒ 也解释了为何 C1 组件级 NIS 测试（有 P0 误差+噪声 ✓）能给出 1.0 量级 ✓）
+///
+/// 顺序：气压 → GPS 速度 → GPS 位置 ✓；每项都须 NIS 比值 ≈ 1（一致性 ✓）。
+/// 本测例在【真实运动】场景下驱动 C1（比力取自 TrajSample ✓），累计三项 NIS 比值 ✓
+/// —— 用断言承载实测值（no_std 无 println ✗ 的替代手法 ✓）。
+#[ignore = "本版用真值量测 ⇒ 残差≈0 ⇒ NIS 无意义（正解：改用仿真侧带噪传感器 ✓）"]
+#[test]
+fn c1_integration_step2_measurement_nis() {
+    use flyctrl_core::estimator::c1::C1Filter;
+    use flyctrl_core::units::Radian;
+    let _g = lock();
+    let dt = 0.004f32;
+    // 真实运动：巡航（倾斜 20°、坡道 3s、保持 10s ✓）
+    let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
+    let q_id = flyctrl_core::vehicle::Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(0.0));
+    let mut f = C1Filter::new(q_id, [0.0; 3], [0.0; 3], 1e6); // 门开大 ⇒ 全量测参与统计 ✓
+    let (mut nv, mut sv) = (0u32, 0.0f32);
+    let (mut np, mut sp) = (0u32, 0.0f32);
+    let (mut nb, mut sb) = (0u32, 0.0f32);
+    let mut started = false;
+    let _ = run_observed(&m, dt, SensorConfig::default(), 2.0, None, |_t, tr, _est| {
+        // 首帧对齐初值（避免人为初差 ✗；实际对接用 align_static ✓）
+        if !started {
+            f = C1Filter::new(q_id, tr.vel_ned, tr.pos_ned, 1e6);
+            started = true;
+            return;
+        }
+        let fb = tr.specific_force_body();
+        f.predict(
+            [tr.omega_body[0] * dt, tr.omega_body[1] * dt, tr.omega_body[2] * dt],
+            [fb[0] * dt, fb[1] * dt, fb[2] * dt],
+            dt,
+            [0.0, 0.0, 9.81],
+        );
+        if let Ok(n) = f.update_baro(-tr.pos_ned[2]) {
+            sb += n * n; nb += 1;
+        }
+        if let Ok(n) = f.update_gps_vel(tr.vel_ned) {
+            sv += n * n; nv += 1;
+        }
+        if let Ok(n) = f.update_gps_pos(tr.pos_ned) {
+            sp += n * n; np += 1;
+        }
+    });
+    let rb = sb / nb.max(1) as f32 / 1.0;
+    let rv = sv / nv.max(1) as f32 / 3.0;
+    let rp = sp / np.max(1) as f32 / 3.0;
+    // 自洽（防真空 ✓）
+    assert!(nb > 100 && nv > 100 && np > 100, "三项量测都须被调用（{nb}/{nv}/{np}）✗");
+    // 一致性判据（宽区间，先定性 ✓）：三项都须落在 [0.05, 20]
+    assert!(
+        (0.05..=20.0).contains(&rb) && (0.05..=20.0).contains(&rv) && (0.05..=20.0).contains(&rp),
+        "NIS 不一致 ✗：baro={rb:.3e} gps_v={rv:.3e} gps_p={rp:.3e} ⇒ 需按残差反推重标 R ✓"
+    );
+}
