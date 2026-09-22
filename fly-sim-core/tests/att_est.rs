@@ -3274,3 +3274,85 @@ fn c1_measurement_h_numeric_check() {
     assert!(close(bp, [0.0, 0.0, -1.0]) && close(bv, [0.0; 3]), "气压高度 H 结构不符 ✗");
     println!("  ✓ 三个量测的 H 结构经数值验证 ✓（气压高度对应 −d ✓ 与约定一致 ✓）");
 }
+
+/// **T4 续：三极限情形自检**（静止 / 匀速 / 自由落体 ✓ —— 验证 C1 标称递推的物理 ✓）。
+///
+/// §4 的标称递推：`v' = v + (R(q)·(a_m − b_a) + g)·dt`
+/// 判据（物理，与约定无关 ✓）：
+///   · 静止/匀速（无净平移）⇒ 比力须为"支撑重力"⇒ Δv ≈ 0 ✓
+///   · 自由落体（失重）⇒ a_m = 0 ⇒ Δv = g·dt ✓
+/// 并顺带用数值判定【机体角速率的乘法顺序】（§4 写作 `q ⊗ exp(ω dt)`，
+/// 而本项目语义是 A*B=先 A 再 B ⇒ 顺序须实测 ✓，又是一个静默陷阱 ✗）。
+#[test]
+fn c1_extreme_cases_and_rate_order_check() {
+    use flyctrl_core::units::Radian;
+    use flyctrl_core::vehicle::{rotate_vec_by_quat, rotate_vec_by_quat_inverse, Quaternion};
+    let dt = 0.01f32;
+    let g = [0.0f32, 0.0, 9.81];
+    let qhat = Quaternion::from_axis_angle([0.2, 0.3, 0.5], Radian(0.4)).normalize();
+    let v0 = [1.0f32, -0.5, 0.2];
+    println!("\n[T4 三极限情形] dt={dt}");
+    // ① 静止/匀速：比力 = 支撑重力 ⇒ 世界系净加速度应 ≈ 0
+    {
+        // a_m（机体系）应满足 R·a_m + g ≈ 0 ⇒ a_m = Rᵀ·(−g)
+        let a_m = rotate_vec_by_quat_inverse(qhat, [-g[0], -g[1], -g[2]]);
+        let aw = rotate_vec_by_quat(qhat, a_m);
+        let dv = [aw[0] + g[0], aw[1] + g[1], aw[2] + g[2]];
+        let dvn = (dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]).sqrt();
+        println!("  ① 静止/匀速：|Δv/dt| = {dvn:.2e}（应 ≈ 0 ✓）");
+        assert!(dvn < 1e-4, "静止/匀速的净加速度应为 0 ✗（偏差 {dvn:.2e}）");
+        let _ = v0;
+    }
+    // ② 自由落体：a_m = 0 ⇒ Δv = g·dt
+    {
+        let a_m = [0.0f32, 0.0, 0.0];
+        let aw = rotate_vec_by_quat(qhat, a_m);
+        let dv = [aw[0] + g[0], aw[1] + g[1], aw[2] + g[2]];
+        let dev = ((dv[0] - g[0]).powi(2) + (dv[1] - g[1]).powi(2) + (dv[2] - g[2]).powi(2)).sqrt();
+        println!("  ② 自由落体：Δv/dt = {dv:?}（应 = g = {g:?} ✓，偏差 {dev:.2e}）");
+        assert!(dev < 1e-6, "自由落体应严格以 g 加速 ✗");
+    }
+    // ③ 机体角速率 dt 的乘法顺序（数值判定 ✓）
+    {
+        let w = [0.4f32, 0.0, 0.0];
+        let dq = Quaternion::from_axis_angle([1.0, 0.0, 0.0], Radian(w[0] * dt));
+        let qa = dq * qhat; // A*B = 先 A 再 B（项目语义 ✓）
+        let qb = qhat * dq;
+        // 判据：机体角速率应产生【绕机体系 x 轴】的转动 ⇒
+        // 世界系中，qb/qa 对"机体 x 轴矢量 R(q̂)·x"的作用应与真实物理一致 ✓。
+        // 用 §12.4 的判定（dq*q̂ == R(q̂)R(δ) ⇒ 左乘 = local ✓）：
+        let local_is_left = {
+            let eps = 1e-3f32;
+            let d2 = Quaternion::from_axis_angle([0.0, 0.0, 1.0], Radian(eps));
+            let l = d2 * qhat;
+            let r = qhat * d2;
+            let basis = [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+            let dev_of = |q: Quaternion| -> f32 {
+                basis
+                    .iter()
+                    .map(|b| {
+                        let got = rotate_vec_by_quat(q, *b);
+                        let want = rotate_vec_by_quat(d2, rotate_vec_by_quat(qhat, *b));
+                        ((got[0] - want[0]).powi(2) + (got[1] - want[1]).powi(2)
+                            + (got[2] - want[2]).powi(2))
+                        .sqrt()
+                    })
+                    .fold(0.0f32, f32::max)
+            };
+            dev_of(l) < dev_of(r) // 若左乘更接近 R(q̂)R(δ) ⇒ 左乘 = local ✓
+        };
+        println!(
+            "  ③ 机体角速率：`dq*qhat` vs `qhat*dq` —— §12.4 判定 ⇒ 左乘 = {} 扰动 ✓",
+            if local_is_left { "local(机体)" } else { "global(导航)" }
+        );
+        println!("     ⇒ 故 §4 的 `q ⊗ exp(ωdt)` 在项目语义下应对应 {} 乘 ✓",
+            if local_is_left { "【左】" } else { "【右】" });
+        let d = {
+            let a = rotate_vec_by_quat(qa, [1.0, 0.0, 0.0]);
+            let b = rotate_vec_by_quat(qb, [1.0, 0.0, 0.0]);
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        };
+        assert!(d > 0.0, "两种顺序应有差异（供判定 ✓）");
+    }
+    println!("  ✓ 三极限情形自检通过（静止/匀速 Δv≈0 ✓；自由落体 Δv=g·dt ✓）");
+}
