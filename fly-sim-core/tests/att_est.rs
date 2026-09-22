@@ -2412,3 +2412,67 @@ fn a4_verify_diagnosis_via_calibration() {
         res[1].1
     );
 }
+
+/// **A7 诊断（沿用 A4 的手法 ✓）**：标定后仍 26.708°/max 27.023° ✗（已标定列最差）。
+/// 分轴 + 时序形态 ⇒ 判定是 yaw 类（同 A4）还是另一机制 ✓。
+#[test]
+fn a7_diagnose_axis_and_timeseries() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let euler = |q: [f32; 4]| -> (f64, f64, f64) {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (
+            (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y)).to_degrees(),
+            (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin().to_degrees(),
+            (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z)).to_degrees(),
+        )
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    println!("\n[A7 诊断] 慢转+0.5g（yaw 30°/s、accel 0.5g）");
+    // 两档对照（未标定 / 已标定）+ 分轴均值
+    for (name, tier) in [
+        ("未标定", MagCalibTier::UncalibExtreme),
+        ("已标定", MagCalibTier::Calibrated),
+    ] {
+        let m = Maneuver::SpinTranslate { yaw_dps: 30.0, accel_g: 0.5 };
+        let (cfg, c) = tier_setup(tier);
+        set_mag_calib(c);
+        let (mut rs, mut ps, mut ys, mut n) = (0.0f64, 0.0f64, 0.0f64, 0u64);
+        let (mut rp, mut pp, mut yp) = (0.0f64, 0.0f64, 0.0f64);
+        let mut tser: Vec<(f32, f64, f64)> = Vec::new();
+        let mut prev: Option<(f64, f64, f32)> = None;
+        let r = run_observed(&m, dt, cfg, 2.0, None, |t, tr, est| {
+            let (er, ep, ey) = euler([est.att.w, est.att.x, est.att.y, est.att.z]);
+            let (trr, tp, ty) = euler(tr.quat);
+            let (dr, dp, dy) = (wrap(er - trr), wrap(ep - tp), wrap(ey - ty));
+            rs += dr.abs(); ps += dp.abs(); ys += dy.abs(); n += 1;
+            rp = rp.max(dr.abs()); pp = pp.max(dp.abs()); yp = yp.max(dy.abs());
+            if let Some((pe, pt, ptt)) = prev {
+                let d2 = (t - ptt) as f64;
+                if d2 > 2.0 {
+                    tser.push((t, dy, (ey - pe) / d2));
+                    prev = Some((ey, ty, t));
+                }
+            } else {
+                prev = Some((ey, ty, t));
+            }
+        });
+        set_mag_calib([0.0; 3]);
+        let k = n.max(1) as f64;
+        println!(
+            "  [{name}] 全姿态 {:.3}/{:.3} | 均值 r {:.2} p {:.2} y {:.2} | 峰值 r {:.1} p {:.1} y {:.1}",
+            r.att.rmse_deg(), r.att.max_deg(), rs / k, ps / k, ys / k, rp, pp, yp
+        );
+        if name == "已标定" {
+            for (t, dy, ery) in tser.iter().take(6) {
+                println!("      t={t:>5.1}s  yaw差={dy:>8.2}°  估计yaw速率={ery:>7.2}°/s（真值 30）");
+            }
+        }
+    }
+    println!("  → 判读：若仍是 yaw 类 ⇒ 与 A4 同源；若含 roll/pitch ⇒ 另有机动耦合（0.5g 平移 ✓）");
+}
