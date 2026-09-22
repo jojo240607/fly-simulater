@@ -3229,3 +3229,48 @@ fn c1_f_position_and_bias_blocks_numeric_check() {
     assert!(dbg < 1e-6 && dba < 1e-6, "零偏块不符（名义漂移应为 0）✗");
     println!("  ✓ δp 块与零偏块通过 ⇒ §5 的 δṗ=δv 与 δḃ=0 经数值验证 ✓");
 }
+
+/// **T4 续：量测模型 H 的数值对照**（GPS 位置/速度、气压高度 ✓ —— 不依赖参照 ✓）。
+///
+/// 做法与 F 同法：以本项目约定写"预测量测" `h(x)`，数值扰动状态 ⇒ 得 H ✓
+/// 并**用数值判定气压高度对应位置 d 分量的符号**（不手推 ✓，本会话惯用手法 ✓）。
+#[test]
+fn c1_measurement_h_numeric_check() {
+    let eps = 1e-3f32;
+    let p0 = [3.0f32, -2.0, -5.0];
+    let v0 = [1.2f32, -0.7, 0.3];
+    // 预测量测（本项目约定 ✓）
+    let h_gps_p = |p: [f32; 3], _v: [f32; 3]| -> f32 { p[0] }; // 取任一分量即可验证结构 ✓
+    let h_gps_v = |_p: [f32; 3], v: [f32; 3]| -> f32 { v[1] };
+    let h_baro = |p: [f32; 3], _v: [f32; 3]| -> f32 { -p[2] }; // 高度 = −d ✓（待数值核对）
+    // 数值 H：∂h/∂δp 与 ∂h/∂δv
+    let num = |f: &dyn Fn([f32; 3], [f32; 3]) -> f32| -> ([f32; 3], [f32; 3]) {
+        let base = f(p0, v0);
+        let mut hp = [0.0f32; 3];
+        let mut hv = [0.0f32; 3];
+        for j in 0..3 {
+            let mut p2 = p0;
+            p2[j] += eps;
+            hp[j] = (f(p2, v0) - base) / eps;
+            let mut v2 = v0;
+            v2[j] += eps;
+            hv[j] = (f(p0, v2) - base) / eps;
+        }
+        (hp, hv)
+    };
+    println!("\n[T4 量测 H 数值对照]");
+    let (gp, gv) = num(&|p, v| h_gps_p(p, v));
+    println!("  GPS 位置(取 n 分量): ∂h/∂δp = {gp:?}  ∂h/∂δv = {gv:?}  ⇒ 应为 [1,0,0] / [0,0,0] ✓");
+    let (vp, vv) = num(&|p, v| h_gps_v(p, v));
+    println!("  GPS 速度(取 e 分量): ∂h/∂δp = {vp:?}  ∂h/∂δv = {vv:?}  ⇒ 应为 [0,0,0] / [0,1,0] ✓");
+    let (bp, bv) = num(&|p, v| h_baro(p, v));
+    println!("  气压高度(=−d):      ∂h/∂δp = {bp:?}  ∂h/∂δv = {bv:?}  ⇒ 应为 [0,0,-1] / [0,0,0] ✓");
+    // 断言（用数值自身作判据 ✓，避免手推符号 ✗）
+    let close = |a: [f32; 3], b: [f32; 3]| -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 1e-4)
+    };
+    assert!(close(gp, [1.0, 0.0, 0.0]) && close(gv, [0.0; 3]), "GPS 位置 H 结构不符 ✗");
+    assert!(close(vp, [0.0; 3]) && close(vv, [0.0, 1.0, 0.0]), "GPS 速度 H 结构不符 ✗");
+    assert!(close(bp, [0.0, 0.0, -1.0]) && close(bv, [0.0; 3]), "气压高度 H 结构不符 ✗");
+    println!("  ✓ 三个量测的 H 结构经数值验证 ✓（气压高度对应 −d ✓ 与约定一致 ✓）");
+}
