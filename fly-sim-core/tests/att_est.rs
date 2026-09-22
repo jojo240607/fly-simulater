@@ -2936,3 +2936,100 @@ fn resolve_perturbation_convention_for_c1() {
         "必须至少有一个候选与参考一致（否则旋转/乘法约定本身有问题 ✗）"
     );
 }
+
+/// **T4 第一步：C1 的 F【数值微分对照】—— 先验证姿态块** ✓✓
+///
+/// 目的（C1 设计文档 §5 的硬要求 ✓）：F **不得手写后直接启用** ✗。
+/// 本工装以【本项目约定】实现标称递推，数值求 `∂(误差状态)/∂(误差状态)`，
+/// 与 §5 的解析 F 逐元素比对 ✓。
+///
+/// 本步只做【姿态块】（§12.1 争议所在 ✓）：
+///   标称：`q' = exp((ω − b_g)·dt) * q`（本项目 `*` 语义 ✓）
+///   误差参数化（§12.4 已判定 ✓）：`q = δq * q̂` ⇒ `δq = q * q̂⁻¹`
+///   预期离散 F：`∂δθ_out/∂δθ_in = I − [ω×]·dt`（连续 A = −[ω×] ✓）
+#[test]
+fn c1_f_attitude_block_numeric_check() {
+    use flyctrl_core::units::Radian;
+    use flyctrl_core::vehicle::{rotate_vec_by_quat_inverse, Quaternion};
+    let dt = 0.01f32;
+    // 一个非平凡的名义姿态与机体系角速率 ✓
+    let qhat = Quaternion::from_axis_angle([0.3, 0.5, 0.8], Radian(0.7)).normalize();
+    let omega = [0.4f32, -0.25, 0.6];
+    let bg = [0.01f32, -0.02, 0.03];
+    let w = [omega[0] - bg[0], omega[1] - bg[1], omega[2] - bg[2]];
+    let prop = |q0: Quaternion| -> Quaternion {
+        let wq = Quaternion::from_axis_angle(normalize3(w), Radian(norm3(w) * dt));
+        (wq * q0).normalize()
+    };
+    let q_nom = prop(qhat);
+    // log map：小角度四元数 ⇒ 旋转向量（机体系 ✓，用 §12.4 的判定 ✓）
+    let log_body = |q: Quaternion| -> [f32; 3] {
+        let s = (q.x * q.x + q.y * q.y + q.z * q.z).sqrt();
+        if s < 1e-12 {
+            return [2.0 * q.x, 2.0 * q.y, 2.0 * q.z];
+        }
+        let ang = 2.0 * s.atan2(q.w);
+        let k = ang / s;
+        [k * q.x, k * q.y, k * q.z]
+    };
+    // 误差提取（local ✓）：δq = q * q̂⁻¹
+    let extract = |q: Quaternion, qref: Quaternion| -> [f32; 3] {
+        let inv = Quaternion { w: qref.w, x: -qref.x, y: -qref.y, z: -qref.z };
+        log_body((q * inv).normalize())
+    };
+    // 数值 Jacobian：∂δθ_out/∂δθ_in
+    // ⚠️ f32 下步长太小会被舍入淹没（首次用 1e-5 时出现整行 0 ✗）⇒ 取 1e-3 ✓
+    let eps = 1e-3f32;
+    let mut jac = [[0.0f32; 3]; 3];
+    for j in 0..3 {
+        let mut d = [0.0f32; 3];
+        d[j] = eps;
+        let dq = Quaternion::from_axis_angle(normalize3(d), Radian(eps));
+        // 输入：q = δq * q̂（local ✓）；输出：相对于 q_nom 的误差 ✓
+        let out_p = extract(prop((dq * qhat).normalize()), q_nom);
+        let dm = [0.0f32; 3];
+        let _ = dm;
+        let dqm = Quaternion::from_axis_angle([1.0, 0.0, 0.0], Radian(0.0));
+        let out_m = extract(prop((dqm * qhat).normalize()), q_nom);
+        for i in 0..3 {
+            jac[i][j] = (out_p[i] - out_m[i]) / eps;
+        }
+    }
+    // ★解析：离散 F ≈ I + [ω×]dt（连续 A = **+**[ω×]）
+    // 推导（共轭）：q=δq*q̂、q'=exp(w dt)*q ⇒ δq' = exp(w dt)·δq·exp(−w dt)
+    //   ⇒ δθ' = R(w dt)δθ ≈ δθ + [ω×]δθ·dt ⇒ A = +[ω×] ✓
+    // ⚠️ 这【修正了 C1 设计文档 §5 的符号】✗→✓（原文写 −[ω×]，经本工装+独立推导双证为错 ✓）
+    let mut an = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        an[i][i] = 1.0;
+    }
+    // −[ω×]·dt： [ω×] = [[0,-wz,wy],[wz,0,-wx],[-wy,wx,0]]
+    // +[ω×]·dt： [ω×] = [[0,-wz,wy],[wz,0,-wx],[-wy,wx,0]]
+    an[0][1] = -w[2] * dt; an[0][2] = w[1] * dt;
+    an[1][0] = w[2] * dt; an[1][2] = -w[0] * dt;
+    an[2][0] = -w[1] * dt; an[2][1] = w[0] * dt;
+    let mut maxdev = 0.0f32;
+    println!("\n[T4 姿态块 F 数值对照] dt={dt} ω={w:?}");
+    for i in 0..3 {
+        println!("  行{i}: 数值 [{:.6} {:.6} {:.6}]  解析 [{:.6} {:.6} {:.6}]",
+            jac[i][0], jac[i][1], jac[i][2], an[i][0], an[i][1], an[i][2]);
+        for j in 0..3 {
+            maxdev = maxdev.max((jac[i][j] - an[i][j]).abs());
+        }
+    }
+    println!("  → 最大偏差 = {maxdev:.2e}（≪ dt·|ω| 量级即通过 ✓）");
+    let _ = rotate_vec_by_quat_inverse;
+    assert!(
+        maxdev < 1e-3,
+        "姿态块 F 的数值与解析不符（偏差 {maxdev:.2e}）⇒ 解析形式需修正 ✗"
+    );
+    println!("  ✓ 姿态块通过 ⇒ 【修正后】的 +[ω×] 项经数值验证 ✓（原文档 −[ω×] 已被本工装证伪 ✗）");
+}
+
+fn norm3(v: [f32; 3]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let n = norm3(v).max(1e-12);
+    [v[0] / n, v[1] / n, v[2] / n]
+}
