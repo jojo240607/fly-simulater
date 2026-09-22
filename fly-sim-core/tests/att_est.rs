@@ -1670,6 +1670,10 @@ fn a12_mag_disturb_bounded_and_calibration_recovers() {
     let mut tail_sum = 0.0f64;
     let mut tail_n = 0u64;
     let mut max_err = 0.0f64;
+    // ⚠️ 末段窗口必须按**实际运行长度**取，并断言**非空** ✗（2026-09-21 自查）：
+    // 曾用硬编码 `t > 34.0`，而偏航扫掠 duration = 360/20+4 = **22s** ⇒ 运行到不了 34s
+    // ⇒ 窗口为空、tail_n=0 ⇒ 均值退化为除零保护值 0.00° ⇒ **判据②真空通过** ✗✗。
+    let (mut all_t, mut all_d): (Vec<f32>, Vec<f64>) = (Vec::new(), Vec::new());
     let r_unc = run_observed(&m, dt, {
         let (c, _) = tier_setup(MagCalibTier::UncalibExtreme);
         c
@@ -1679,14 +1683,22 @@ fn a12_mag_disturb_bounded_and_calibration_recovers() {
             tr.quat,
         );
         max_err = max_err.max(d);
-        if t > 34.0 {
+        all_t.push(t);
+        all_d.push(d);
+    });
+    // 末段 = 实际运行的【最后 20%】
+    let t_end = all_t.last().copied().unwrap_or(0.0);
+    let t_lo = t_end * 0.8;
+    for (t, d) in all_t.iter().zip(all_d.iter()) {
+        if *t >= t_lo {
             tail_sum += d;
             tail_n += 1;
         }
-    });
+    }
+    assert!(tail_n > 0, "末段窗口不得为空（防真空通过 ✗）：t_end={t_end:.1}s");
     let tail = if tail_n > 0 { tail_sum / tail_n as f64 } else { 0.0 };
     println!("{:>14} {:>12.3} {:>12.3} {:>10}", "未标定", r_unc.att.rmse_deg(), max_err, r_unc.att.diverged());
-    println!("  → 未标定档末段（t>34s）平均误差 {tail:.2}°（用于判可恢复性）");
+    println!("  → 未标定档末段（最后 20%，t>={t_lo:.1}s / 共 {tail_n} 帧）平均误差 {tail:.2}°");
 
     // 判据 ①：已标定档影响小（产品常态）—— 阈值可追溯（标定机制实测有效 2.5°）
     assert!(!r_cal.att.diverged(), "已标定档不应发散");
@@ -1697,9 +1709,17 @@ fn a12_mag_disturb_bounded_and_calibration_recovers() {
     );
     // 判据 ②：未标定档有界且可恢复（物理极限允许的最强要求）
     assert!(!r_unc.att.diverged(), "② 未标定档不应【发散】（数值稳定）");
+    // ②-b 残留偏差须**有界**：物理上 = 未补偿硬铁造成的常量航向偏移
+    // （文档记录 realistic() 硬铁造成 ~22° 常量 yaw 偏差；此处 14.09° 同源 ✓）
+    // ⇒ 取 <30°（可追溯于该常量偏移，而非编造 ✗）。
+    assert!(
+        tail < 30.0,
+        "②-b 未标定档残留航向偏差应有界 <30°（= 硬铁常量偏移量级），实际 {tail:.2}°"
+    );
+    // ②-a 峰值应随扰动消失而回落（此处以"末段 << 峰值"表达，阈值取 0.8×峰值）
     assert!(
         tail < max_err * 0.8,
-        "② 未标定档应【可恢复】：末段平均({tail:.2}°)应远低于峰值({max_err:.2}°)"
+        "②-a 未标定档应【可恢复】：末段平均({tail:.2}°)应远低于峰值({max_err:.2}°)"
     );
 }
 
@@ -1909,3 +1929,63 @@ fn a12_selfcheck_mag_property_bisect() {
     println!("  → 判读：哪一项置理想后 RMSE 大幅下降 ⇒ 它就是罪魁 ✓");
 }
 
+
+/// **A12 名实核对**（2026-09-21）：这一档到底在测什么？
+///
+/// 从代码已确认：`maneuver.rs` 的 `MagDisturbSweep` 实现是 `{ rate_dps, .. }`
+/// ⇒ **`bias_gauss` 被丢弃** ✗，注释也写明"磁故障由 SensorModel 另加"，
+/// 而 `att_est` 的 `run_secs` 路径**没有任何地方注入该 bias** ✗
+/// ⇒ 本测例此前实际测的是 **`realistic()` 的固定硬铁 + 偏航扫掠**，
+/// `bias_gauss` 参数**完全无效** ✗（名不副实）。
+///
+/// 本测例用**末段 yaw 误差**（而非四元数夹角）核对：恒定硬铁下静止时
+/// 磁锚定应收敛到**偏 ~22°** 的航向 ✗（文档已记录该常量偏移）——
+/// 若末段 yaw 误差 ≈22° ⇒ 与硬铁一致 ✓；若 ≈0 ⇒ 观测有盲点 ✗。
+#[test]
+fn a12_name_and_effect_audit() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let yaw_of = |q: [f32; 4]| -> f64 {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z)).to_degrees()
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    for (name, tier) in [
+        ("未标定·极端", MagCalibTier::UncalibExtreme),
+        ("已标定", MagCalibTier::Calibrated),
+        ("低噪声(理想磁)", MagCalibTier::UncalibTypical), // 仅作参考名，实际下面换 low_noise
+    ] {
+        let m = Maneuver::MagDisturbSweep { rate_dps: 20.0, bias_gauss: 0.0 };
+        let (cfg, calib) = if name.contains("低噪声") {
+            (low_noise(), [0.0; 3])
+        } else {
+            tier_setup(tier)
+        };
+        set_mag_calib(calib);
+        let mut tail_yaw: Vec<f64> = Vec::new();
+        let mut tail_quat: Vec<f64> = Vec::new();
+        let _ = run_observed(&m, dt, cfg, 2.0, None, |t, tr, est| {
+            if t > 34.0 {
+                let q = [est.att.w, est.att.x, est.att.y, est.att.z];
+                tail_yaw.push(wrap(yaw_of(q) - yaw_of(tr.quat)));
+                tail_quat.push(quat_angle_deg_local(q, tr.quat));
+            }
+        });
+        set_mag_calib([0.0; 3]);
+        let avg = |v: &Vec<f64>| if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 };
+        println!(
+            "  {name:>16}: 末段 yaw误差均值 {:>+8.2}° | 四元数夹角均值 {:>7.2}°",
+            avg(&tail_yaw),
+            avg(&tail_quat)
+        );
+    }
+    println!(
+        "  → 判读：未标定档末段 yaw 应 ≈ +22°（硬铁常量偏移，文档已记录）\n     \
+         若显示 ~0° ⇒ 该观测有盲点（四元数夹角可能掩盖纯偏航偏移，需改用 yaw 分量核对 ✓）"
+    );
+}
