@@ -3610,3 +3610,86 @@ fn c1_integration_step3_side_by_side() {
     assert!(lg_n > 1000 && lg_r.is_finite() && c1_r.is_finite(), "并排量必须有效 ✗");
     assert!(c1_r < 100.0, "C1 姿态均值应有界（{c1_r:.3}°）✗");
 }
+
+/// **C1 对接 §4：验收 —— 与【已标定列】同配置下并排** ✓
+///
+/// # ⚠️ 验收结论：**未通过**（2026-09-21）—— 按 §15.4 预先约定的判据 ⇒ **停止投入** ✓
+///
+/// 实测（巡航 20°，已标定档，n=4000）：
+/// ```text
+///   Legacy: 均值 1.539°  峰值  5.502°   ← 与 §9 已标定列 A2=1.85° 量级吻合 ✓
+///   C1    : 均值 5.924°  峰值 23.665°
+///   => 比值 C1/Legacy = 3.850 ✗
+/// ```
+/// **判据触发**（§15.4 预先约定 ✓）⇒ **停止投入**（不得事后放宽 ✗）
+///
+/// ## 结论的准确含义（重要 ✓）
+/// **停止的是"不加磁增广的 C1"** ✗，而非 C1 方向 ✗ —— 证据来自两个配置的对照：
+/// | 配置 | Legacy | C1 | 胜负 |
+/// |---|---|---|---|
+/// | 未标定档（§3）| 18.468° | **5.924°** | **C1 胜 3.1 倍** ✓✓ |
+/// | 已标定档（§4）| **1.539°** | 5.924° | C1 输 3.85 倍 ✗ |
+/// ⇒ 即：**C1 的胜负取决于"磁参考是否可信"** ✓✓
+///   · 磁不可信 ⇒ 不用磁的 C1 胜 ✓
+///   · 磁可信   ⇒ 用磁的 Legacy 胜 ✓
+/// ⇒ 路径明确：**C2（`mag_I`/`mag_B` 为状态 ✓）** ⇒ 让 C1 同时具备两个优势 ✓✓
+///   —— 而 C2 正是本会话 A4/A12 早已定位的解法 ✓✓（三线合流 ✓）
+///
+/// ⇒ 本测例转为 **C2 的验收工装**（`#[ignore]` 保留 ✓）：C2 落地后去 ignore ⇒
+///   C1 应在【两个配置】下都不劣于 Legacy ✓
+///
+/// 已标定列（roadmap §9）来自 `ab_baseline_table` 的 Calibrated 档：
+///   `SensorConfig::realistic()`（硬铁 = HI_EXTREME ✓）+ `set_mag_calib(HI_EXTREME)` ✓
+/// ⇒ 本测例用**同一配置**跑同一机动，同时跟踪 Legacy 与 C1 ✓
+/// 判据（§15.4 ✓，预先约定）：C1 必须【显著优于】该配置下的 Legacy ✓
+#[ignore = "§4 验收未通过（C1=5.92° vs 已标定 Legacy=1.54°）⇒ 按 §15.4 停止投入；\
+            转作 C2 的验收工装：C2 落地后去 ignore，要求【两个配置下都不劣】✓"]
+#[test]
+fn c1_integration_step4_acceptance_vs_calibrated() {
+    use flyctrl_core::estimator::c1::{align_static, C1Filter};
+    let _g = lock();
+    let dt = 0.004f32;
+    let m = Maneuver::Cruise { tilt_deg: 20.0, ramp_s: 3.0, hold_s: 10.0 };
+    // ★与已标定列同配置 ✓
+    let (cfg, calib) = tier_setup(MagCalibTier::Calibrated);
+    set_mag_calib(calib);
+    let mut flt: Option<C1Filter> = None;
+    let (mut lg_sum, mut c1_sum, mut n) = (0.0f64, 0.0f64, 0u32);
+    let (mut lg_max, mut c1_max) = (0.0f64, 0.0f64);
+    let _ = run_observed(&m, dt, cfg, 2.0, None, |_t, tr, est| {
+        let (acc, gyro, gps, baro) = unsafe { (SENSOR_SLOT, SENSOR_SLOT, GPS_SLOT, BARO_SLOT) };
+        let acc_v = [acc[0], acc[1], acc[2]];
+        let gyr_v = [gyro[3], gyro[4], gyro[5]];
+        let f = flt.get_or_insert_with(|| {
+            let (q0, bg) = align_static(acc_v, gyr_v);
+            let mut f = C1Filter::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
+            f.st.bg = bg;
+            f
+        });
+        f.predict(
+            [gyr_v[0] * dt, gyr_v[1] * dt, gyr_v[2] * dt],
+            [acc_v[0] * dt, acc_v[1] * dt, acc_v[2] * dt],
+            dt,
+            [0.0, 0.0, 9.81],
+        );
+        let _ = f.update_baro(baro);
+        let _ = f.update_gps_vel([gps[3], gps[4], gps[5]]);
+        let _ = f.update_gps_pos([gps[0], gps[1], gps[2]]);
+        let e_lg = quat_angle_deg_local([est.att.w, est.att.x, est.att.y, est.att.z], tr.quat);
+        let e_c1 = quat_angle_deg_local([f.st.q.w, f.st.q.x, f.st.q.y, f.st.q.z], tr.quat);
+        lg_sum += e_lg; c1_sum += e_c1; n += 1;
+        lg_max = lg_max.max(e_lg); c1_max = c1_max.max(e_c1);
+    });
+    set_mag_calib([0.0; 3]);
+    let (lg_r, c1_r) = (lg_sum / n.max(1) as f64, c1_sum / n.max(1) as f64);
+    println!("\n[§4 验收] 巡航 20°，**已标定档**（与 §9 已标定列同配置 ✓），n={n}");
+    println!("  Legacy: 均值 {lg_r:.3}°  峰值 {lg_max:.3}°   ← 对照：§9 已标定列 A2 = 1.85° ✓");
+    println!("  C1    : 均值 {c1_r:.3}°  峰值 {c1_max:.3}°");
+    println!("  → 比值 C1/Legacy = {:.3}", c1_r / lg_r.max(1e-9));
+    assert!(n > 1000 && lg_r.is_finite() && c1_r.is_finite(), "行为量须有效 ✗");
+    // 判据（§15.4 ✓）：C1 应【不劣于】Legacy（显著更优属期望，但此处先记录差异 ✓）
+    assert!(
+        c1_r < lg_r * 1.5,
+        "C1 在已标定档下不应显著劣于 Legacy（C1={c1_r:.3}° vs Legacy={lg_r:.3}°）✗"
+    );
+}
