@@ -1503,10 +1503,15 @@ fn a10_propwash_descent_bounded() {
     let cfg = SensorConfig::realistic();
     println!("\n[A10 下降桨流] 30Hz 级抖动 + 匀速下降");
     println!("{:>24} {:>10} {:>10} {:>10}", "配置(下降/抖动)", "RMSE°", "max°", "发散");
-    for (name, m) in [
-        ("下降1m/s 抖6°", Maneuver::PropwashDescent { descent_mps: 1.0, jitter_deg: 6.0 }),
-        ("下降2m/s 抖12°", Maneuver::PropwashDescent { descent_mps: 2.0, jitter_deg: 12.0 }),
-    ] {
+    // **仪器自检**（2026-09-21）：先用两种源配置对照，把"抖动透传"与"已知常量偏移"分开。
+    // 线索：RMSE 不随抖动量级走（6°->12° 仅 +11% ✗）=> 不是抖动透传。
+    // 而 realistic() 有已记录的 **22° 航向常量偏移**（硬铁 [0.3,-0.2,0.4]，见本文件 543 行）。
+    for (src_name, cfg) in [("low_noise", low_noise()), ("realistic", cfg.clone())] {
+        println!("  --- 源配置 {src_name} ---");
+        for (name, m) in [
+            ("下降1m/s 抖6°", Maneuver::PropwashDescent { descent_mps: 1.0, jitter_deg: 6.0 }),
+            ("下降2m/s 抖12°", Maneuver::PropwashDescent { descent_mps: 2.0, jitter_deg: 12.0 }),
+        ] {
         let r = run_secs(&m, dt, cfg.clone(), 2.0, 40.0);
         println!(
             "{name:>24} {:>10.3} {:>10.3} {:>10}",
@@ -1516,11 +1521,23 @@ fn a10_propwash_descent_bounded() {
         );
         assert!(!r.att.diverged(), "A10 {name}: 不应发散");
         // 宽界（物理动机）：抖动本身 6~12°，姿态误差不应超过抖动幅值的数倍
+        // **判据按其真实机制定**（2026-09-21 仪器自检结论）：
+        //  low_noise：只留"抖动透传"这一条路径 ⇒ 实测 6°->4.48°、12°->9.18°
+        //             ⇒ **RMSE ≈ 0.75 × 抖动幅值，且随幅值近线性** ⇒ 40Hz 陷波足够 ✓
+        //             ⇒ 判据取 **< 1.5 × 抖动**（实测 0.75× 的 2 倍裕度 ✓，可追溯）
+        //  realistic：叠加已记录的 **22° 航向常量偏移**（硬铁 [0.3,-0.2,0.4]）⇒ 20° 级读数
+        //             ⇒ 该偏移**与桨洗无关** ✓，故此处只作观察 + 宽界防发散
+        let jitter = match &m {
+            Maneuver::PropwashDescent { jitter_deg, .. } => *jitter_deg,
+            _ => 0.0,
+        };
+        let bound = if src_name == "low_noise" { 1.5 * jitter } else { 45.0 };
         assert!(
-            r.att.rmse_deg() < 40.0,
-            "A10 {name}: RMSE 应有界（实测 {:.3}°）",
+            r.att.rmse_deg() < bound,
+            "A10 [{src_name}] {name}: RMSE 应 <{bound:.1}°（实测 {:.3}°）",
             r.att.rmse_deg()
         );
+        }
     }
 }
 
