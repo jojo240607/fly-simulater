@@ -3835,3 +3835,62 @@ fn dual_run_ab_table_legacy_vs_eskf() {
     assert_eq!(get_est_mode(), 0, "模式未还原 ✗");
     println!("\n  ✓ 全量双跑完成：Legacy 与 ESKF 各跑 A1–A10 × 两档 ✓；模式已还原 ✓");
 }
+
+/// 设 `G_ESKF_GRAV_ON`（重力辅助开关 ✓，实验旋钮 ✓）
+fn set_eskf_grav_on(v: f32) {
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(flyctrl_core::estimator::eskf::G_ESKF_GRAV_ON),
+            v,
+        );
+    }
+}
+/// 设 `G_ESKF_MAG_ON`（磁量测开关 ✓）
+fn set_eskf_mag_on(v: f32) {
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(flyctrl_core::estimator::eskf::G_ESKF_MAG_ON),
+            v,
+        );
+    }
+}
+
+/// ★★**对照臂**（迁移计划步 5 的诊断 ✓）：把 4 个"旋转类"失败场景
+/// （A4/A6/A7/A13 ✓）在 **ESKF** 下各自跑 4 个臂：
+///   (重力辅助, 磁量测) = (1,1) 基线 / (0,1) 关重力 / (1,0) 关磁 / (0,0) 全关
+/// ⇒ **哪个臂救得回，真因就在那一路** ✓（本会话标准手法 ✓）。
+#[test]
+fn eskf_rotation_failures_contrast_arms() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let (cfg, c) = tier_setup(MagCalibTier::UncalibExtreme);
+    set_mag_calib(c);
+    select_est_mode(EstMode::Ekf);
+    let cases: [(&str, Maneuver, f32); 4] = [
+        ("A4 协调转弯", Maneuver::CoordinatedTurn { bank_deg: 30.0, rate_dps: 40.0 }, 40.0),
+        ("A6 横滚540", Maneuver::Roll360 { rate_dps: 540.0, thrust_ratio: 0.9 }, 40.0),
+        ("A7 慢转+0.5g", Maneuver::SpinTranslate { yaw_dps: 30.0, accel_g: 0.5 }, 40.0),
+        ("A13 陀螺饱和", Maneuver::GyroSatBoundary { rate_dps: 500.0 }, 30.0),
+    ];
+    println!("\n[ESKF 旋转类失败 — 对照臂] (重力辅助, 磁量测) ⇒ RMSE°/max°");
+    println!("{:>14} {:>18} {:>18} {:>18} {:>18}", "场景", "(1,1)基线", "(0,1)关重力", "(1,0)关磁", "(0,0)全关");
+    for (name, m, dur) in cases {
+        let mut row = [0.0f32; 8];
+        for (k, (gv, mv)) in [(1.0f32, 1.0f32), (0.0, 1.0), (1.0, 0.0), (0.0, 0.0)].iter().enumerate() {
+            set_eskf_grav_on(*gv);
+            set_eskf_mag_on(*mv);
+            let r = run_secs(&m, dt, cfg.clone(), 2.0, dur);
+            row[k * 2] = r.att.rmse_deg();
+            row[k * 2 + 1] = r.att.max_deg();
+        }
+        println!(
+            "{name:>14} {:>9.2}/{:>8.2} {:>9.2}/{:>8.2} {:>9.2}/{:>8.2} {:>9.2}/{:>8.2}",
+            row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]
+        );
+    }
+    set_eskf_grav_on(1.0);
+    set_eskf_mag_on(1.0);
+    set_mag_calib([0.0; 3]);
+    select_est_mode(EstMode::Legacy);
+    println!("  ✓ 对照臂完成（旋钮与模式已还原 ✓）");
+}
