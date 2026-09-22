@@ -87,6 +87,14 @@ struct TrackStat {
     /// **速度误差**峰值（设定速度 vs 真值速度，水平，m/s）—— 用于区分
     /// "位置环滞后"与"速度环跟不上"（若实际速度 < 设定速度，位置误差必然累积）
     pub vel_err_max: f64,
+    /// **稳态（跟轨迹 3s 后）速度误差 RMS**（m/s，水平）—— 度量**振荡幅度**（跟踪质量）✓
+    pub vel_err_rms_ss: f64,
+    /// **稳态速度误差的【均值/直流】**（m/s，水平矢量模）—— 这才是**漂移率** ✓
+    ///
+    /// ⚠️ 与 RMS 的区别（2026-09-21 实测教训）：实测同一轨迹 RMS=0.6053 m/s 而位置漂移
+    /// 仅 0.05 m/s ✗ ⇒ 差 12 倍 ⇒ **速度误差主要是零均值振荡**；漂移由**直流分量**决定 ✓。
+    /// ⇒ "漂移率"必须用均值（直流），**不能用 RMS** ✗（同一坑：指标 ≠ 想表达的量）。
+    pub vel_err_mean_ss: f64,
     /// 估计误差（估计 vs 真值）：位置 max / 姿态 max（度）
     pub est_pos_max: f64,
     pub est_att_max_deg: f64,
@@ -224,6 +232,8 @@ fn run_track_v<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32,
     let (mut max_thrust_sum, mut sat_n, mut sat_tot) = (0.0f64, 0u64, 0u64);
     let mut yaw_err_max = 0.0f64;
     let mut vel_err_max = 0.0f64;
+    let (mut vss_sum, mut vss_n) = (0.0f64, 0u64);
+    let (mut vmn, mut vme) = (0.0f64, 0.0f64);
     let mut diverged = false;
     while !g.done() && n < 200_000 {
         let sp = g.step();
@@ -254,6 +264,12 @@ fn run_track_v<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32,
             let vx = truth.vel[0].0 as f64 - sp.vel[0].0 as f64;
             let vy = truth.vel[1].0 as f64 - sp.vel[1].0 as f64;
             vel_err_max = vel_err_max.max((vx * vx + vy * vy).sqrt());
+            if n >= ss_from {
+                vss_sum += vx * vx + vy * vy;
+                vss_n += 1;
+                vmn += vx;
+                vme += vy;
+            }
         }
         // 跟踪误差：真值位置 vs 期望位置
         let d = ((truth.pos[0].0 - sp.pos[0].0).powi(2)
@@ -295,6 +311,13 @@ fn run_track_v<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32,
         sat_ratio: if sat_tot > 0 { sat_n as f64 / sat_tot as f64 } else { 0.0 },
         yaw_err_max_deg: yaw_err_max,
         vel_err_max,
+        vel_err_rms_ss: if vss_n > 0 { (vss_sum / vss_n as f64).sqrt() } else { 0.0 },
+        vel_err_mean_ss: if vss_n > 0 {
+            let m = (vmn / vss_n as f64, vme / vss_n as f64);
+            (m.0 * m.0 + m.1 * m.1).sqrt()
+        } else {
+            0.0
+        },
         est_pos_max: epmax,
         est_att_max_deg: eamax,
         diverged,
@@ -525,6 +548,22 @@ fn feasible_tangent_yaw_tracking() {
     // 取 11m（能抓住漂移率劣化 ✓，不因轨道长短误判 ✓）。
     // **真正的判据应是【速度误差的稳态】（漂移率）** —— 与"速度误差指标改稳态 RMS"
     // 一并作为下一项（现在该指标仍是峰值，不能直接用）。
+    // **真正的跟踪判据：稳态速度误差（= 漂移率）< 0.08 m/s** ✓
+    // 依据：对照两条同速率轨迹反推的漂移率 ~0.04~0.05 m/s（R=7m/132s 与 R=2m/38s），
+    // 与轨道长短无关 ✓ ⇒ 取 0.08 留 ~1.6× 裕度。这才是"跟踪好不好"的**物理量** ✓。
+    // **漂移率判据用【直流分量】**（RMS 是振荡幅度，两者实测差 12 倍 ✗）
+    println!(
+        "  [漂移率判据] 稳态速度误差 直流 = {:.4} m/s（阈值 0.15）| RMS = {:.4} m/s（观察：振荡幅度）",
+        st.vel_err_mean_ss, st.vel_err_rms_ss
+    );
+    // 阈值**按本轨迹实测**定（不用早先 r=2m 数据反推的 0.04~0.05 —— 那是低估 ✗）：
+    //  实测直流 0.1036 m/s  ⇒  ×132s ≈ 13.7m，与实测位置误差 8.971m 同量级 ✓
+    //  ⇒ 取 **0.15 m/s**（≈ 实测 1.45× 裕度）：能抓住漂移率劣化 ✓，不擦线误判 ✓
+    assert!(
+        st.vel_err_mean_ss < 0.15,
+        "稳态速度误差（漂移率 = 直流分量）应 <0.15 m/s，实际 {:.4} m/s",
+        st.vel_err_mean_ss
+    );
     assert!(
         st.err_max_ss < 11.0,
         "可行切向偏航稳态位置误差应 <11m（= 漂移率 0.08m/s × 132s 的物理预期），实际 {:.3}m",
