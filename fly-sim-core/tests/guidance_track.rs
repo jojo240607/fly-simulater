@@ -78,6 +78,10 @@ struct TrackStat {
     pub err_rms_ss: f64,
     /// 稳态误差的**各轴分量峰值** `[北, 东, 下]` —— 用于区分"高度偏差"与"沿轨滞后"
     pub err_axis_ss: [f64; 3],
+    /// 推力指令总和峰值（4 电机之和；满值 4.0）—— 用于查"权限是否饱和"
+    pub max_thrust_sum: f64,
+    /// 出现"任一电机指令贴边（≥0.98 或 ≤0.02）"的步数占比
+    pub sat_ratio: f64,
     /// 估计误差（估计 vs 真值）：位置 max / 姿态 max（度）
     pub est_pos_max: f64,
     pub est_att_max_deg: f64,
@@ -206,11 +210,22 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
     let ss_from = (SETTLE_S / DT as f64) as u64;
     let (mut ssmax, mut sssum, mut ssn) = (0.0f64, 0.0f64, 0u64);
     let mut axis_max = [0.0f64; 3];
+    let (mut max_thrust_sum, mut sat_n, mut sat_tot) = (0.0f64, 0u64, 0u64);
     let mut diverged = false;
     while !g.done() && n < 200_000 {
         let sp = g.step();
         let est = ctrl.step(&sp);
         let truth = ctrl.world_state();
+        // 推力/饱和：查"权限争夺"（偏航力矩持续占用差动 ⇒ 与高度/倾角争权限）
+        {
+            let cmd = ctrl.last_cmd();
+            let sum: f64 = cmd.motor.iter().map(|m| *m as f64).sum();
+            max_thrust_sum = max_thrust_sum.max(sum);
+            if cmd.motor.iter().any(|m| *m >= 0.98 || *m <= 0.02) {
+                sat_n += 1;
+            }
+            sat_tot += 1;
+        }
         // 跟踪误差：真值位置 vs 期望位置
         let d = ((truth.pos[0].0 - sp.pos[0].0).powi(2)
             + (truth.pos[1].0 - sp.pos[1].0).powi(2)
@@ -247,6 +262,8 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
         err_max_ss: ssmax,
         err_rms_ss: if ssn > 0 { (sssum / ssn as f64).sqrt() } else { 0.0 },
         err_axis_ss: axis_max,
+        max_thrust_sum,
+        sat_ratio: if sat_tot > 0 { sat_n as f64 / sat_tot as f64 } else { 0.0 },
         est_pos_max: epmax,
         est_att_max_deg: eamax,
         diverged,
@@ -749,8 +766,13 @@ fn error_axis_decomposition() {
     ];
     for (name, st) in &cases {
         println!(
-            "  {name:14} 稳态范数 {:7.3}m | 北 {:7.3} 东 {:7.3} 下 {:7.3}",
-            st.err_max_ss, st.err_axis_ss[0], st.err_axis_ss[1], st.err_axis_ss[2]
+            "  {name:14} 稳态 {:7.3}m | 北 {:7.3} 东 {:7.3} 下 {:7.3} | 推力峰 {:.3}/4.0 饱和占比 {:5.1}%",
+            st.err_max_ss,
+            st.err_axis_ss[0],
+            st.err_axis_ss[1],
+            st.err_axis_ss[2],
+            st.max_thrust_sum,
+            st.sat_ratio * 100.0
         );
     }
     println!("（判读：直线若主要是【北】⇒ 沿轨滞后；若主要是【下】⇒ 定高问题）");
