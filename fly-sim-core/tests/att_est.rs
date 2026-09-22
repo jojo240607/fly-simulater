@@ -2221,3 +2221,60 @@ fn ab_baseline_table_for_c_migration() {
          并同时跑 guidance_track/pos_ctrl 的对应表（位置/轨迹行为量 ✓）"
     );
 }
+
+/// **A4 诊断（第一步：仪器自检 ⇒ 分轴定位）**。
+///
+/// 背景：A/B 基线表照出 A4 协调转弯 RMSE 87.13° / max 179.99° ✗（近完全翻转 ✗）。
+/// 按纪律**先验证再归因** ✗：把【全姿态夹角】拆成 roll/pitch/yaw 三个分量，
+/// 看错误集中在哪里、以及 179.99° 是否为回绕边界造成的假象 ✓。
+///
+/// 已知线索（代码注释 ✓）：协调转弯的向心加速度由 roll 平衡 ⇒ 比力≈竖直且幅值≈g
+/// ⇒ 幅值/方向门控都无法区分 ⇒ "锚定会把 roll 错误拉向 0"；
+/// 而陀螺门控（|ω|>0.6 全关）在 40°/s=0.70rad/s 时**应当已关闭锚定** ✓ ⇒ 需核实。
+#[test]
+fn a4_diagnose_axis_split() {
+    let _g = lock();
+    let dt = 0.004f32;
+    // ZYX 欧拉角提取（NED/FRD ✓）
+    let euler = |q: [f32; 4]| -> (f64, f64, f64) {
+        let (w, x, y, z) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+        let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
+        let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+        let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
+        (roll.to_degrees(), pitch.to_degrees(), yaw.to_degrees())
+    };
+    let wrap = |d: f64| -> f64 {
+        let mut v = d;
+        while v > 180.0 { v -= 360.0; }
+        while v < -180.0 { v += 360.0; }
+        v
+    };
+    println!("\n[A4 分轴诊断] 协调转弯（bank 30°、40°/s）—— 拆 roll/pitch/yaw");
+    for (name, m) in [
+        ("A4 @40°/s", Maneuver::CoordinatedTurn { bank_deg: 30.0, rate_dps: 40.0 }),
+        ("A4 @10°/s", Maneuver::CoordinatedTurn { bank_deg: 30.0, rate_dps: 10.0 }),
+    ] {
+        let (mut rmax, mut pmax, mut ymax) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut rsum, mut psum, mut ysum, mut n) = (0.0f64, 0.0f64, 0.0f64, 0u64);
+        let mut tmax = (0.0f32, 0.0f64);
+        let r = run_observed(&m, dt, SensorConfig::realistic(), 2.0, None, |t, tr, est| {
+            let (er, ep, ey) = euler([est.att.w, est.att.x, est.att.y, est.att.z]);
+            let (tr_, tp, ty) = euler(tr.quat);
+            let (dr, dp, dy) = (wrap(er - tr_), wrap(ep - tp), wrap(ey - ty));
+            rmax = rmax.max(dr.abs());
+            pmax = pmax.max(dp.abs());
+            ymax = ymax.max(dy.abs());
+            rsum += dr.abs(); psum += dp.abs(); ysum += dy.abs(); n += 1;
+            if dr.abs() + dp.abs() + dy.abs() > tmax.1 { tmax = (t, dr.abs() + dp.abs() + dy.abs()); }
+        });
+        let k = n.max(1) as f64;
+        println!(
+            "  {name}: 全姿态RMSE {:.3}° max {:.3}° | 分轴均值 roll {:.2}° pitch {:.2}° yaw {:.2}° \
+             | 分轴峰值 roll {:.1}° pitch {:.1}° yaw {:.1}° | 最差时刻 t={:.1}s",
+            r.att.rmse_deg(), r.att.max_deg(),
+            rsum / k, psum / k, ysum / k,
+            rmax, pmax, ymax, tmax.0
+        );
+    }
+    println!("  → 判读：若集中在 yaw ⇒ 磁/回绕类；若集中在 roll/pitch ⇒ 重力锚定类（注释所指 ✓）");
+}
