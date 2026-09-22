@@ -4066,3 +4066,42 @@ fn mag_state_history_in_rotation_cases() {
     }
     println!("  ✓ 磁链历程诊断完成 ✓");
 }
+
+/// ★**安静场景回归**（必须先证明不劣化，才允许把重锚定变默认 ✓）：
+/// A1/A2/A8 在 ESKF 下，重锚定 关 / 开 对照 ✓。
+#[test]
+fn reanchor_quiet_scenario_regression() {
+    let _g = lock();
+    let dt = 0.004f32;
+    let (cfg, c) = tier_setup(MagCalibTier::UncalibExtreme);
+    set_mag_calib(c);
+    select_est_mode(EstMode::Ekf);
+    let all = ab_cases();
+    let want = ["A1", "A2", "A8"];
+    let cases: std::vec::Vec<_> = all
+        .into_iter()
+        .filter(|(n, _, _)| want.iter().any(|w| n.starts_with(w)))
+        .collect();
+    println!("\n[安静场景回归] 重锚定 关 → 开（σ=0.05 ✓）⇒ RMSE° / max°");
+    for (name, man, dur) in &cases {
+        set_eskf_mag_reanchor(0.0);
+        let r0 = run_secs(man, dt, cfg.clone(), 2.0, *dur);
+        set_eskf_mag_reanchor(0.05);
+        let r1 = run_secs(man, dt, cfg.clone(), 2.0, *dur);
+        let (a0, a1) = (r0.att.rmse_deg(), r1.att.rmse_deg());
+        println!(
+            "  {name:>14}: {a0:8.3} → {a1:8.3}   (max {:.3} → {:.3})   Δ={:+.3}",
+            r0.att.max_deg(), r1.att.max_deg(), a1 - a0
+        );
+        // ★回归守卫：安静场景不得显著劣化（容差 10% 或 0.2°，取大者 ✓）
+        let tol = (0.1 * a0).max(0.2);
+        assert!(
+            a1 <= a0 + tol,
+            "{name}: 重锚定使安静场景劣化 ✗（{a0:.3} → {a1:.3}°，容差 {tol:.3}°）⇒ 不可设为默认 ✗"
+        );
+    }
+    set_eskf_mag_reanchor(0.0);
+    set_mag_calib([0.0; 3]);
+    select_est_mode(EstMode::Legacy);
+    println!("  ✓ 安静场景回归通过（旋钮与模式已还原 ✓）");
+}
