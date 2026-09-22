@@ -449,6 +449,34 @@ fn outer_position_step() {
                 );
             }
             // ---- §9.4b 跳变附近精细扫描（离散 ⇒ 开关；陡峭连续 ⇒ 非线性）----
+            // ---- §9.5 带估计器(att_a=1.0)扫 kv_xy：找裕度恢复的转折点 ----
+            // 病因已定性：位置环+姿态估计滞后的相位裕度不足 ✓
+            // 检验：降增益是否恢复裕度（应出现明确转折点），且能否同时满足
+            //       理想地板(0.148m)与全估计尾部(≤0.150m) ✓
+            println!("  [§9.5] att_a=1.0（全估计）扫 kv_xy —— 找裕度恢复的转折点:");
+            for kv in [0.4f32, 0.6, 0.8, 1.0, 1.2, 1.6, 2.0] {
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                        kv,
+                    );
+                }
+                let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, 1.0, 1.0, 1.0);
+                println!(
+                    "    kv_xy={kv:>4.1}: tail_osc={:.4} tail_peak={:.4} settle={:.3}s ss_err={:.4} 达标={}",
+                    rr.north.tail_osc(),
+                    rr.north.tail_peak(),
+                    rr.north.settle_s(),
+                    rr.north.ss_err(),
+                    rr.north.settle_s() > 0.0
+                );
+            }
+            unsafe {
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(flyctrl_core::controller::pid::G_KV_XY),
+                    -1.0,
+                );
+            }
             println!("  [§9.4b] 跳变附近精细扫描（离散跳变 ⇒ 开关/门控；陡峭连续 ⇒ 非线性）:");
             for aa in [0.75f32, 0.80, 0.85, 0.90, 0.95, 0.98, 1.00] {
                 let rr = run_outer_blend(&vc, 15.0, SensorConfig::default(), 1.0, sp_fn, aa, 1.0, 1.0);
