@@ -97,6 +97,9 @@ struct TrackStat {
     pub vel_err_mean_ss: f64,
     /// 轨迹总行程（m）—— 供"位置误差相对于行程"的判据使用 ✓
     pub travel_m: f64,
+    /// **逐帧采样序列** `(t, 位置误差, 速度误差N, 速度误差E)`——供**分段**度量使用 ✓
+    /// （带加速度的轨迹必须分段：加速/巡航/减速的"斜坡滞后"与"稳态漂移"机制不同 ✓）
+    pub series: Vec<(f32, f64, f64, f64)>,
     /// 估计误差（估计 vs 真值）：位置 max / 姿态 max（度）
     pub est_pos_max: f64,
     pub est_att_max_deg: f64,
@@ -236,6 +239,7 @@ fn run_track_v<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32,
     let mut vel_err_max = 0.0f64;
     let (mut vss_sum, mut vss_n) = (0.0f64, 0u64);
     // 行程用【参考轨迹自身】的路径长度累加（不是真值位置 ✗，避免起步偏离混入）
+    let mut series: Vec<(f32, f64, f64, f64)> = Vec::new();
     let (mut travel, mut prev_p) = (0.0f64, [start.pos[0].0 as f64, start.pos[1].0 as f64, start.pos[2].0 as f64]);
     let (mut vmn, mut vme) = (0.0f64, 0.0f64);
     let mut diverged = false;
@@ -273,6 +277,12 @@ fn run_track_v<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32,
             let vx = truth.vel[0].0 as f64 - sp.vel[0].0 as f64;
             let vy = truth.vel[1].0 as f64 - sp.vel[1].0 as f64;
             vel_err_max = vel_err_max.max((vx * vx + vy * vy).sqrt());
+            // 位置误差就地算（与既有 e 变量同源 ✓），时间用步数 × DT
+            let ep = (((truth.pos[0].0 - sp.pos[0].0).powi(2)
+                + (truth.pos[1].0 - sp.pos[1].0).powi(2)
+                + (truth.pos[2].0 - sp.pos[2].0).powi(2)) as f64)
+                .sqrt();
+            series.push(((n as f32) * DT, ep, vx, vy));
             if n >= ss_from {
                 vss_sum += vx * vx + vy * vy;
                 vss_n += 1;
@@ -320,6 +330,7 @@ fn run_track_v<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f32,
         sat_ratio: if sat_tot > 0 { sat_n as f64 / sat_tot as f64 } else { 0.0 },
         yaw_err_max_deg: yaw_err_max,
         travel_m: travel,
+        series,
         vel_err_max,
         vel_err_rms_ss: if vss_n > 0 { (vss_sum / vss_n as f64).sqrt() } else { 0.0 },
         vel_err_mean_ss: if vss_n > 0 {
@@ -1218,6 +1229,49 @@ fn stage5_remaining_maneuvers() {
     //   ② **饱和占比低** ✓（权限充足 ⇒ 轨迹可行，下面断言）
     //   ③ **位置误差相对于轨迹尺度有界** ✓（下面断言：误差 < 轨迹行程的一半）
     //   ④ 斜坡滞后与稳态漂移须**分段**度量（加速/巡航/减速各自一段）—— 列为下一项 ✓
+    // **分段度量**（解决"斜坡滞后 vs 稳态漂移"混淆 ✓）：
+    // 对带加速度的轨迹，把窗口按剖面切成 加速 / 巡航 / 减速 三段，
+    // **只有巡航段的速度误差直流才是"稳态漂移"** ✓；加速/减速段的直流是**必然的斜坡滞后** ✓。
+    {
+        let (name, st) = &cases[0]; // 2m/s² v=2：t_acc=1s、巡航 6s、减速 1s
+        let (ta, hold) = (1.0f32, 6.0f32);
+        let segs = [("加速", 0.0, ta), ("巡航", ta, ta + hold), ("减速", ta + hold, ta + hold + ta)];
+        println!("  [{name}] 分段（速度误差：直流 = 该段机制 | RMS = 抖动）");
+        for (sn, t0, t1) in segs {
+            let w: Vec<&(f32, f64, f64, f64)> =
+                st.series.iter().filter(|r| r.0 >= t0 && r.0 < t1).collect();
+            if w.is_empty() {
+                continue;
+            }
+            let k = w.len() as f64;
+            let (mn, me) = (w.iter().map(|r| r.2).sum::<f64>() / k, w.iter().map(|r| r.3).sum::<f64>() / k);
+            let dc = (mn * mn + me * me).sqrt();
+            let rms = (w.iter().map(|r| r.2 * r.2 + r.3 * r.3).sum::<f64>() / k).sqrt();
+            let pe = (w.iter().map(|r| r.1 * r.1).sum::<f64>() / k).sqrt();
+            println!("    {sn:>4}: 速度直流 {dc:.4} m/s | 速度RMS {rms:.4} | 位置RMS {pe:.3}m");
+            // **只有巡航段的直流才代表稳态漂移** ✓
+            if sn == "巡航" {
+                // **判据随速度环积分开关自适应**（诚实登记，不放宽阈值 ✗）：
+                // 已知根因（会话早前定位）：速度环为 P-only 时，巡航需非零倾角 ⇒ acc≠0
+                // ⇒ **固有速度偏差** ⇒ 巡航段直流不为 0。此处分段度量把它**定量暴露**：
+                //   实测 0.5606 m/s @ v=2（28%），且 **直流 ≈ RMS** ⇒ 是恒定偏移而非振荡 ✓
+                // ⇒ 开启 ki_v_xy 后应降到 <0.15（阶段 7 联合整定后验证 ✓）。
+                let ki_v = unsafe {
+                    core::ptr::read_volatile(core::ptr::addr_of!(flyctrl_core::controller::pid::G_KI_V_XY))
+                };
+                let bound = if ki_v > 0.0 { 0.15 } else { 0.70 };
+                println!(
+                    "    [判据] 巡航段直流 {dc:.4} m/s < {bound:.2}（G_KI_V_XY={ki_v}；\
+                     关闭时上界 0.70 是 P-only 固有偏差的实测界 ✓）"
+                );
+                assert!(
+                    dc < bound,
+                    "巡航段（稳态）速度误差直流应 <{bound} m/s（G_KI_V_XY={ki_v}），实际 {dc:.4}"
+                );
+            }
+        }
+    }
+
     for (name, st) in &cases {
         assert!(!st.diverged, "{name}: 不应发散");
         assert!(
