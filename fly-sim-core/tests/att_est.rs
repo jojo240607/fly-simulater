@@ -3680,6 +3680,7 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
     let mut flt: Option<C1Filter> = None;
     let (mut lg_sum, mut c1_sum, mut n) = (0.0f64, 0.0f64, 0u32);
     let (mut c1_yaw_sum, mut c1_rp_sum) = (0.0f64, 0.0f64);
+    let (mut c1_rp_dc_sum, mut c1_rp_osc_sum) = (0.0f64, 0.0f64);
     let (mut lg_max, mut c1_max) = (0.0f64, 0.0f64);
     let _ = run_observed(&m, dt, cfg, 2.0, None, |_t, tr, est| {
         let (acc, gyro, gps, baro) = unsafe { (SENSOR_SLOT, SENSOR_SLOT, GPS_SLOT, BARO_SLOT) };
@@ -3707,8 +3708,14 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
         {
             let (r_c, p_c, y_c) = euler_zyx([f.st.q.w, f.st.q.x, f.st.q.y, f.st.q.z]);
             let (r_t, p_t, y_t) = euler_zyx(tr.quat);
+            let dr = wrap180(r_c - r_t);
+            let dp = wrap180(p_c - p_t);
             c1_yaw_sum += wrap180(y_c - y_t).abs();
-            c1_rp_sum += (wrap180(r_c - r_t).abs() + wrap180(p_c - p_t).abs()) * 0.5;
+            c1_rp_sum += (dr.abs() + dp.abs()) * 0.5;
+            // ★直流 vs 振荡（诊断 ✓）：带符号均值 = 系统偏移；偏差 = 振荡
+            c1_rp_dc_sum += (dr + dp) * 0.5;
+            c1_rp_osc_sum += ((dr - c1_rp_dc_sum / (n as f64 + 1.0)).abs()
+                + (dp - c1_rp_dc_sum / (n as f64 + 1.0)).abs()) * 0.5;
         }
         lg_max = lg_max.max(e_lg); c1_max = c1_max.max(e_c1);
     });
@@ -3720,6 +3727,8 @@ fn c1_integration_step4_acceptance_vs_calibrated() {
     println!("  → 比值 C1/Legacy = {:.3}", c1_r / lg_r.max(1e-9));
     println!("  C1 分轴：yaw 均值 {:.3}°  roll/pitch 均值 {:.3}°",
         c1_yaw_sum / n.max(1) as f64, c1_rp_sum / n.max(1) as f64);
+    println!("  ★roll/pitch 直流（系统偏移）= {:.3}°  ｜  振荡型残差 = {:.3}°",
+        c1_rp_dc_sum / n.max(1) as f64, c1_rp_osc_sum / n.max(1) as f64);
     assert!(n > 1000 && lg_r.is_finite() && c1_r.is_finite(), "行为量须有效 ✗");
     // 判据（§15.4 ✓）：C1 应【不劣于】Legacy（显著更优属期望，但此处先记录差异 ✓）
     assert!(
