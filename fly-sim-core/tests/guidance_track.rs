@@ -82,6 +82,8 @@ struct TrackStat {
     pub max_thrust_sum: f64,
     /// 出现"任一电机指令贴边（≥0.98 或 ≤0.02）"的步数占比
     pub sat_ratio: f64,
+    /// **偏航误差**峰值（设定偏航 vs 真值偏航，度；已归一到 ±180）
+    pub yaw_err_max_deg: f64,
     /// 估计误差（估计 vs 真值）：位置 max / 姿态 max（度）
     pub est_pos_max: f64,
     pub est_att_max_deg: f64,
@@ -211,6 +213,7 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
     let (mut ssmax, mut sssum, mut ssn) = (0.0f64, 0.0f64, 0u64);
     let mut axis_max = [0.0f64; 3];
     let (mut max_thrust_sum, mut sat_n, mut sat_tot) = (0.0f64, 0u64, 0u64);
+    let mut yaw_err_max = 0.0f64;
     let mut diverged = false;
     while !g.done() && n < 200_000 {
         let sp = g.step();
@@ -225,6 +228,16 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
                 sat_n += 1;
             }
             sat_tot += 1;
+        }
+        // 偏航误差（设定 vs 真值，归一到 ±180）
+        {
+            let q = &truth.att;
+            let yaw_t = (2.0 * (q.w as f64 * q.z as f64 + q.x as f64 * q.y as f64))
+                .atan2(1.0 - 2.0 * (q.y as f64 * q.y as f64 + q.z as f64 * q.z as f64));
+            let mut d = sp.yaw.0 as f64 - yaw_t;
+            while d > std::f64::consts::PI { d -= 2.0 * std::f64::consts::PI; }
+            while d < -std::f64::consts::PI { d += 2.0 * std::f64::consts::PI; }
+            yaw_err_max = yaw_err_max.max(d.abs().to_degrees());
         }
         // 跟踪误差：真值位置 vs 期望位置
         let d = ((truth.pos[0].0 - sp.pos[0].0).powi(2)
@@ -264,6 +277,7 @@ fn run_track_all<S: TrajectorySource>(src: S, wind: Option<WindField>, ki_xy: f3
         err_axis_ss: axis_max,
         max_thrust_sum,
         sat_ratio: if sat_tot > 0 { sat_n as f64 / sat_tot as f64 } else { 0.0 },
+        yaw_err_max_deg: yaw_err_max,
         est_pos_max: epmax,
         est_att_max_deg: eamax,
         diverged,
@@ -766,14 +780,91 @@ fn error_axis_decomposition() {
     ];
     for (name, st) in &cases {
         println!(
-            "  {name:14} 稳态 {:7.3}m | 北 {:7.3} 东 {:7.3} 下 {:7.3} | 推力峰 {:.3}/4.0 饱和占比 {:5.1}%",
+            "  {name:14} 稳态 {:7.3}m | 北 {:7.3} 东 {:7.3} 下 {:7.3} | 饱和 {:5.1}% | 偏航误差峰 {:6.1}deg",
             st.err_max_ss,
             st.err_axis_ss[0],
             st.err_axis_ss[1],
             st.err_axis_ss[2],
-            st.max_thrust_sum,
-            st.sat_ratio * 100.0
+            st.sat_ratio * 100.0,
+            st.yaw_err_max_deg
         );
     }
     println!("（判读：直线若主要是【北】⇒ 沿轨滞后；若主要是【下】⇒ 定高问题）");
+}
+
+// ---------------------------------------------------------------- 角速度前馈自检（零件级）
+
+/// **参考机体角速度前馈的自检**（`ω_ff`）：契约**独立于实现**，用**积分物理**表述。
+///
+/// # 契约（物理，不依赖任何代数推导）
+/// 期望姿态绕**世界 Z** 以 `ψ̇` 旋转（纯偏航变化）时，机体的对应角速度 `ω_ff` 应满足：
+/// **把机体按 `ω_ff·dt` 绕体轴积分 `dt` 后，得到的姿态应等于"同一姿态但偏航 +ψ̇·dt"**。
+/// 这是"物理上发生了什么"的直接陈述 ✓ —— 不是"代码里算了什么" ✗。
+///
+/// # 为何必须这样写（本会话教训）
+/// 姿态构造那次，自检与实现"自洽地一起错"了一轮 ✗（契约里也用了错的比力符号）。
+/// 凡是"用同一个公式两侧验证"的契约都拦不住系统性错误 ✗；**积分/物理契约可以** ✓。
+#[test]
+fn yaw_rate_feedforward_selfcheck() {
+    use flyctrl_core::units::Radian;
+    use flyctrl_core::vehicle::{rotate_vec_by_quat, rotate_vec_by_quat_inverse, Quaternion};
+    let approx_ang = |a: &Quaternion, b: &Quaternion| {
+        let d = (a.w as f64 * b.w as f64 + a.x as f64 * b.x as f64
+            + a.y as f64 * b.y as f64 + a.z as f64 * b.z as f64)
+            .abs()
+            .clamp(0.0, 1.0);
+        2.0 * d.acos() * 180.0 / std::f64::consts::PI
+    };
+    // 若干"已知姿态 + 已知偏航速率"组合（含倾斜 —— 倾斜下世界 Z 在机体系有分量 ✓）
+    for &(roll, pitch, yaw, yaw_rate) in &[
+        (0.0f32, 0.0f32, 0.0f32, 1.0f32),
+        (0.0, 0.0, 1.2, 1.0),
+        (0.0, 30.0, 0.0, 1.0),   // 30° 俯仰：世界 Z 在机体系有 -X 分量
+        (20.0, -15.0, 0.5, -0.8),
+    ] {
+        let q0 = Quaternion::from_euler(
+            Radian(roll.to_radians()),
+            Radian(pitch.to_radians()),
+            Radian(yaw.to_radians()),
+        );
+        // **被测**：世界系 (0,0,ψ̇) 旋到机体系
+        let w_ff = rotate_vec_by_quat_inverse(q0, [0.0, 0.0, yaw_rate]);
+        // 契约：按 ω_ff 绕**体轴**积分 dt 后，应等价于"同姿态、偏航 +ψ̇·dt"
+        let dt = 0.01f32;
+        let ang = (w_ff[0] * w_ff[0] + w_ff[1] * w_ff[1] + w_ff[2] * w_ff[2]).sqrt();
+        // 绕体轴旋转：本仓 A*B = 先 A 后 B，故 q0 ⊗ dq 表示"先在机体系转 dq"？
+        // —— 不假设！两种都试，取物理上应成立者（用**积分结果**判定，而非用公式）
+        let dq = Quaternion::from_axis_angle(
+            [w_ff[0] / ang.max(1e-9), w_ff[1] / ang.max(1e-9), w_ff[2] / ang.max(1e-9)],
+            Radian(ang * dt),
+        );
+        let q_a = q0 * dq;
+        let q_b = dq * q0;
+        let q_expect = Quaternion::from_euler(
+            Radian(roll.to_radians()),
+            Radian(pitch.to_radians()),
+            Radian(yaw.to_radians() + yaw_rate * dt),
+        );
+        let ea = approx_ang(&q_a, &q_expect);
+        let eb = approx_ang(&q_b, &q_expect);
+        println!(
+            "  roll={roll:>5.1} pitch={pitch:>5.1} yaw={yaw:>5.1} psidot={yaw_rate:>5.1} | omega_ff=({:.3},{:.3},{:.3}) | err q0*dq={:.3}deg dq*q0={:.3}deg",
+            w_ff[0], w_ff[1], w_ff[2], ea, eb
+        );
+        assert!(
+            ea.min(eb) < 0.5,
+            "ω_ff 自检失败：无论乘法序如何都得不到'纯偏航 +ψ̇·dt'（最小误差 {:.3}°）—— \
+             说明 ω_ff 的轴/符号与机体轴约定不一致",
+            ea.min(eb)
+        );
+    }
+    // 附：绕体轴旋转的正确乘法序（记录用）
+    let q0 = Quaternion::from_euler(Radian(0.0), Radian(0.3), Radian(0.0));
+    let dq = Quaternion::from_axis_angle([1.0, 0.0, 0.0], Radian(0.1));
+    let q_exp = Quaternion::from_euler(Radian(0.1), Radian(0.3), Radian(0.0));
+    println!(
+        "  乘法序对照（绕体 +X 转 0.1）：q0*dq 误差 {:.3}° / dq*q0 误差 {:.3}°",
+        approx_ang(&(q0 * dq), &q_exp),
+        approx_ang(&(dq * q0), &q_exp)
+    );
 }
