@@ -4199,3 +4199,50 @@ fn eskf_mfield_equivalent_gyro_bias() {
     select_est_mode(EstMode::Legacy);
     println!("  ✓ 隔离实验完成（模式已还原 ✓）");
 }
+
+/// ★★★**与 M 场逐点对比**（2026-09-23，§5.49 ✓，用户建议 ✓）：
+/// 同一个 ESKF、同一个悬停场景（无噪声 ✓）、按【估计器步数】在 10/300/800/1500 打印
+/// `|accel| / accel_z / q_w / bg / gps_z` ✓ ⇒ 与固件快照逐点对照 ⇒ 看出【哪里开始不同】✓
+#[test]
+fn hfield_side_by_side_with_mcu_snapshot() {
+    use flyctrl_core::estimator::eskf::{align_static, Eskf};
+    let _g = lock();
+    let dt = 0.004f32;
+    let mut cfg = low_noise();
+    cfg.gyro_bias = [0.0; 3];
+    cfg.accel_bias = [0.0; 3];
+    let m = Maneuver::AttitudeSine { axis: 0, amp_deg: 0.0, freq_hz: 0.1, duration_s: 8.0 };
+    let mut flt: Option<Eskf> = None;
+    let mut n: u32 = 0;
+    println!("\n[H 场对照] 步: |accel| · accel_z · q_w · bg · gps_z");
+    let _ = run_observed(&m, dt, cfg, 0.0, None, |_t, tr, _est| {
+        let (acc, gyro, gps, baro, _mag) =
+            unsafe { (SENSOR_SLOT, SENSOR_SLOT, GPS_SLOT, BARO_SLOT, MAG_SLOT) };
+        let f = flt.get_or_insert_with(|| {
+            let (q0, bg) = align_static([acc[0], acc[1], acc[2]], [gyro[3], gyro[4], gyro[5]]);
+            let mut f = Eskf::new(q0, [gps[3], gps[4], gps[5]], [gps[0], gps[1], gps[2]], 5.0);
+            f.st.bg = bg;
+            f
+        });
+        f.predict(
+            [gyro[3] * dt, gyro[4] * dt, gyro[5] * dt],
+            [acc[0] * dt, acc[1] * dt, acc[2] * dt],
+            dt,
+            [0.0, 0.0, 9.81],
+        );
+        let _ = f.update_baro(baro);
+        let _ = f.update_gps_vel([gps[3], gps[4], gps[5]]);
+        let _ = f.update_gps_pos([gps[0], gps[1], gps[2]]);
+        let _ = f.update_gravity([acc[0], acc[1], acc[2]], [0.0, 0.0, 9.81]);
+        let _ = tr;
+        n += 1;
+        if matches!(n, 10 | 300 | 800 | 1500) {
+            let a = [acc[0], acc[1], acc[2]];
+            let amag = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+            println!(
+                "  步{n}: |accel| = {amag:.4} · accel_z = {:.4} · q_w = {:.5} · bg = [{:.5},{:.5},{:.5}] · gps_z = {:.2}",
+                a[2], f.st.q.w, f.st.bg[0], f.st.bg[1], f.st.bg[2], gps[2]
+            );
+        }
+    });
+}
